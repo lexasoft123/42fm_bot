@@ -1,0 +1,15 @@
+config/settings.yml
+rubybot/tmp
+.ruby-gemset
+.ruby-version
+.bundle
+bot.stdout
+runbot.sh
+secrets.yml
+radio.yml
+*~
+*.swp
+*.swo
+*.db
+*.log
+rubybot/pids
