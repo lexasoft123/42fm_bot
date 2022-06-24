@@ -1,0 +1,10 @@
+win:
+  - "@%{username} выиграл!"
+lose:
+  - "@%{username} проебал!"
+  - "Жзяцля победил!"
+  - "@%{username} лузер!"
+draw:
+  - "ничья!"
+play:
+  - "@%{username} бросает кости: %{user_dice_one} и %{user_dice_two}\nЖзяцля бросает кости: %{bot_dice_one} и %{bot_dice_two}"
