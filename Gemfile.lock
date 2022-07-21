@@ -88,9 +88,9 @@ GEM
     telegram-bot-ruby (0.6.0.2)
       faraday
       virtus
-    thread_safe (0.3.5)
+    thread_safe (0.3.6)
     translit (0.1.5)
-    tzinfo (1.2.2)
+    tzinfo (1.2.10)
       thread_safe (~> 0.1)
     unf (0.1.4)
       unf_ext
