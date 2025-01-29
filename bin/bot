@@ -1,0 +1,16 @@
+#!/usr/bin/env ruby
+
+require 'bundler/setup'
+require 'daemons'
+
+DAEMON_OPTS = {
+  :app_name => '42fm_bot',
+  :dir_mode => :script,
+  :dir => '../pids',
+  :backtrace => true,
+  :monitor => true,
+  :monitor_interval => 1,
+  :log_output => true
+}
+
+Daemons.run File.join(File.dirname(__FILE__), "../lib/bot.rb"), DAEMON_OPTS
