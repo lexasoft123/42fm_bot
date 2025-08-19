@@ -20,18 +20,18 @@ class GptMaster
     def call
         body = {
             model: @model,
-            messages: [{ role: 'user', content: @message }],
-	    options: [{ num_ctx: 8192}]
+            messages: [{ role: 'user', content: @message }]
+#	    options: [{ num_ctx: 8192}]
         }
         @logger.debug("Sending request to GPT with body: #{body.to_json}")
         response = HTTParty.post(@api_url,
                 body: body.to_json,
                 headers: @options[:headers],
                 timeout: 200,
-                http_proxyaddr: Settings.chat_gpt['http_proxyaddr'],
-                http_proxyport: Settings.chat_gpt['http_proxyport'],
-                http_proxyuser: Settings.chat_gpt['http_proxyuser'],
-                http_proxypass: Settings.chat_gpt['http_proxypass']
+#                http_proxyaddr: Settings.chat_gpt['http_proxyaddr'],
+#                http_proxyport: Settings.chat_gpt['http_proxyport'],
+#                http_proxyuser: Settings.chat_gpt['http_proxyuser'],
+#                http_proxypass: Settings.chat_gpt['http_proxypass']
             )
 
         if response.code == 200
