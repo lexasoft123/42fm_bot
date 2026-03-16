@@ -1,3 +1,5 @@
+require 'yaml'
+
 module Settings
   extend self
 
@@ -11,12 +13,6 @@ module Settings
     missing = REQUIRED_KEYS - data.keys
     raise "Missing required settings keys: #{missing.join(', ')}" unless missing.empty?
     @_settings = OpenStruct.new(data)
-  end
-
-  def deep_merge!(target, data)
-    merger = proc{|key, v1, v2|
-      Hash === v1 && Hash === v2 ? v1.merge(v2, &merger) : v2 }
-    target.merge! data, &merger
   end
 
   def method_missing(name, *args, &block)
