@@ -23,7 +23,6 @@ module Commands
     HoroscopeSign,
     HoroscopeGeneral,
     News,
-    Markov,
     Translate,
     Dice,
     ReplyYou,
