@@ -8,8 +8,7 @@ DAEMON_OPTS = {
   :dir_mode => :script,
   :dir => '../pids',
   :backtrace => true,
-  :monitor => true,
-  :monitor_interval => 1,
+  :monitor => false,
   :log_output => true
 }
 
