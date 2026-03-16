@@ -21,6 +21,13 @@ gem 'aws-sdk-polly'
 gem 'google_search_results', '~> 0.0.1'
 gem 'httparty', '~> 0.18.1'
 gem 'rss'
+gem 'mutex_m'
+gem 'ostruct'
+gem 'base64'
+gem 'benchmark'
+gem 'logger'
+gem 'csv'
+gem 'observer'
 
 group :development do
   gem 'irb', require: false

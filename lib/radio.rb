@@ -7,14 +7,19 @@ require 'yaml'
 CONFIG = YAML.load(File.read('config/radio.yml'))
 
 class Radio
-  attr_accessor :sock
-
   def initialize
+  end
+
+  def connect
     @sock = TCPSocket.open("localhost", 1234)
   end
 
+  def sock
+    @sock ||= connect
+  end
+
   def send cmd, raw: false
-    @sock.puts cmd
+    sock.puts cmd
     res = @sock.gets "END"
     res.force_encoding('UTF-8')
     res = res.gsub(/[\r\n]+/, "").gsub("END", "").gsub(/\\"/, '"') if not raw
