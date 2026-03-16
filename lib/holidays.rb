@@ -1,14 +1,16 @@
 require 'nokogiri'
-require './lib/app_configurator'
 
 class Holidays
   URL = 'https://kakoysegodnyaprazdnik.ru/'
 
   @last_update = Time.at(0).to_date
   @holidays = {}
-  @logger = AppConfigurator::LOGGER
 
   class << self
+    def logger
+      LOGGER
+    end
+
     def schedule
       Thread.new do
         while true do

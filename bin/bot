@@ -8,9 +8,7 @@ DAEMON_OPTS = {
   :dir_mode => :script,
   :dir => '../pids',
   :backtrace => true,
-  :monitor => true,
-  :monitor_interval => 1,
-  :log_output => true
+  :monitor => false,
 }
 
 Daemons.run File.join(File.dirname(__FILE__), "../lib/bot.rb"), DAEMON_OPTS

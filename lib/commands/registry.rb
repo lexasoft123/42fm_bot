@@ -1,0 +1,33 @@
+module Commands
+  # Order matters — first match wins
+  REGISTRY = [
+    TtsVoice,
+    BoberVoice,
+    OrderBlock,
+    OrderRequest,
+    RadioSearch,
+    RadioTrack,
+    Stats,
+    RadioQueue,
+    Weather,
+    Listeners,
+    RemoveTrack,
+    Remaining,
+    History,
+    RadioTop,
+    Meta,
+    Help,
+    GptQuestion,
+    GptChat,
+    HoroscopeSign,
+    HoroscopeGeneral,
+    News,
+    Translate,
+    Dice,
+    ReplyYou,
+    PhraseTop,
+    GifSearch,
+    GoogleSearch,
+    FallbackReply,
+  ].freeze
+end

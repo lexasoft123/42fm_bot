@@ -1,26 +1,14 @@
 require 'active_record'
-require 'logger'
+require 'yaml'
 
 class DatabaseConnector
   class << self
-    def establish_connection
-      ActiveRecord::Base.logger = Logger.new(active_record_logger_path)
+    def establish_connection(logger: nil)
+      ActiveRecord::Base.logger = logger
 
-      configuration = YAML::load(IO.read(database_config_path))
-
+      configuration = YAML.load(IO.read('config/database.yml'))
       ActiveRecord::Base.establish_connection(configuration)
-      
       ActiveRecord::Base.default_timezone = :local
-    end
-
-    private
-
-    def active_record_logger_path
-      'debug.log'
-    end
-
-    def database_config_path
-      'config/database.yml'
     end
   end
 end
