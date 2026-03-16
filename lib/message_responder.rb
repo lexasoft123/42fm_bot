@@ -10,7 +10,7 @@ require './lib/translator'
 require './lib/dice'
 require './lib/horoscope'
 require './lib/markov'
-require './lib/giphy_master'
+#require './lib/giphy_master'
 require './lib/gpt_master'
 require './lib/polly'
 
@@ -269,10 +269,10 @@ class MessageResponder
       res += "\nВсего: #{count}"
 
     when /^(бот|жзяцля|тугосеря|уважаемый\sбот)\sгиф\s+(.*)$/
-      gif = GiphyMaster.search $2
-      LOGGER.debug "found gif: #{gif}"
-      res = "Нихера не нашол." if !gif
-      MessageSender.new(bot: bot, chat: message.chat, text: gif).send_image
+      #gif = GiphyMaster.search $2
+      #LOGGER.debug "found gif: #{gif}"
+      #res = "Нихера не нашол." if !gif
+      #MessageSender.new(bot: bot, chat: message.chat, text: gif).send_image
 
     when /^(бот|жзяцля|тугосеря|уважаемый\sбот)/i
 
