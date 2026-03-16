@@ -6,109 +6,150 @@ This document is the entry point for AI-assisted development on this project. Re
 
 ## Project Snapshot
 
-- **Language:** Ruby 3.0
+- **Language:** Ruby 4.0
 - **Framework:** None (plain Ruby + ActiveRecord)
-- **DB:** SQLite3 at `db/bot.db` via ActiveRecord 6.0
-- **Key entry point:** `lib/bot.rb` → `lib/message_responder.rb`
+- **DB:** SQLite3 at `db/bot.db` via ActiveRecord 6.1
+- **Key entry point:** `lib/bot.rb` → `lib/message_responder.rb` → `lib/commands/registry.rb`
 - **Config:** `config/settings.yml` (gitignored — never committed)
 - **Docs:** `docs/architecture.md` — full architecture reference
+
+---
+
+## Keeping Docs Up to Date
+
+**After every significant change, update `CLAUDE.md`, `docs/architecture.md`, and this file** to reflect:
+- New/removed/renamed commands, services, or files
+- Changes to dispatch logic, command structure, or response patterns
+- DB schema changes
+- New settings groups or required keys
+- New external service integrations
+
+This prevents drift where docs describe the old architecture.
 
 ---
 
 ## Before You Start
 
 1. Read `docs/architecture.md` — it explains every class, service, and command.
-2. All bot commands are routed through `lib/message_responder.rb` via regex matching in `respond`. This is where most feature additions happen.
-3. Services are decoupled single-class files in `lib/`. Adding a feature = adding a service file + wiring it in `message_responder.rb`.
+2. Commands are in `lib/commands/` — each is a class with `match?` / `execute`. Wired via `lib/commands/registry.rb`.
+3. Services are single-class files in `lib/`. Adding a feature = new service file + require in `config/boot.rb` (or `message_responder.rb`) + new command class.
 4. Secrets are in `config/settings.yml` (not in git). Access them via `Settings.<group>['key']`.
 
 ---
 
 ## How to Add a New Command
 
-1. **Create a service class** in `lib/my_feature.rb`:
+1. **Create the command class** in `lib/commands/my_command.rb`:
    ```ruby
-   class MyFeature
-     def initialize(message)
-       @message = message
-     end
+   module Commands
+     class MyCommand < Base
+       PATTERN = /^бот мояфича (.+)/i
 
-     def call
-       # return a string or send directly
+       def match?
+         cmd =~ PATTERN
+       end
+
+       def execute
+         text = cmd.match(PATTERN)[1]
+         CommandResult.text("result: #{text}")
+       end
      end
    end
    ```
 
-2. **Require it** in `config/boot.rb`:
+2. **Require it** in `lib/message_responder.rb`:
    ```ruby
-   require_relative '../lib/my_feature'
+   require './lib/commands/my_command'
    ```
 
-3. **Add a regex route** in `lib/message_responder.rb` inside `respond`:
+3. **Add it to the registry** in `lib/commands/registry.rb` at the correct position (order = priority):
    ```ruby
-   when /бот мояфича (.+)/i
-     @message_sender.send_message(MyFeature.new(@message).call)
+   REGISTRY = [
+     ...,
+     MyCommand,
+     FallbackReply,   # always last
+   ].freeze
    ```
 
 4. **Add config** to `config/settings.yml` if the feature needs API keys or parameters.
 
-5. **Update `!помощь` output** in `message_responder.rb` so users can discover the command.
+5. **Update `lib/commands/help.rb`** so users can discover the command.
+
+6. **Update docs** — `CLAUDE.md` command table, `docs/architecture.md` command reference.
 
 ---
 
 ## Key Patterns
 
-### Sending a reply
+### Building a reply
 ```ruby
-@message_sender.send_message("text")
-@message_sender.send_voice(file_path)
-@message_sender.send_photo(url)
+CommandResult.text("message")
+CommandResult.sticker(STICKER_ID)
+CommandResult.image("https://...")
+CommandResult.voice(file_or_url)
+CommandResult.none   # handled silently, no reply sent
 ```
 
-### Getting message text
+### Accessing context inside a command
 ```ruby
-@message.text          # full text
-@message.from.id       # sender Telegram ID
-@message.chat.id       # chat ID
+# All ctx fields are delegated in Commands::Base:
+cmd        # downcased message text (String or nil)
+user       # User ActiveRecord instance
+chat_id    # Telegram chat ID
+radio      # Radio instance (lazy TCP)
+message    # raw Telegram::Bot::Types::Message
+bot        # Telegram bot client
+reply_master  # ReplyMaster instance
 ```
 
-### Looking up the current user
+### Calling GPT with chat context (for chat commands)
 ```ruby
-user = User.find_by(uid: @message.from.id)
+# Uses settings prompt + recent message history
+reply = GptMaster.chat(text, context: get_chat_context)
+save_bot_reply(reply)   # persists bot reply to messages table
+CommandResult.text("@#{user.name} #{reply}")
+```
+Both `get_chat_context` and `save_bot_reply` come from `include GptHelpers`.
+
+### Calling GPT for a one-off task (no chat context)
+```ruby
+PROMPT = 'Do something with: {REQUEST}'
+CommandResult.text(GptMaster.ask(text, prompt: PROMPT))
+```
+
+### Text-to-speech
+```ruby
+url = TtsService.speak(text, voice: 'Maxim', speed: nil, minus: false, track_id: nil)
+CommandResult.voice(url)
+```
+
+### Calling the radio server
+```ruby
+radio.current_track
+radio.search(query)
+radio.request(track_id, user)
+```
+TCP connects lazily on first call — no need to guard against startup failures.
+
+### Looking up / checking the current user
+```ruby
 user.role              # 'new', 'member', 'admin'
+user.uid               # Telegram ID
+user.last_order        # Time of last track request
 ```
 
 ### Accessing settings
 ```ruby
 Settings.chat_gpt['api_key']
 Settings.auth['chat_ids']
-```
-
-### Calling the radio server
-```ruby
-radio = Radio.new
-radio.current_track
-radio.search(query)
-radio.request(track_id, user)
-```
-
-### Calling GPT
-```ruby
-GptMaster.new(@message).respond(text)
-GptMaster.new(@message, model: :gpt4).respond(text)
-```
-
-### Text-to-speech
-```ruby
-Polly.new.synthesize(text, voice: 'Maxim')         # returns file path
-Polly.new.synthesize_with_track(text, track_num)   # karaoke mode
+Settings.proxy['enabled']
 ```
 
 ---
 
 ## Adding New Settings
 
-Add to `config/settings.yml`:
+Add a top-level group to `config/settings.yml`:
 ```yaml
 my_feature:
   api_key: xxx
@@ -120,18 +161,15 @@ Access in code:
 Settings.my_feature['api_key']
 ```
 
-No code changes needed in `settings.rb` — `method_missing` handles it.
+`method_missing` in `Settings` handles it automatically. If the group is **required for the app to boot**, also add the key to `REQUIRED_KEYS` in `lib/settings.rb`.
 
 ---
 
 ## Database Changes
 
-Create a migration:
-```bash
-# create db/migrate/YYYYMMDDHHMMSS_add_something.rb
-```
-
+Create a migration file (sequential number prefix):
 ```ruby
+# db/migrate/007_add_something.rb
 class AddSomething < ActiveRecord::Migration[6.0]
   def change
     add_column :users, :new_field, :string
@@ -144,17 +182,24 @@ Run with:
 bundle exec rake db:migrate
 ```
 
+Update the relevant model in `models/` and the schema table in `docs/architecture.md`.
+
 ---
 
 ## Common Gotchas
 
-- **Auth check:** The main loop in `lib/bot.rb` filters messages by `Settings.auth['chat_ids']`. Test messages from other chats are silently dropped.
-- **Message age:** Messages older than 30 seconds are skipped (bot restart catch-up protection).
-- **Rate limiting:** Track requests from `new` role users check `user.last_order` — leave that logic intact when modifying the request command.
-- **Voice messages:** Only sent to chats listed in `Settings.auth['audio_chat_ids']`.
-- **Google API keys:** `gogolmogol.rb` cycles through a pool of key pairs — add more pairs to settings if hitting rate limits.
-- **FFmpeg dependency:** `polly.rb` shells out to `ffmpeg` — must be installed in the runtime environment.
-- **TCP socket to radio:** `radio.rb` opens a new socket per request — no persistent connection is maintained.
+- **Auth check:** `lib/bot.rb` silently drops messages from chats not in `Settings.auth['chat_ids']`.
+- **Message age:** Messages older than 30 seconds are skipped (catch-up protection after restart).
+- **Rate limiting:** Track requests from `new` role users check `user.last_order` — keep that logic intact.
+- **Voice messages:** Only processed in chats listed in `Settings.auth['audio_chat_ids']`.
+- **Google API keys:** `gogolmogol.rb` cycles through a pool — add more pairs to settings if rate-limited.
+- **FFmpeg:** `polly.rb` shells out to `ffmpeg` — must be installed.
+- **Radio TCP:** Lazy connect — first use opens the socket. Restart bot if radio server restarts.
+- **Daemons `:monitor => false`:** The bot has its own `rescue/retry` loop. Never set `:monitor => true` — it spawns a second bot process causing duplicate responses.
+- **SOCKS proxy:** Applied globally in `AppConfigurator#setup_proxy` via `socksify`. Affects all `Net::HTTP` including Telegram polling and GPT calls.
+- **Bot replies in context:** GPT chat commands store bot replies in `messages` with `role: 'bot'`, `user_uid: nil`. `get_chat_context` includes them formatted as `"Жзяцля: ..."`.
+- **Command order:** `FallbackReply` must always be last in `REGISTRY` — it matches almost anything.
+- **GptChat pattern is broad:** It can match most text — keep more specific commands above it in REGISTRY.
 
 ---
 
@@ -162,12 +207,15 @@ bundle exec rake db:migrate
 
 | Task | File(s) |
 |------|---------|
-| Add/modify a bot command | `lib/message_responder.rb` |
+| Add/modify a bot command | `lib/commands/new_cmd.rb` + `message_responder.rb` (require) + `registry.rb` (position) |
 | Add a service/API integration | `lib/new_service.rb` + `config/boot.rb` |
 | Change reply/response text | `config/replies/*.yml` |
-| Change TTS behavior | `lib/polly.rb` |
-| Change GPT prompt/model | `config/settings.yml` + `lib/gpt_master.rb` |
-| Change radio commands | `lib/radio.rb` + `lib/message_responder.rb` |
-| Database schema change | `db/migrate/` + relevant model in `models/` |
-| Add new settings | `config/settings.yml` (access via `Settings.*`) |
+| Change TTS behavior | `lib/polly.rb` + `lib/tts_service.rb` |
+| Change GPT prompt/model | `config/settings.yml` (`chat_gpt` group) |
+| Change GPT API logic | `lib/gpt_master.rb` |
+| Change chat context window | `lib/commands/gpt_helpers.rb` + `context_messages_size` in settings |
+| Change radio commands | `lib/radio.rb` + relevant command in `lib/commands/` |
+| Database schema change | `db/migrate/NNN_*.rb` + model in `models/` |
+| Add new settings | `config/settings.yml` + optionally `REQUIRED_KEYS` in `lib/settings.rb` |
 | Sticker IDs | `config/initializers/telegram_stickers.rb` |
+| SOCKS proxy config | `config/settings.yml` (`proxy` group) |

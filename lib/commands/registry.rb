@@ -18,7 +18,6 @@ module Commands
     Meta,
     Help,
     GptQuestion,
-    GptChat4,
     GptChat,
     HoroscopeSign,
     HoroscopeGeneral,
