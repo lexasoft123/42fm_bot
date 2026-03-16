@@ -340,6 +340,8 @@ translator:
 logging:
   path: log/bot.log   # relative to project root
   level: debug        # debug | info | warn | error
+  max_size_mb: 100    # rotate when file exceeds this size
+  keep_files: 5       # number of rotated files to keep
 ```
 
 ---
@@ -356,7 +358,7 @@ All output is unified in a single log file configured via `settings.yml`:
 
 `AppConfigurator#setup_logging` runs first in `configure`, builds the logger from settings, and passes it to `DatabaseConnector`. The global `LOGGER` constant is assigned in `bot.rb` after `configure` returns.
 
-Log rotation: daily (Logger built-in). The `log/` directory is created automatically at startup.
+Log rotation: size-based — rotates at `max_size_mb`, keeps `keep_files` old files (e.g. `bot.log.0`, `bot.log.1`). The `log/` directory is created automatically at startup.
 
 ---
 

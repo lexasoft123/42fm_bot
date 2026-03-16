@@ -25,10 +25,12 @@ class AppConfigurator
 
   def setup_logging
     cfg   = Settings.logging
-    path  = cfg['path']
-    level = Logger.const_get(cfg['level'].upcase)
+    path       = cfg['path']
+    level      = Logger.const_get(cfg['level'].upcase)
+    max_size   = cfg['max_size_mb'] * 1024 * 1024
+    keep_files = cfg['keep_files']
     FileUtils.mkdir_p(File.dirname(path))
-    @logger       = Logger.new(path, 'daily')
+    @logger       = Logger.new(path, keep_files, max_size)
     @logger.level = level
   end
 
