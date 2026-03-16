@@ -145,6 +145,7 @@ GEM
     sk_google_custom_search_api (2.0.1)
       addressable
       httparty
+    socksify (1.8.1)
     sqlite3 (1.7.3)
       mini_portile2 (~> 2.8.0)
     stringio (3.2.0)
@@ -188,6 +189,7 @@ DEPENDENCIES
   rest-client
   rss
   sk_google_custom_search_api (~> 2.0.1)
+  socksify
   sqlite3 (~> 1.4)
   telegram-bot-ruby (~> 2)
   translit

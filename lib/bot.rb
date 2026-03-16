@@ -9,6 +9,16 @@ LOGGER = logger
 
 logger.debug 'Starting telegram bot'
 
+if Settings.proxy['enabled']
+  require 'socksify'
+  proxy = Settings.proxy
+  TCPSocket.socks_server = proxy['host']
+  TCPSocket.socks_port   = proxy['port']
+  TCPSocket.socks_username = proxy['user'] if proxy['user'] && !proxy['user'].empty?
+  TCPSocket.socks_password = proxy['password'] if proxy['password'] && !proxy['password'].empty?
+  logger.debug "SOCKS proxy enabled: #{proxy['host']}:#{proxy['port']}"
+end
+
 @radio = Radio.new
 
 begin
