@@ -337,7 +337,26 @@ aws:
   access_key: ...
 translator:
   # legacy key — kept in settings but Yandex is no longer used
+logging:
+  path: log/bot.log   # relative to project root
+  level: debug        # debug | info | warn | error
 ```
+
+---
+
+## Logging
+
+All output is unified in a single log file configured via `settings.yml`:
+
+| Source | Destination |
+|--------|-------------|
+| App logger (`LOGGER`) | `log/bot.log` |
+| Telegram client | `log/bot.log` |
+| ActiveRecord SQL | `log/bot.log` |
+
+`AppConfigurator#setup_logging` runs first in `configure`, builds the logger from settings, and passes it to `DatabaseConnector`. The global `LOGGER` constant is assigned in `bot.rb` after `configure` returns.
+
+Log rotation: daily (Logger built-in). The `log/` directory is created automatically at startup.
 
 ---
 
@@ -345,5 +364,6 @@ translator:
 
 - **Ruby:** 4.0
 - **Docker:** `Dockerfile` + `docker-compose.yml`
-- **Process management:** `daemons` gem — PID file in `../pids/`, logs to stdout. `:monitor => false` — the bot's own `rescue/retry` loop handles restarts.
+- **Process management:** `daemons` gem — PID file in `pids/42fm_bot.pid`. `:monitor => false` — the bot's own `rescue/retry` loop handles restarts.
+- **Starting/stopping:** always use `./bin/bot start|stop|restart|status`
 - **SOCKS proxy:** configured in `settings.yml`, applied globally in `AppConfigurator#setup_proxy` via `socksify` (patches `Net::HTTP`)

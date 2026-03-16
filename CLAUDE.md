@@ -4,15 +4,31 @@ Ruby Telegram bot for a private radio station community. No framework — plain 
 
 Full docs: `docs/architecture.md` | Agent guide: `docs/agents.md`
 
+## Running the Bot
+
+**Always use the daemon script — never run `ruby lib/bot.rb` directly.**
+
+```bash
+./bin/bot start    # start daemon
+./bin/bot stop     # stop daemon
+./bin/bot restart  # restart daemon
+./bin/bot status   # check if running
+```
+
+Logs: `log/bot.log` (app + SQL). PID file: `pids/42fm_bot.pid`.
+
+---
+
 ## Keeping Docs Up to Date
 
-**Always update `CLAUDE.md`, `docs/architecture.md`, and `docs/agents.md` when you:**
+**After every meaningful change — and before every commit — update `CLAUDE.md`, `docs/architecture.md`, and `docs/agents.md` when you:**
 - Add, remove, or rename a command, service, or file
 - Change how commands are dispatched or structured
 - Add or modify DB schema (migrations, models)
 - Change any settings structure or required keys
 - Add new external service integrations
 - Change any core pattern (how replies are built, how GPT is called, etc.)
+- Change how the bot is started, stopped, or logged
 
 ---
 

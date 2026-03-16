@@ -15,16 +15,34 @@ This document is the entry point for AI-assisted development on this project. Re
 
 ---
 
+## Running the Bot
+
+**Always use the daemon script. Never run `ruby lib/bot.rb` directly.**
+
+```bash
+./bin/bot start    # start as background daemon
+./bin/bot stop     # stop the daemon
+./bin/bot restart  # restart (use after code changes)
+./bin/bot status   # check if running
+```
+
+- **Logs:** `log/bot.log` — all app output, Telegram client, and SQL queries in one file
+- **PID:** `pids/42fm_bot.pid`
+- Running `ruby lib/bot.rb` directly bypasses the daemon and mixes with any already-running instance, causing duplicate responses.
+
+---
+
 ## Keeping Docs Up to Date
 
-**After every significant change, update `CLAUDE.md`, `docs/architecture.md`, and this file** to reflect:
+**Before every commit, update `CLAUDE.md`, `docs/architecture.md`, and this file** to reflect:
 - New/removed/renamed commands, services, or files
 - Changes to dispatch logic, command structure, or response patterns
 - DB schema changes
 - New settings groups or required keys
 - New external service integrations
+- Changes to startup, logging, or deployment
 
-This prevents drift where docs describe the old architecture.
+Outdated docs are worse than no docs — keep them in sync with the code.
 
 ---
 
