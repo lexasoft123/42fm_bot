@@ -4,8 +4,8 @@ config = AppConfigurator.new
 config.configure
 
 token = Settings.telegram['token']
-logger = AppConfigurator::LOGGER
-LOGGER = logger
+LOGGER = config.logger
+logger = LOGGER
 
 logger.debug 'Starting telegram bot'
 

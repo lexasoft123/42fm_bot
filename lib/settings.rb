@@ -3,7 +3,7 @@ require 'yaml'
 module Settings
   extend self
 
-  REQUIRED_KEYS = %w[telegram auth proxy chat_gpt voice_messages aws translator].freeze
+  REQUIRED_KEYS = %w[telegram auth proxy chat_gpt voice_messages aws translator logging].freeze
 
   @_settings = {}
   attr_reader :_settings
