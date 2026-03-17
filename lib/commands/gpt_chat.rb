@@ -2,7 +2,7 @@ module Commands
   class GptChat < Base
     include GptHelpers
 
-    PATTERN = /^(бот[,]?\s+)?([.]|балаболь|жпт)?\s+(?<text>.*)/im
+    PATTERN = /^(?:бот[,]?\s+|[.]\s+|(?:балаболь|жпт)\s+)(?<text>.+)/im
 
     def match?
       cmd =~ PATTERN

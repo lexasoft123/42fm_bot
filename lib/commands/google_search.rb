@@ -1,6 +1,6 @@
 module Commands
   class GoogleSearch < Base
-    PATTERN = /^(бот|жзяцля|тугосеря|уважаемый\sбот)/i
+    PATTERN = /^(бот|жзяцля|тугосеря|уважаемый\sбот)[,]?\s+(найди|ищи|пошукай|гугли|искать|фото)\s+/i
 
     def match?
       cmd =~ PATTERN

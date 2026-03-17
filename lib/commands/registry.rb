@@ -17,6 +17,8 @@ module Commands
     RadioTop,
     Meta,
     Help,
+    GifSearch,
+    GoogleSearch,
     GptQuestion,
     GptChat,
     HoroscopeSign,
@@ -26,8 +28,6 @@ module Commands
     Dice,
     ReplyYou,
     PhraseTop,
-    GifSearch,
-    GoogleSearch,
     FallbackReply,
   ].freeze
 end
