@@ -13,7 +13,7 @@ class GptMaster
 
   def call
     body = build_body
-    LOGGER.debug("GptMaster request: model=#{@model} content_length=#{@messages.sum { |m| m[:content].size }}")
+    LOGGER.debug("GptMaster request: model=#{@model}\n#{@messages.map { |m| m[:content] }.join("\n")}")
 
     retries = 0
     loop do
@@ -24,7 +24,9 @@ class GptMaster
         timeout: 300,
       )
       if response.code == 200
-        return extract_content(response)
+        result = extract_content(response)
+        LOGGER.debug("GptMaster reply: #{result}")
+        return result
       elsif response.code == 529 && retries < MAX_RETRIES
         retries += 1
         delay = RETRY_DELAYS[retries - 1]
