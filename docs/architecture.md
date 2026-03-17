@@ -58,7 +58,9 @@ bin/bot
 │   ├── app_configurator.rb    # i18n, DB, SOCKS proxy init
 │   ├── database_connector.rb  # ActiveRecord setup
 │   ├── radio.rb               # Icecast TCP client (lazy connect)
-│   ├── gpt_master.rb          # OpenAI-compatible API client (.chat / .ask)
+│   ├── gpt_master.rb          # Anthropic/OpenAI-compatible API client (.chat / .ask)
+│   ├── embedding_service.rb   # OpenAI-compatible embeddings API
+│   ├── knowledge_base.rb      # Semantic RAG: add/search/extract_and_store facts
 │   ├── polly.rb               # AWS Polly TTS + FFmpeg → OGG Opus
 │   ├── tts_service.rb         # TTS facade: Polly + public URL builder
 │   ├── gogolmogol.rb          # Google Custom Search
@@ -72,7 +74,7 @@ bin/bot
 │   ├── commands/
 │   │   ├── base.rb            # Base class: ctx accessors, helpers
 │   │   ├── registry.rb        # Ordered array of command classes
-│   │   ├── gpt_helpers.rb     # get_chat_context, save_bot_reply
+│   │   ├── gpt_helpers.rb     # get_chat_context, save_bot_reply, get_relevant_knowledge
 │   │   ├── tts_voice.rb
 │   │   ├── bober_voice.rb
 │   │   ├── order_block.rb
@@ -100,16 +102,20 @@ bin/bot
 │   │   ├── phrase_top.rb
 │   │   ├── gif_search.rb
 │   │   ├── google_search.rb
+│   │   ├── knowledge_add.rb
+│   │   ├── knowledge_list.rb
+│   │   ├── knowledge_delete.rb
 │   │   └── fallback_reply.rb
 │   └── robot/
 │       └── robocoder.rb       # Base64+XOR encode/decode util
 ├── models/
 │   ├── user.rb       # ActiveRecord: users
 │   ├── message.rb    # ActiveRecord: messages (user optional for bot replies)
-│   └── phrase.rb     # ActiveRecord: phrases
+│   ├── phrase.rb     # ActiveRecord: phrases
+│   └── knowledge.rb  # ActiveRecord: knowledge facts (with embedding_vector serialization)
 ├── db/
 │   ├── bot.db        # SQLite3 database
-│   └── migrate/      # ActiveRecord migrations (006 files)
+│   └── migrate/      # ActiveRecord migrations (007 files)
 ├── lib/samples/      # MP3 backing tracks for karaoke TTS
 ├── Gemfile
 ├── Rakefile          # db:migrate tasks
@@ -182,6 +188,7 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 | `users` | `uid` (Telegram ID), `name`, `first_name`, `last_name`, `role` (`new`/`member`/`admin`), `last_order` |
 | `messages` | `user_uid` (nullable — nil for bot replies), `chat_id`, `body`, `role` (`user`/`bot`) |
 | `phrases` | `user_id`, `content` (unique) — user-submitted catchphrases |
+| `knowledge` | `topic`, `content`, `embedding` (JSON float array), `source` (`manual`/`auto`) |
 
 **Relationships:**
 - `User` has_many `messages` (FK: `user_uid` → `users.uid`)
@@ -198,16 +205,28 @@ Communicates with Icecast server over a raw TCP socket on `localhost:1234`. Conn
 ### GptMaster — `lib/gpt_master.rb`
 HTTP client (HTTParty) supporting both Anthropic and OpenAI-compatible APIs. Provider selected via `settings.yml` `chat_gpt.provider`. Two class-method interfaces:
 
-- `GptMaster.chat(text, context:, model:)` — uses the prompt template from `settings.yml` (`{REQUEST}` / `{CONTEXT}` substitution). Used by chat commands.
-- `GptMaster.ask(text, prompt:, model:)` — caller supplies prompt template (`{REQUEST}` only). Used for one-off tasks like translation. No context.
+- `GptMaster.chat(text, context:, knowledge:, model:)` — uses the prompt template from `settings.yml` (`{REQUEST}` / `{CONTEXT}` / `{KNOWLEDGE}` substitution). Used by chat commands.
+- `GptMaster.ask(text, prompt:, model:)` — caller supplies prompt template (`{REQUEST}` only). Used for one-off tasks like translation and knowledge extraction. No context.
 
 **Anthropic specifics:** uses `x-api-key` + `anthropic-version` headers, requires `max_tokens`, optionally enables extended thinking via `thinking_budget`. Extracts the `text` block from the `content` array (skipping thinking blocks).
 **OpenAI/DeepSeek specifics:** uses `Authorization: Bearer`, passes `thinking: {type: 'enabled'}` for reasoning models.
 
 ### GptHelpers — `lib/commands/gpt_helpers.rb`
 Mixed into GPT commands:
-- `get_chat_context` — fetches recent messages for current chat, including bot replies (formatted as `"Жзяцля: ..."`)
+- `get_chat_context` — fetches recent messages for current chat, including bot replies (formatted as `"Жзяцля: ..."`) and user full names
 - `save_bot_reply(text)` — stores bot reply in `messages` with `role: 'bot'`, `user_uid: nil`
+- `get_relevant_knowledge(query)` — embeds the query, retrieves top-K similar facts from `knowledge` table, formats as bullet list
+
+### EmbeddingService — `lib/embedding_service.rb`
+Calls an OpenAI-compatible embeddings API (`embeddings.api_url`) to produce float vectors for text. Returns `nil` on failure. Used by `KnowledgeBase`.
+
+### KnowledgeBase — `lib/knowledge_base.rb`
+Semantic RAG store:
+- `KnowledgeBase.add(topic:, content:, source:)` — embed + store a fact; deduplicates via cosine similarity threshold (0.92)
+- `KnowledgeBase.search(query, top_k:)` — embed query, return top-K facts by cosine similarity
+- `KnowledgeBase.extract_and_store(messages)` — uses `GptMaster.ask` with a structured prompt to extract 3–7 facts from recent chat messages, stores non-duplicate ones as `source: 'auto'`
+
+Auto-extraction is triggered by `MessageResponder#maybe_extract_knowledge` every `knowledge.extract_every` user messages per chat, runs in a background `Thread`.
 
 ### TtsService — `lib/tts_service.rb`
 Facade over Polly. `TtsService.speak(text, voice:, speed:, minus:, track_id:)` generates OGG and returns the public URL.
@@ -238,7 +257,8 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 |---------|----------|------|
 | Telegram Bot API | HTTPS long-polling | Bot token |
 | Icecast Radio Server | Raw TCP socket | None (localhost) |
-| OpenAI-compatible API | HTTPS/HTTParty | Bearer token |
+| Anthropic / OpenAI-compatible API | HTTPS/HTTParty | x-api-key / Bearer token |
+| OpenAI Embeddings API | HTTPS/HTTParty | Bearer token |
 | AWS Polly | AWS SDK | Access key + secret |
 | Google Custom Search | REST | API key + CX key |
 | OpenWeatherMap | REST | API key |
@@ -271,10 +291,12 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 ### AI / Text
 | Command | Description |
 |---------|-------------|
-| `бот, [question]` | GPT response (default model, with chat context) |
-| `жпт [text]` | GPT response (slang trigger) |
-| `балаболь [text]` | GPT response (alternative trigger) |
-| `бот почему/как/зачем... [text]` | GPT question matcher |
+| `бот <text>` | GPT response (default model, with chat context + knowledge) |
+| `жпт <text>` / `балаболь <text>` | GPT response (alternative triggers) |
+| `бот почему/как/зачем... <text>` | GPT question matcher |
+| `бот запомни <content>` | Add fact to knowledge base (admin only) |
+| `бот знания` | List all knowledge base entries with IDs |
+| `бот забудь <id>` | Delete a knowledge base entry (admin only) |
 
 ### Voice TTS
 | Command | Description |
@@ -302,7 +324,7 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 | `бот вещай [sign]` | Erotic horoscope |
 | `бот топ` | User phrase leaderboard |
 | `бот чо нового / новости` | Latest news |
-| `бот найди / ищи [фото] [query]` | Google image/GIF search |
+| `бот найди/ищи/пошукай [фото] [query]` | Google image/GIF search (explicit keyword required) |
 | `!помощь / !help` | Command list |
 
 ---
@@ -330,8 +352,15 @@ chat_gpt:
   default_model: ...
   max_tokens: 16000         # required for Anthropic; ignored for OpenAI
   thinking_budget: 10000    # optional: Anthropic extended thinking (must be < max_tokens)
-  context_messages_size: 10
-  prompt: "...{CONTEXT}...{REQUEST}..."
+  context_messages_size: 30
+  prompt: "...{KNOWLEDGE}...{CONTEXT}...{REQUEST}..."
+embeddings:
+  api_url: https://api.openai.com/v1/embeddings
+  api_key: ...
+  model: text-embedding-3-small
+knowledge:
+  top_k: 3            # facts to inject per GPT call
+  extract_every: 50   # auto-extract after every N user messages per chat
 weather:
   api_url: ...
   api_key: ...

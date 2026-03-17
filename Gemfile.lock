@@ -125,6 +125,7 @@ GEM
       stringio
     public_suffix (7.0.5)
     racc (1.8.1)
+    rake (13.3.1)
     rdoc (7.2.0)
       erb
       psych (>= 4.0.0)
@@ -182,6 +183,7 @@ DEPENDENCIES
   observer
   ostruct
   pry
+  rake
   rest-client
   rss
   sk_google_custom_search_api (~> 2.0.1)

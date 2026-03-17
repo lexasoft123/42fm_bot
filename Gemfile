@@ -27,6 +27,7 @@ gem 'benchmark'
 gem 'logger'
 gem 'csv'
 gem 'observer'
+gem 'rake'
 
 group :development do
   gem 'irb', require: false

@@ -72,7 +72,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 
 ## Services
 
-`Radio` (TCP socket, lazy connect), `GptMaster` (OpenAI-compatible, `.chat`/`.ask`), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
+`Radio` (TCP socket, lazy connect), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
 
 ## DB Tables
 
@@ -81,6 +81,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | `users` | `uid`, `name`, `first_name`, `last_name`, `role` (`new`/`member`/`admin`), `last_order` |
 | `messages` | `user_uid` (nullable), `chat_id`, `body`, `role` (`user`/`bot`) |
 | `phrases` | `user_id`, `content` |
+| `knowledge` | `topic`, `content`, `embedding` (JSON), `source` (`manual`/`auto`) |
 
 ## Gotchas
 
@@ -95,3 +96,6 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - SOCKS proxy (if enabled) patches `Net::HTTP` globally via `socksify` — applies to all outbound HTTP
 - GPT bot replies are stored in `messages` with `role: 'bot'`, `user_uid: nil`
 - `Settings` validates required keys on load — add new top-level groups to `REQUIRED_KEYS` in `lib/settings.rb`
+- Knowledge auto-extraction runs in a background Thread every `knowledge.extract_every` messages per chat
+- Embeddings deduplication threshold is 0.92 cosine similarity — near-duplicate facts are not stored
+- `бот найди/ищи/пошукай` → Google search; bare `бот <text>` → GPT chat

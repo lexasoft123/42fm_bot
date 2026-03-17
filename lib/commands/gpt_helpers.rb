@@ -23,5 +23,12 @@ module Commands
     def save_bot_reply(text)
       Message.create(role: 'bot', chat_id: chat_id, body: text)
     end
+
+    def get_relevant_knowledge(query)
+      top_k = Settings.knowledge['top_k']
+      facts = KnowledgeBase.search(query, top_k: top_k)
+      return '' if facts.empty?
+      facts.map { |k| "- [#{k.topic}] #{k.content}" }.join("\n")
+    end
   end
 end

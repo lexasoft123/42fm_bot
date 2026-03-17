@@ -26,10 +26,11 @@ class GptMaster
   end
 
   class << self
-    def chat(text, context: '', model: Settings.chat_gpt['default_model'])
+    def chat(text, context: '', knowledge: '', model: Settings.chat_gpt['default_model'])
       content = Settings.chat_gpt['prompt']
         .gsub('{REQUEST}', text)
         .gsub('{CONTEXT}', context)
+        .gsub('{KNOWLEDGE}', knowledge)
       new([{ role: 'user', content: content }], model: model).call
     end
 

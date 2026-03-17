@@ -10,7 +10,7 @@ module Commands
 
     def execute
       text  = cmd.match(PATTERN)[:text]
-      reply = GptMaster.chat(text, context: get_chat_context)
+      reply = GptMaster.chat(text, context: get_chat_context, knowledge: get_relevant_knowledge(text))
       save_bot_reply(reply)
       CommandResult.text("@#{user.name} #{reply}")
     end
