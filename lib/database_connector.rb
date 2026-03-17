@@ -4,7 +4,7 @@ require 'yaml'
 class DatabaseConnector
   class << self
     def establish_connection(logger: nil)
-      ActiveRecord::Base.logger = logger
+      ActiveRecord::Base.logger = nil
 
       configuration = YAML.load(IO.read('config/database.yml'))
       ActiveRecord::Base.establish_connection(configuration)
