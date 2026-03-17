@@ -10,7 +10,7 @@ class GptMaster
 
   def call
     body = build_body
-    LOGGER.debug("GptMaster request: model=#{@model} messages=#{@messages.inspect}")
+    LOGGER.debug("GptMaster request: model=#{@model} content_length=#{@messages.sum { |m| m[:content].size }}")
     response = HTTParty.post(
       @api_url,
       body:    body.to_json,
