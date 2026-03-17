@@ -196,10 +196,13 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 Communicates with Icecast server over a raw TCP socket on `localhost:1234`. Connection is **lazy** — socket opens on first use, not at startup. Sends text commands, parses responses. Key operations: get current track, search, request, manage queue, fetch stats.
 
 ### GptMaster — `lib/gpt_master.rb`
-HTTP client (HTTParty) for an OpenAI-compatible API. Two class-method interfaces:
+HTTP client (HTTParty) supporting both Anthropic and OpenAI-compatible APIs. Provider selected via `settings.yml` `chat_gpt.provider`. Two class-method interfaces:
 
-- `GptMaster.chat(text, context:, model:)` — uses the prompt template from `settings.yml` (`{REQUEST}` / `{CONTEXT}` substitution). Used by chat commands. Saves bot reply to DB context.
+- `GptMaster.chat(text, context:, model:)` — uses the prompt template from `settings.yml` (`{REQUEST}` / `{CONTEXT}` substitution). Used by chat commands.
 - `GptMaster.ask(text, prompt:, model:)` — caller supplies prompt template (`{REQUEST}` only). Used for one-off tasks like translation. No context.
+
+**Anthropic specifics:** uses `x-api-key` + `anthropic-version` headers, requires `max_tokens`, optionally enables extended thinking via `thinking_budget`. Extracts the `text` block from the `content` array (skipping thinking blocks).
+**OpenAI/DeepSeek specifics:** uses `Authorization: Bearer`, passes `thinking: {type: 'enabled'}` for reasoning models.
 
 ### GptHelpers — `lib/commands/gpt_helpers.rb`
 Mixed into GPT commands:
@@ -321,9 +324,12 @@ proxy:
   user: ...
   password: ...
 chat_gpt:
+  provider: anthropic       # 'anthropic' or 'openai' (default: openai)
   api_key: ...
-  api_url: ...
+  api_url: ...              # https://api.anthropic.com/v1/messages or OpenAI-compatible
   default_model: ...
+  max_tokens: 16000         # required for Anthropic; ignored for OpenAI
+  thinking_budget: 10000    # optional: Anthropic extended thinking (must be < max_tokens)
   context_messages_size: 10
   prompt: "...{CONTEXT}...{REQUEST}..."
 weather:
