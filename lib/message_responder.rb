@@ -124,6 +124,7 @@ class MessageResponder
   end
 
   def maybe_extract_knowledge
+    return unless Settings._settings.respond_to?(:knowledge) && Settings.knowledge
     extract_every = Settings.knowledge['extract_every']
     count = Message.where(chat_id: @chat_id, role: 'user').count
     return unless count % extract_every == 0

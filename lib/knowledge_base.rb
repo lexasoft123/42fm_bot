@@ -2,15 +2,16 @@ class KnowledgeBase
   SIMILARITY_THRESHOLD = 0.92
 
   EXTRACTION_PROMPT = <<~PROMPT.freeze
-    Analyze the following Telegram chat messages and extract 3-7 facts worth remembering.
-    Focus on: participant personalities, relationships, recurring topics, inside jokes, important events, user preferences.
-    Ignore trivial or one-off messages.
+    Ты — аналитик чата. Тебе насрать на приличия, политкорректность и прочую хуйню. Задача — вытащить из переписки 3-7 фактов, которые реально стоит запомнить.
+    Пиши на русском, своими словами, без цензуры. Можно и нужно использовать мат если он отражает суть.
+    Что искать: характеры участников, их приколы и закидоны, отношения между людьми, важные события, предпочтения, внутренние шутки, на что они ведутся.
+    Игнорируй мусор — приветствия, одноразовые реплики, воду.
 
-    Messages:
+    Сообщения:
     {MESSAGES}
 
-    Respond ONLY with a JSON array, no markdown, no explanation:
-    [{"topic": "short label", "content": "one sentence fact"}, ...]
+    Ответь ТОЛЬКО JSON-массивом, без markdown, без пояснений:
+    [{"topic": "короткий ярлык", "content": "факт одним предложением"}, ...]
   PROMPT
 
   class << self

@@ -10,7 +10,7 @@ module Commands
       facts = Knowledge.order(:created_at).all
       return CommandResult.text('База знаний пуста.') if facts.empty?
 
-      lines = facts.map { |k| "*[#{k.id}]* [#{k.source}] *#{k.topic}*: #{k.content}" }
+      lines = facts.map { |k| "*[#{k.id}]* [#{k.source}] #{k.content}" }
       CommandResult.text("*База знаний (#{facts.size}):*\n#{lines.join("\n")}")
     end
   end

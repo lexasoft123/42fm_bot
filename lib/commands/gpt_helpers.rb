@@ -25,6 +25,8 @@ module Commands
     end
 
     def get_relevant_knowledge(query)
+      return '' unless Settings._settings.respond_to?(:embeddings) && Settings.embeddings
+      return '' unless Settings._settings.respond_to?(:knowledge) && Settings.knowledge
       top_k = Settings.knowledge['top_k']
       facts = KnowledgeBase.search(query, top_k: top_k)
       return '' if facts.empty?
