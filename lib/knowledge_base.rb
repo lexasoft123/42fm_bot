@@ -15,26 +15,26 @@ class KnowledgeBase
   PROMPT
 
   class << self
-    def add(topic:, content:, source: 'manual')
+    def add(topic:, content:, chat_id:, source: 'manual')
       vec = EmbeddingService.embed(content)
-      k = Knowledge.new(topic: topic, content: content, source: source)
+      k = Knowledge.new(topic: topic, content: content, chat_id: chat_id, source: source)
       k.embedding_vector = vec if vec
       k.save!
       k
     end
 
-    def search(query, top_k: 3)
+    def search(query, chat_id:, top_k: 3)
       query_vec = EmbeddingService.embed(query)
       return [] unless query_vec
 
-      Knowledge.where.not(embedding: nil).map do |k|
+      Knowledge.where(chat_id: chat_id).where.not(embedding: nil).map do |k|
         [k, cosine_similarity(query_vec, k.embedding_vector)]
       end.sort_by { |_, score| -score }
         .first(top_k)
         .map { |k, _| k }
     end
 
-    def extract_and_store(messages)
+    def extract_and_store(messages, chat_id:)
       return if messages.empty?
 
       formatted = messages.map { |m| "@#{m.name}: #{m.body}" }.join("\n")
@@ -48,8 +48,8 @@ class KnowledgeBase
       stored = 0
       facts.each do |fact|
         next unless fact['topic'] && fact['content']
-        next if similar_exists?(fact['content'])
-        add(topic: fact['topic'], content: fact['content'], source: 'auto')
+        next if similar_exists?(fact['content'], chat_id: chat_id)
+        add(topic: fact['topic'], content: fact['content'], chat_id: chat_id, source: 'auto')
         stored += 1
       end
       LOGGER.debug "KnowledgeBase: extracted #{stored} new facts from #{messages.size} messages"
@@ -68,10 +68,10 @@ class KnowledgeBase
       dot / (norm_a * norm_b)
     end
 
-    def similar_exists?(content)
+    def similar_exists?(content, chat_id:)
       vec = EmbeddingService.embed(content)
       return false unless vec
-      Knowledge.where.not(embedding: nil).any? do |k|
+      Knowledge.where(chat_id: chat_id).where.not(embedding: nil).any? do |k|
         cosine_similarity(vec, k.embedding_vector) > SIMILARITY_THRESHOLD
       end
     end

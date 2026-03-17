@@ -137,7 +137,7 @@ class MessageResponder
         .order('messages.created_at DESC')
         .limit(extract_every)
         .reverse
-      KnowledgeBase.extract_and_store(recent)
+      KnowledgeBase.extract_and_store(recent, chat_id: chat_id)
     rescue => e
       LOGGER.error "maybe_extract_knowledge thread error: #{e.message}"
     end

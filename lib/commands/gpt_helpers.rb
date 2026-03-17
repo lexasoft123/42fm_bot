@@ -28,7 +28,7 @@ module Commands
       return '' unless Settings._settings.respond_to?(:embeddings) && Settings.embeddings
       return '' unless Settings._settings.respond_to?(:knowledge) && Settings.knowledge
       top_k = Settings.knowledge['top_k']
-      facts = KnowledgeBase.search(query, top_k: top_k)
+      facts = KnowledgeBase.search(query, chat_id: chat_id, top_k: top_k)
       return '' if facts.empty?
       facts.map { |k| "- [#{k.topic}] #{k.content}" }.join("\n")
     end

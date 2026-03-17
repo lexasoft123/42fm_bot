@@ -14,7 +14,7 @@ module Commands
       content = cmd.match(PATTERN)[:content].strip
       topic   = content.split(/\s+/).first(4).join(' ')
 
-      KnowledgeBase.add(topic: topic, content: content, source: 'manual')
+      KnowledgeBase.add(topic: topic, content: content, chat_id: chat_id, source: 'manual')
       CommandResult.text("Запомнил: _#{content}_")
     end
   end

@@ -12,7 +12,7 @@ module Commands
       end
 
       id = cmd.match(PATTERN)[:id].to_i
-      k  = Knowledge.find_by(id: id)
+      k  = Knowledge.find_by(id: id, chat_id: chat_id)
       return CommandResult.text("Факт ##{id} не найден.") unless k
 
       k.destroy

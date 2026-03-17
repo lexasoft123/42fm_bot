@@ -7,7 +7,7 @@ module Commands
     end
 
     def execute
-      facts = Knowledge.order(:created_at).all
+      facts = Knowledge.where(chat_id: chat_id).order(:created_at)
       return CommandResult.text('База знаний пуста.') if facts.empty?
 
       lines = facts.map { |k| "*[#{k.id}]* [#{k.source}] #{k.content}" }
