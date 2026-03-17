@@ -8,20 +8,32 @@ class GptMaster
     @messages = messages
   end
 
+  MAX_RETRIES = 3
+  RETRY_DELAYS = [5, 10, 20].freeze
+
   def call
     body = build_body
     LOGGER.debug("GptMaster request: model=#{@model} content_length=#{@messages.sum { |m| m[:content].size }}")
-    response = HTTParty.post(
-      @api_url,
-      body:    body.to_json,
-      headers: headers,
-      timeout: 300,
-    )
-    if response.code == 200
-      extract_content(response)
-    else
-      LOGGER.error "GptMaster bad response: #{response.inspect}"
-      'жпт не жпт'
+
+    retries = 0
+    loop do
+      response = HTTParty.post(
+        @api_url,
+        body:    body.to_json,
+        headers: headers,
+        timeout: 300,
+      )
+      if response.code == 200
+        return extract_content(response)
+      elsif response.code == 529 && retries < MAX_RETRIES
+        retries += 1
+        delay = RETRY_DELAYS[retries - 1]
+        LOGGER.warn "GptMaster overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
+        sleep delay
+      else
+        LOGGER.error "GptMaster bad response: #{response.code} #{response.parsed_response&.dig('error', 'message') || response.body}"
+        return 'жпт не жпт'
+      end
     end
   end
 
