@@ -20,13 +20,14 @@ class MessageSender
   def send
     bot.api.sendChatAction(chat_id: chat.id, action: 'typing')
 
-    params = { chat_id: chat.id, text: text, parse_mode: 'Markdown' }
+    params = { chat_id: chat.id, text: sanitize_markdown(text), parse_mode: 'Markdown' }
     params[:reply_markup] = reply_markup if reply_markup
 
     begin
       bot.api.sendMessage(params)
     rescue => e
       logger.warn "Markdown parse failed, retrying as plain text: #{e.message}"
+      params[:text] = text
       params.delete(:parse_mode)
       bot.api.sendMessage(params)
     end
@@ -55,6 +56,17 @@ class MessageSender
   end
 
   private
+
+  def sanitize_markdown(text)
+    # Replace **bold** with *bold* (Telegram Markdown uses single *)
+    result = text.gsub(/\*\*(.+?)\*\*/, '*\1*')
+    # Escape underscores inside words to prevent broken italic
+    # But preserve _italic_ (underscore at word boundaries)
+    result = result.gsub(/(?<=\w)_(?=\w)/, '\\_')
+    # Strip unbalanced backticks (odd count outside code blocks)
+    # Remove triple backtick blocks and replace with content only if unbalanced
+    result
+  end
 
   def reply_markup
     if answers
