@@ -115,6 +115,8 @@ class MessageResponder
     when :voice   then @bot.api.sendVoice(chat_id: @chat_id, voice: result.payload)
     when :none    then nil
     end
+  rescue => e
+    LOGGER.error "deliver failed (#{result.type}): #{e.message}"
   end
 
   def save_message
