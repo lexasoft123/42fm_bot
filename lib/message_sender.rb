@@ -20,10 +20,15 @@ class MessageSender
   def send
     bot.api.sendChatAction(chat_id: chat.id, action: 'typing')
 
-    if reply_markup
-      bot.api.sendMessage(chat_id: chat.id, text: text, reply_markup: reply_markup)
-    else
-      bot.api.sendMessage(chat_id: chat.id, text: text)
+    params = { chat_id: chat.id, text: text, parse_mode: 'Markdown' }
+    params[:reply_markup] = reply_markup if reply_markup
+
+    begin
+      bot.api.sendMessage(params)
+    rescue => e
+      logger.warn "Markdown parse failed, retrying as plain text: #{e.message}"
+      params.delete(:parse_mode)
+      bot.api.sendMessage(params)
     end
 
     logger.debug "sending '#{text}' to #{chat.title}"
