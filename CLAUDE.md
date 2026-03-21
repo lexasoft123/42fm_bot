@@ -81,7 +81,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | `users` | `uid`, `name`, `first_name`, `last_name`, `role` (`new`/`member`/`admin`), `last_order` |
 | `messages` | `user_uid` (nullable), `chat_id`, `body`, `role` (`user`/`bot`) |
 | `phrases` | `user_id`, `content` |
-| `knowledge` | `topic`, `content`, `embedding` (JSON), `source` (`manual`/`auto`) |
+| `knowledge` | `topic`, `content`, `embedding` (JSON), `source` (`manual`/`auto`), `chat_id` |
 
 ## Gotchas
 

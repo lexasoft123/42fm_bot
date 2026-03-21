@@ -115,7 +115,7 @@ bin/bot
 │   └── knowledge.rb  # ActiveRecord: knowledge facts (with embedding_vector serialization)
 ├── db/
 │   ├── bot.db        # SQLite3 database
-│   └── migrate/      # ActiveRecord migrations (007 files)
+│   └── migrate/      # ActiveRecord migrations (008 files)
 ├── lib/samples/      # MP3 backing tracks for karaoke TTS
 ├── Gemfile
 ├── Rakefile          # db:migrate tasks
@@ -188,7 +188,7 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 | `users` | `uid` (Telegram ID), `name`, `first_name`, `last_name`, `role` (`new`/`member`/`admin`), `last_order` |
 | `messages` | `user_uid` (nullable — nil for bot replies), `chat_id`, `body`, `role` (`user`/`bot`) |
 | `phrases` | `user_id`, `content` (unique) — user-submitted catchphrases |
-| `knowledge` | `topic`, `content`, `embedding` (JSON float array), `source` (`manual`/`auto`) |
+| `knowledge` | `topic`, `content`, `embedding` (JSON float array), `source` (`manual`/`auto`), `chat_id` (bigint, indexed) |
 
 **Relationships:**
 - `User` has_many `messages` (FK: `user_uid` → `users.uid`)

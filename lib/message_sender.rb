@@ -20,19 +20,11 @@ class MessageSender
   def send
     bot.api.sendChatAction(chat_id: chat.id, action: 'typing')
 
-    params = { chat_id: chat.id, text: sanitize_markdown(text), parse_mode: 'Markdown' }
-    params[:reply_markup] = reply_markup if reply_markup
-
-    begin
-      bot.api.sendMessage(params)
-    rescue => e
-      logger.warn "Markdown parse failed, retrying as plain text: #{e.message}"
-      params[:text] = text
-      params.delete(:parse_mode)
-      bot.api.sendMessage(params)
+    split_text(text).each do |chunk|
+      send_chunk(chunk)
     end
 
-    logger.debug "sending '#{text}' to #{chat.title}"
+    logger.debug "sending '#{text.slice(0, 80)}' to #{chat.title}"
   end
 
   def send_sticker
@@ -66,6 +58,40 @@ class MessageSender
     # Strip unbalanced backticks (odd count outside code blocks)
     # Remove triple backtick blocks and replace with content only if unbalanced
     result
+  end
+
+  MAX_MESSAGE_LENGTH = 4096
+
+  def send_chunk(chunk)
+    params = { chat_id: chat.id, text: sanitize_markdown(chunk), parse_mode: 'Markdown' }
+    params[:reply_markup] = reply_markup if reply_markup
+
+    begin
+      bot.api.sendMessage(params)
+    rescue => e
+      logger.warn "Markdown parse failed, retrying as plain text: #{e.message}"
+      params[:text] = chunk
+      params.delete(:parse_mode)
+      bot.api.sendMessage(params)
+    end
+  end
+
+  def split_text(text)
+    return [text] if text.length <= MAX_MESSAGE_LENGTH
+
+    chunks = []
+    lines = text.lines
+    current = +''
+
+    lines.each do |line|
+      if current.length + line.length > MAX_MESSAGE_LENGTH && !current.empty?
+        chunks << current
+        current = +''
+      end
+      current << line
+    end
+    chunks << current unless current.empty?
+    chunks
   end
 
   def reply_markup
