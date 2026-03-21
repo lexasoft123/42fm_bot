@@ -22,15 +22,15 @@ module Commands
     KnowledgeAdd,
     KnowledgeList,
     KnowledgeDelete,
-    GptQuestion,
-    GptChat,
+    Translate,
     HoroscopeSign,
     HoroscopeGeneral,
     News,
-    Translate,
     Dice,
     ReplyYou,
     PhraseTop,
+    GptQuestion,
+    GptChat,
     FallbackReply,
   ].freeze
 end
