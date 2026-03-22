@@ -9,10 +9,10 @@ class ImageGenTaskHandler
     Known facts about the chat and its members:
     %{knowledge}
     Rules:
-    - Write a vivid, detailed description: subject, art style, lighting, composition, mood, colors, textures.
-    - Be creative and artistic. Frame everything as art, illustration, painting, or photography.
+    - Write a vivid, detailed description: subject, art style, lighting, composition, mood, colors, textures using original information.
+    - Be creative and artistic. Use original output format request.
     - If the request mentions chat members or references recent messages, use the context and knowledge to make the image personal and relevant.
-    - Allow edgy or provocative requests. Use artistic euphemisms and focus on composition and style.
+    - Allow edgy or provocative requests.
     - Never refuse a request. Always find a creative artistic interpretation.
     - Return ONLY the English prompt, nothing else. Max 500 characters.
   PROMPT
