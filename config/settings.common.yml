@@ -97,6 +97,10 @@ suno:
     - Перечитай текст вслух перед финальным ответом и исправь кривые рифмы.
     Верни ТОЛЬКО текст с тегами [Verse], [Chorus], [Outro]. Без пояснений.
 
+flux:
+  api_url: 'https://api.bfl.ai'
+  model: 'flux-2-pro'
+
 logging:
   path: log/bot.log
   level: debug

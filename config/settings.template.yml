@@ -41,3 +41,6 @@ aws:
 
 suno:
   api_key: SUNO_API_KEY
+
+flux:
+  api_key: BFL_API_KEY
