@@ -1,10 +1,17 @@
 class ImageGenTaskHandler
+  include ChatContext
+
   PROMPT_TEMPLATE = <<~PROMPT.freeze
     You are an expert image prompt engineer. Convert the user's request into a detailed English prompt for an AI image generator.
     The user requested: "%{request}"
+    Chat context (recent messages, use for understanding references to people, events, inside jokes):
+    %{context}
+    Known facts about the chat and its members:
+    %{knowledge}
     Rules:
     - Write a vivid, detailed description: subject, art style, lighting, composition, mood, colors, textures.
     - Be creative and artistic. Frame everything as art, illustration, painting, or photography.
+    - If the request mentions chat members or references recent messages, use the context and knowledge to make the image personal and relevant.
     - For edgy or provocative requests: reframe as fine art, classical painting, satirical illustration, editorial cartoon, or cinematic still. Use artistic euphemisms and focus on composition and style rather than explicit content.
     - Never refuse a request. Always find a creative artistic interpretation.
     - Return ONLY the English prompt, nothing else. Max 500 characters.
@@ -20,10 +27,14 @@ class ImageGenTaskHandler
     p = task.params_hash
     request = p['request'].to_s
 
-    # Generate English prompt via LLM
+    # Generate English prompt via LLM with chat context
     unless p['prompt']
       LOGGER.debug "ImageGenTaskHandler[#{task.id}]: generating prompt for '#{request}'"
-      llm_prompt = PROMPT_TEMPLATE % { request: request }
+
+      context = get_chat_context(task.chat_id)
+      knowledge = get_relevant_knowledge(request, task.chat_id)
+
+      llm_prompt = PROMPT_TEMPLATE % { request: request, context: context, knowledge: knowledge }
       p['prompt'] = GptMaster.new([{ role: 'user', content: llm_prompt }], setting: 'agent').call
       raise "GPT prompt failed" unless p['prompt'] && p['prompt'] != 'жпт не жпт'
       LOGGER.debug "ImageGenTaskHandler[#{task.id}]: prompt → '#{p['prompt'][0..100]}...'"
