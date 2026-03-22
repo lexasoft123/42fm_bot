@@ -19,6 +19,9 @@ begin
 
   begin
     Telegram::Bot::Client.run(token, logger: logger) do |bot|
+      TaskRunner.start(bot.api)
+      logger.info "TaskRunner started"
+
       bot.listen do |message|
         next unless message.is_a? Telegram::Bot::Types::Message
         next unless message.from

@@ -76,6 +76,20 @@ weather:
   api_url: https://api.openweathermap.org/data/2.5/weather
   api_key: OWM_API_KEY
 
+suno:
+  api_url: 'https://api.sunoapi.org'
+  api_key: 'SUNO_API_KEY'
+  model: 'V4'
+  lyrics_prompt: |
+    Ты — талантливый поэт-песенник радиостанции 42FM.
+    Факты о чате и его участниках: {KNOWLEDGE}
+    Последние сообщения в чате: {CONTEXT}
+    Сочини короткую песню (2 куплета + припев) на тему: "{REQUEST}"
+    Жанр: {GENRE}
+    {ARTIST}
+    Используй факты о чате и участниках чтобы сделать песню персональной и смешной.
+    Верни ТОЛЬКО текст с тегами [Verse], [Chorus], [Outro]. Без пояснений.
+
 logging:
   path: log/bot.log
   level: debug

@@ -105,6 +105,7 @@ bin/bot
 │   │   ├── knowledge_add.rb
 │   │   ├── knowledge_list.rb
 │   │   ├── knowledge_delete.rb
+│   │   ├── suno_sing.rb      # "бот спой" — Suno AI song generation
 │   │   └── fallback_reply.rb
 │   ├── agent/
 │   │   ├── tool_registry.rb   # Tool definitions registry for agent mode
@@ -114,17 +115,23 @@ bin/bot
 │   │       ├── weather.rb     # Weather tool
 │   │       ├── google_search.rb  # Google search tool
 │   │       ├── knowledge.rb   # Knowledge search/add/delete tools
-│   │       └── horoscope.rb   # Horoscope tool
+│   │       ├── horoscope.rb   # Horoscope tool
+│   │       └── suno.rb        # Suno song generation tool
+│   ├── task_handlers/
+│   │   └── suno_handler.rb    # Suno background task: GPT lyrics → submit → poll → deliver
+│   ├── task_runner.rb         # Generic DB-backed task poller + handler registry
+│   ├── suno_client.rb         # Suno AI API client (submit, poll, compose)
 │   └── robot/
 │       └── robocoder.rb       # Base64+XOR encode/decode util
 ├── models/
 │   ├── user.rb       # ActiveRecord: users
 │   ├── message.rb    # ActiveRecord: messages (user optional for bot replies)
 │   ├── phrase.rb     # ActiveRecord: phrases
-│   └── knowledge.rb  # ActiveRecord: knowledge facts (with embedding_vector serialization)
+│   ├── knowledge.rb       # ActiveRecord: knowledge facts (with embedding_vector serialization)
+│   └── background_task.rb # ActiveRecord: persistent background tasks
 ├── db/
 │   ├── bot.db        # SQLite3 database
-│   └── migrate/      # ActiveRecord migrations (008 files)
+│   └── migrate/      # ActiveRecord migrations (009 files)
 ├── lib/samples/      # MP3 backing tracks for karaoke TTS
 ├── Gemfile
 ├── Rakefile          # db:migrate tasks
@@ -198,6 +205,7 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 | `messages` | `user_uid` (nullable — nil for bot replies), `chat_id`, `body`, `role` (`user`/`bot`) |
 | `phrases` | `user_id`, `content` (unique) — user-submitted catchphrases |
 | `knowledge` | `topic`, `content`, `embedding` (JSON float array), `source` (`manual`/`auto`), `chat_id` (bigint, indexed) |
+| `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 
 **Relationships:**
 - `User` has_many `messages` (FK: `user_uid` → `users.uid`)
@@ -258,6 +266,29 @@ Admin-only tools are filtered from definitions AND checked at execution time. To
 
 Toggle off with `chat_gpt.agent_mode: false` to revert to simple `GptMaster.chat` path.
 
+### Background Task Queue — `lib/task_runner.rb` + `lib/task_handlers/`
+Generic DB-backed persistent task system for long-running operations. A poller thread runs inside the bot process (started in `Telegram::Bot::Client.run`, reusing `bot.api`).
+
+**Components:**
+- `BackgroundTask` model — ActiveRecord wrapper for `background_tasks` table with status helpers (`mark_done!`, `mark_failed!`, `increment_attempts!`, `timed_out?`)
+- `TaskRunner` — generic poller + handler registry. Polls pending tasks every 10s, dispatches to registered handlers by `task_type`
+- Handler classes in `lib/task_handlers/` — each implements `def call(task, api)` returning `:pending`, `:done`, or `:failed`
+
+**Adding a new task type:**
+1. Create `lib/task_handlers/my_handler.rb` with `def call(task, api)` method
+2. Register: `TaskRunner.register('my_type', MyHandler)`
+3. Enqueue: `BackgroundTask.create!(task_type: 'my_type', chat_id: ..., params: {}.to_json)`
+
+**Current handlers:**
+- `SunoTaskHandler` (`suno_generate`) — GPT lyrics composition → Suno API submit → poll for result → send audio with lyrics caption
+
+### SunoClient — `lib/suno_client.rb`
+HTTP client for the Suno AI song generation API (`sunoapi.org`). Key methods:
+- `submit(title:, lyrics:, tags:)` — POST to `/api/v1/generate`, returns `task_id`
+- `poll_once(task_id)` — GET status, returns `:pending`, `:failed`, or `{ audio_url:, title:, duration: }`
+- `compose(...)` — blocking convenience (submit + poll loop)
+- `SunoClient.resolve_genre(text)` — maps Russian genre names to English style tags
+
 ### TtsService — `lib/tts_service.rb`
 Facade over Polly. `TtsService.speak(text, voice:, speed:, minus:, track_id:)` generates OGG and returns the public URL.
 
@@ -295,6 +326,7 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 | img.ignio.com | HTTP scrape | None |
 | newsler.ru | HTTP scrape | None |
 | lenta.ru | RSS | None |
+| Suno AI (sunoapi.org) | REST/HTTParty | Bearer token |
 
 ---
 
@@ -317,6 +349,11 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 | `!новости / !news` | News from Lenta RSS |
 | `!кости / !bones` | Dice game |
 | `!погода city[,country]` | Weather |
+
+### Suno Song Generation
+| Command | Description |
+|---------|-------------|
+| `бот спой [жанр] [тема]` | Generate a song via Suno AI (genres: рок, метал, хеви/блэк/дэт метал, рэп, блюз; default: рок) |
 
 ### AI / Text
 | Command | Description |
@@ -408,6 +445,10 @@ chat_gpt:
 knowledge:
   top_k: 3            # facts to inject per GPT call
   extract_every: 50   # auto-extract after every N user messages per chat
+suno:
+  api_url: https://api.sunoapi.org
+  api_key: ...
+  model: V4                      # V4, V4_5, V4_5ALL, etc.
 weather:
   api_url: ...
   api_key: ...

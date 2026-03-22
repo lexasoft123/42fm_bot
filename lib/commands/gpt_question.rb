@@ -14,7 +14,7 @@ module Commands
         Agent::Runner.new(
           text: text, context: get_chat_context,
           knowledge: get_relevant_knowledge(text),
-          radio: radio, chat_id: chat_id, user: user
+          radio: radio, chat_id: chat_id, user: user, bot: bot
         ).run
       else
         GptMaster.chat(text, context: get_chat_context, knowledge: get_relevant_knowledge(text))

@@ -3,7 +3,7 @@ module Agent
     MAX_ITERATIONS = 5
     MAX_TOOL_RESULT_LENGTH = 2000
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil)
       @text      = text
       @context   = context
       @knowledge = knowledge
@@ -12,7 +12,7 @@ module Agent
       @user      = user
       @setting   = 'agent'
       @api_type  = GptMaster.resolve_setting(@setting)[:api_type]
-      @tool_ctx  = { radio: radio, chat_id: chat_id, user: user }
+      @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, bot: bot }
     end
 
     def run

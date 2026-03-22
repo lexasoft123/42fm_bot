@@ -29,6 +29,8 @@ module Commands
     Dice,
     ReplyYou,
     PhraseTop,
+    TaskQueue,
+    SunoSing,
     GptQuestion,
     GptChat,
     FallbackReply,

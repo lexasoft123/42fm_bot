@@ -54,7 +54,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - `execute` — runs the command, returns a `CommandResult`
 
 `CommandContext` (struct) carries per-message state: `bot`, `message`, `user`, `chat_id`, `radio`, `reply_master`, `cmd`.
-`CommandResult` (value object) wraps the response type (`:text`, `:sticker`, `:image`, `:voice`, `:none`) and payload.
+`CommandResult` (value object) wraps the response type (`:text`, `:sticker`, `:image`, `:voice`, `:audio`, `:none`) and payload.
 
 ## Key Files by Task
 
@@ -67,13 +67,15 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | TTS / audio | `lib/polly.rb` (AWS Polly + FFmpeg → OGG Opus) + `lib/tts_service.rb` |
 | Radio (Liquidsoap TCP) | `lib/radio.rb` |
 | Agent mode tools | `lib/agent/tools/*.rb` + `lib/agent/tool_registry.rb` + `lib/agent/runner.rb` |
+| Background tasks | `lib/task_runner.rb` + `lib/task_handlers/*.rb` + `models/background_task.rb` |
+| Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/commands/suno_sing.rb` |
 | DB schema | `db/migrate/` + `models/` — run with `bundle exec rake db:migrate` |
 | Sticker IDs | `config/initializers/telegram_stickers.rb` |
 | SOCKS proxy | `config/settings.yml` (`proxy` group) + `lib/app_configurator.rb` |
 
 ## Services
 
-`Radio` (Liquidsoap TCP socket, lazy connect), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`/`.call_raw`), `Agent::Runner` (agentic tool-use loop over GptMaster), `Agent::ToolRegistry` (tool definitions for agent mode), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
+`Radio` (Liquidsoap TCP socket, lazy connect), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`/`.call_raw`), `Agent::Runner` (agentic tool-use loop over GptMaster), `Agent::ToolRegistry` (tool definitions for agent mode), `TaskRunner` (generic DB-backed background task poller + handler registry), `SunoClient` (Suno AI song generation API), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
 
 ## DB Tables
 
@@ -83,6 +85,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | `messages` | `user_uid` (nullable), `chat_id`, `body`, `role` (`user`/`bot`) |
 | `phrases` | `user_id`, `content` |
 | `knowledge` | `topic`, `content`, `embedding` (JSON), `source` (`manual`/`auto`), `chat_id` |
+| `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 
 ## Gotchas
 
@@ -104,3 +107,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - `GptQuestion`/`GptChat` must be last `бот`-prefixed commands in registry — they match `бот <anything>`
 - `chat_gpt.providers` holds API credentials; `chat_gpt.settings` holds named configs (`main`, `agent`, `embedder`) referencing providers
 - `GptMaster.new(messages, setting: 'main')` resolves provider + model from settings; class methods `.chat`/`.ask` default to `setting: 'main'`
+- `TaskRunner` poller thread starts inside `Telegram::Bot::Client.run` block, reuses `bot.api` — no second bot instance
+- Background tasks are generic: `TaskRunner.register('type', HandlerClass)` + `BackgroundTask.create!(task_type: 'type', ...)` — add new task types via handler files in `lib/task_handlers/`
+- `бот спой <жанр> <тема>` creates a background task for Suno song generation; the `compose_song` agent tool does the same
+- Suno API settings in `config/settings.yml` under `suno` group: `api_url`, `api_key`, `model`

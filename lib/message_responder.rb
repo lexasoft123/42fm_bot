@@ -14,6 +14,7 @@ require './lib/knowledge_base'
 require './lib/agent/tool_registry'
 require './lib/agent/runner'
 Dir['./lib/agent/tools/*.rb'].each { |f| require f }
+require './lib/suno_client'
 require './lib/polly'
 require './lib/tts_service'
 require './lib/command_context'
@@ -36,6 +37,8 @@ require './lib/commands/history'
 require './lib/commands/radio_top'
 require './lib/commands/meta'
 require './lib/commands/help'
+require './lib/commands/task_queue'
+require './lib/commands/suno_sing'
 require './lib/commands/gpt_question'
 require './lib/commands/gpt_chat'
 require './lib/commands/horoscope_sign'
@@ -116,6 +119,9 @@ class MessageResponder
     when :sticker then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_sticker
     when :image   then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_image
     when :voice   then @bot.api.sendVoice(chat_id: @chat_id, voice: result.payload)
+    when :audio   then @bot.api.sendAudio(
+      chat_id: @chat_id, audio: result.payload,
+      title: result.meta[:title], performer: result.meta[:performer])
     when :none    then nil
     end
   rescue => e

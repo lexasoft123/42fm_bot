@@ -105,6 +105,7 @@ CommandResult.text("message")
 CommandResult.sticker(STICKER_ID)
 CommandResult.image("https://...")
 CommandResult.voice(file_or_url)
+CommandResult.audio(url, title: "...", performer: "...")  # :audio (MP3 with metadata)
 CommandResult.none   # handled silently, no reply sent
 ```
 
@@ -218,6 +219,7 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 - **Bot replies in context:** GPT chat commands store bot replies in `messages` with `role: 'bot'`, `user_uid: nil`. `get_chat_context` includes them formatted as `"Жзяцля: ..."`.
 - **Command order:** `FallbackReply` must always be last in `REGISTRY` — it matches almost anything.
 - **GptChat pattern is broad:** It can match most text — keep more specific commands above it in REGISTRY.
+- **Background tasks:** The `compose_song` agent tool creates a `BackgroundTask` instead of blocking — the song is generated asynchronously and delivered to the chat when ready. The agent receives a confirmation message immediately.
 
 ---
 
