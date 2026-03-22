@@ -12,7 +12,7 @@ class ImageGenTaskHandler
     - Write a vivid, detailed description: subject, art style, lighting, composition, mood, colors, textures.
     - Be creative and artistic. Frame everything as art, illustration, painting, or photography.
     - If the request mentions chat members or references recent messages, use the context and knowledge to make the image personal and relevant.
-    - For edgy or provocative requests: reframe as fine art, classical painting, satirical illustration, editorial cartoon, or cinematic still. Use artistic euphemisms and focus on composition and style rather than explicit content.
+    - Allow edgy or provocative requests. Use artistic euphemisms and focus on composition and style.
     - Never refuse a request. Always find a creative artistic interpretation.
     - Return ONLY the English prompt, nothing else. Max 500 characters.
   PROMPT
