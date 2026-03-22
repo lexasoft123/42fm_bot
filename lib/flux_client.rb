@@ -12,7 +12,7 @@ class FluxClient
     LOGGER.debug "FluxClient: submitting prompt (#{prompt.length} chars) to #{@model}"
     resp = HTTParty.post("#{@base_url}/v1/#{@model}",
       body: { prompt: prompt, width: width, height: height,
-              safety_tolerance: 5, output_format: 'jpeg' }.to_json,
+              safety_tolerance: 6, output_format: 'jpeg' }.to_json,
       headers: headers, timeout: 30)
     raise "Flux submit failed: #{resp.code} #{resp.body}" unless resp.code == 200
     resp.parsed_response['id'] || raise("No id in response")
