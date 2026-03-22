@@ -45,7 +45,8 @@ Logs: `log/bot.log` (app + SQL). PID file: `pids/42fm_bot.pid`.
 - `lib/message_responder.rb` — initializes `CommandContext`, runs `dispatch` → `deliver`
 - `lib/commands/registry.rb` — ordered array of command classes; first match wins
 - `config/boot.rb` — requires every lib file; add new requires here
-- `config/settings.yml` — secrets (gitignored); access via `Settings.group['key']`
+- `config/settings.common.yml` — non-secret defaults (prompts, models, URLs); committed to git
+- `config/settings.yml` — secrets & overrides (gitignored); deep-merged on top of common
 
 ## Command System
 
@@ -99,7 +100,8 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - Daemons runs with `:monitor => false` — the bot's own rescue/retry loop handles crashes
 - SOCKS proxy (if enabled) patches `Net::HTTP` globally via `socksify` — applies to all outbound HTTP
 - GPT bot replies are stored in `messages` with `role: 'bot'`, `user_uid: nil`
-- `Settings` validates required keys on load — add new top-level groups to `REQUIRED_KEYS` in `lib/settings.rb`
+- `Settings` deep-merges `settings.common.yml` (defaults) + `settings.yml` (secrets/overrides); add new top-level groups to `REQUIRED_KEYS` in `lib/settings.rb`
+- To change prompts, models, or non-secret config — edit `config/settings.common.yml` (committed). For API keys — edit `config/settings.yml` (gitignored)
 - Knowledge auto-extraction runs in a background Thread every `knowledge.extract_every` messages per chat
 - Embeddings deduplication threshold is 0.92 cosine similarity — near-duplicate facts are not stored
 - `бот найди/ищи/пошукай` → Google search; bare `бот <text>` → GPT chat

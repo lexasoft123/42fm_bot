@@ -1,3 +1,7 @@
+# Secrets and environment-specific overrides.
+# Copy this file to settings.yml and fill in your API keys.
+# Non-secret defaults (prompts, models, URLs) live in settings.common.yml.
+
 telegram:
   token: BOT_TOKEN
 
@@ -7,91 +11,33 @@ auth:
   audio_chat_ids:
     - -100123456789
 
-proxy:
-  enabled: false
-  host: 127.0.0.1
-  port: 1080
-  user: ''
-  password: ''
-
 chat_gpt:
   providers:
     anthropic:
       api_key: sk-ant-...
-      api_type: anthropic
     openai:
       api_key: sk-...
-      api_type: openai
     deepseek:
       api_key: sk-...
-      api_type: openai
-      api_url: https://api.deepseek.com/v1/chat/completions
-  settings:
-    main:
-      provider: anthropic
-      model: claude-sonnet-4-6
-      max_tokens: 16000
-      thinking_budget: 10000
-    agent:
-      provider: anthropic
-      model: claude-haiku-4-5
-      max_tokens: 4096
-    embedder:
-      provider: openai
-      model: text-embedding-3-small
-  agent_mode: true
-  context_messages_size: 30
-  prompt: |
-    Ты — Жзяцля, бот радиостанции 42FM.
-    Факты о чате: {KNOWLEDGE}
-    Последние сообщения: {CONTEXT}
-    Запрос: {REQUEST}
-  agent_prompt: |
-    Ты — Жзяцля, бот радиостанции 42FM в Telegram-чате.
-    У тебя есть инструменты — используй их когда нужна актуальная информация.
-    Не вызывай инструменты если можешь ответить сам.
-    Факты о чате: {KNOWLEDGE}
-    Последние сообщения: {CONTEXT}
-    Запрос: {REQUEST}
-
-knowledge:
-  top_k: 3
-  extract_every: 50
-
-voice_messages:
-  base_url: https://example.com/audio
-
-aws:
-  key_id: AKIAIOSFODNN7EXAMPLE
-  access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+    grok:
+      api_key: xai-...
 
 translator:
-  api_key: ''
+  api_key: YANDEX_TRANSLATE_KEY
+
+weather:
+  api_key: OWM_API_KEY
+
+giphy:
+  api_key: GIPHY_API_KEY
 
 google:
   - api_key: GOOGLE_API_KEY
     cx_key: GOOGLE_CX_KEY
 
-weather:
-  api_url: https://api.openweathermap.org/data/2.5/weather
-  api_key: OWM_API_KEY
+aws:
+  key_id: AKIAIOSFODNN7EXAMPLE
+  access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 
 suno:
-  api_url: 'https://api.sunoapi.org'
-  api_key: 'SUNO_API_KEY'
-  model: 'V4'
-  lyrics_prompt: |
-    Ты — талантливый поэт-песенник радиостанции 42FM.
-    Факты о чате и его участниках: {KNOWLEDGE}
-    Последние сообщения в чате: {CONTEXT}
-    Сочини короткую песню (2 куплета + припев) на тему: "{REQUEST}"
-    Жанр: {GENRE}
-    {ARTIST}
-    Используй факты о чате и участниках чтобы сделать песню персональной и смешной.
-    Верни ТОЛЬКО текст с тегами [Verse], [Chorus], [Outro]. Без пояснений.
-
-logging:
-  path: log/bot.log
-  level: debug
-  max_size_mb: 100
-  keep_files: 5
+  api_key: SUNO_API_KEY
