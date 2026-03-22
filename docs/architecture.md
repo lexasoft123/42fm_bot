@@ -2,7 +2,7 @@
 
 ## Overview
 
-42FM Bot is a Ruby Telegram bot for a private radio station community. It integrates with an Icecast radio server via TCP, provides AI-generated responses via an OpenAI-compatible API, text-to-speech via AWS Polly, and various entertainment commands. The bot is chat-restricted: only messages from authorized `chat_ids` are processed.
+42FM Bot is a Ruby Telegram bot for a private radio station community. It integrates with an Liquidsoap radio server via TCP, provides AI-generated responses via an OpenAI-compatible API, text-to-speech via AWS Polly, and various entertainment commands. The bot is chat-restricted: only messages from authorized `chat_ids` are processed.
 
 ---
 
@@ -14,7 +14,7 @@ bin/bot
        └── lib/bot.rb
             ├── config/boot.rb (loads Settings, requires all modules)
             ├── AppConfigurator.configure (i18n, DB, SOCKS proxy)
-            ├── Radio.new (lazy TCP connection to Icecast — connects on first use)
+            ├── Radio.new (lazy TCP connection to Liquidsoap — connects on first use)
             └── Telegram::Bot.run (long-polling loop)
                  └── MessageResponder.new(bot, message, radio).respond
                       ├── dispatch(ctx) → Commands::REGISTRY (first match wins)
@@ -57,8 +57,8 @@ bin/bot
 │   ├── settings.rb            # Config singleton with required-key validation
 │   ├── app_configurator.rb    # i18n, DB, SOCKS proxy init
 │   ├── database_connector.rb  # ActiveRecord setup
-│   ├── radio.rb               # Icecast TCP client (lazy connect)
-│   ├── gpt_master.rb          # Anthropic/OpenAI-compatible API client (.chat / .ask)
+│   ├── radio.rb               # Liquidsoap TCP client (lazy connect)
+│   ├── gpt_master.rb          # Anthropic/OpenAI-compatible API client (.chat / .ask / .call_raw)
 │   ├── embedding_service.rb   # OpenAI-compatible embeddings API
 │   ├── knowledge_base.rb      # Semantic RAG: add/search/extract_and_store facts
 │   ├── polly.rb               # AWS Polly TTS + FFmpeg → OGG Opus
@@ -106,6 +106,15 @@ bin/bot
 │   │   ├── knowledge_list.rb
 │   │   ├── knowledge_delete.rb
 │   │   └── fallback_reply.rb
+│   ├── agent/
+│   │   ├── tool_registry.rb   # Tool definitions registry for agent mode
+│   │   ├── runner.rb          # Agentic loop: GPT → tool call → execute → repeat
+│   │   └── tools/
+│   │       ├── radio.rb       # Radio tools (8): track, queue, search, request, etc.
+│   │       ├── weather.rb     # Weather tool
+│   │       ├── google_search.rb  # Google search tool
+│   │       ├── knowledge.rb   # Knowledge search/add/delete tools
+│   │       └── horoscope.rb   # Horoscope tool
 │   └── robot/
 │       └── robocoder.rb       # Base64+XOR encode/decode util
 ├── models/
@@ -200,7 +209,7 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 ## Service Modules
 
 ### Radio — `lib/radio.rb`
-Communicates with Icecast server over a raw TCP socket on `localhost:1234`. Connection is **lazy** — socket opens on first use, not at startup. Sends text commands, parses responses. Key operations: get current track, search, request, manage queue, fetch stats.
+Communicates with Liquidsoap server over a raw TCP socket on `localhost:1234`. Connection is **lazy** — socket opens on first use, not at startup. Sends text commands, parses responses. Key operations: get current track, search, request, manage queue, fetch stats.
 
 ### GptMaster — `lib/gpt_master.rb`
 HTTP client (HTTParty) supporting both Anthropic and OpenAI-compatible APIs. Provider selected via `settings.yml` `chat_gpt.provider`. Two class-method interfaces:
@@ -227,6 +236,27 @@ Semantic RAG store:
 - `KnowledgeBase.extract_and_store(messages)` — uses `GptMaster.ask` with a structured prompt to extract 3–7 facts from recent chat messages, stores non-duplicate ones as `source: 'auto'`
 
 Auto-extraction is triggered by `MessageResponder#maybe_extract_knowledge` every `knowledge.extract_every` user messages per chat, runs in a background `Thread`.
+
+### Agent Mode — `lib/agent/`
+When `chat_gpt.agent_mode: true`, GPT commands (`GptChat`, `GptQuestion`) use `Agent::Runner` instead of `GptMaster.chat`. The runner implements an agentic tool-use loop:
+
+1. Send user message + tools definitions to LLM
+2. If LLM returns tool calls → execute them, append results, repeat
+3. If LLM returns text → return as final response
+4. Safety cap: max 5 iterations, then force a text response
+
+**Components:**
+- `Agent::ToolRegistry` — central registry; tools register via `ToolRegistry.register(name:, description:, parameters:, handler:, admin_only:)`
+- `Agent::Runner` — orchestrates the loop, handles provider differences (Anthropic vs OpenAI tool-calling formats)
+- `lib/agent/tools/*.rb` — tool definitions (radio×8, weather, google_search, knowledge×3, horoscope)
+
+**Tool-calling formats:**
+- Anthropic: `tools: [{name, description, input_schema}]`, response `content: [{type: "tool_use"}]`, results as `{type: "tool_result"}`
+- OpenAI: `tools: [{type: "function", function: {...}}]`, response `tool_calls: [...]`, results as `{role: "tool"}`
+
+Admin-only tools are filtered from definitions AND checked at execution time. Tool results are truncated to 2000 chars.
+
+Toggle off with `chat_gpt.agent_mode: false` to revert to simple `GptMaster.chat` path.
 
 ### TtsService — `lib/tts_service.rb`
 Facade over Polly. `TtsService.speak(text, voice:, speed:, minus:, track_id:)` generates OGG and returns the public URL.
@@ -256,7 +286,7 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 | Service | Protocol | Auth |
 |---------|----------|------|
 | Telegram Bot API | HTTPS long-polling | Bot token |
-| Icecast Radio Server | Raw TCP socket | None (localhost) |
+| Liquidsoap Radio Server | Raw TCP socket | None (localhost) |
 | Anthropic / OpenAI-compatible API | HTTPS/HTTParty | x-api-key / Bearer token |
 | OpenAI Embeddings API | HTTPS/HTTParty | Bearer token |
 | AWS Polly | AWS SDK | Access key + secret |
@@ -346,18 +376,35 @@ proxy:
   user: ...
   password: ...
 chat_gpt:
-  provider: anthropic       # 'anthropic' or 'openai' (default: openai)
-  api_key: ...
-  api_url: ...              # https://api.anthropic.com/v1/messages or OpenAI-compatible
-  default_model: ...
-  max_tokens: 16000         # required for Anthropic; ignored for OpenAI
-  thinking_budget: 10000    # optional: Anthropic extended thinking (must be < max_tokens)
+  providers:
+    anthropic:
+      api_key: sk-ant-...
+      api_type: anthropic         # 'anthropic' or 'openai'
+      api_url: https://api.anthropic.com/v1/messages  # optional, has defaults
+    openai:
+      api_key: sk-...
+      api_type: openai
+    deepseek:
+      api_key: sk-...
+      api_type: openai
+      api_url: https://api.deepseek.com/v1/chat/completions
+  settings:
+    main:                         # used for GptMaster.chat / .ask
+      provider: anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 16000
+      thinking_budget: 10000      # optional: Anthropic extended thinking
+    agent:                        # used for Agent::Runner tool-calling loop
+      provider: anthropic
+      model: claude-haiku-4-5
+      max_tokens: 4096
+    embedder:                     # used for EmbeddingService
+      provider: openai
+      model: text-embedding-3-small
+  agent_mode: true                # false to disable agent tool-calling
   context_messages_size: 30
   prompt: "...{KNOWLEDGE}...{CONTEXT}...{REQUEST}..."
-embeddings:
-  api_url: https://api.openai.com/v1/embeddings
-  api_key: ...
-  model: text-embedding-3-small
+  agent_prompt: "..."             # optional, falls back to prompt
 knowledge:
   top_k: 3            # facts to inject per GPT call
   extract_every: 50   # auto-extract after every N user messages per chat

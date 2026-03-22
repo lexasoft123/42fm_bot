@@ -2,30 +2,37 @@ require 'httparty'
 
 class EmbeddingService
   def self.embed(text)
-    cfg     = Settings.embeddings
-    api_key = cfg['api_key']
-    api_url = cfg['api_url']
-    model   = cfg['model'] || 'text-embedding-3-small'
+    cfg = GptMaster.resolve_setting('embedder')
+    base = cfg[:api_url].sub(%r{/v\d+/.*$}, '')
+    api_url = "#{base}/v1/embeddings"
 
-    headers = {
-      'Content-Type'  => 'application/json',
-      'Authorization' => "Bearer #{api_key}",
-    }
+    headers = if cfg[:api_type] == 'anthropic'
+      {
+        'Content-Type'      => 'application/json',
+        'x-api-key'         => cfg[:api_key],
+        'anthropic-version' => '2023-06-01',
+      }
+    else
+      {
+        'Content-Type'  => 'application/json',
+        'Authorization' => "Bearer #{cfg[:api_key]}",
+      }
+    end
 
     response = HTTParty.post(
       api_url,
-      body:    { model: model, input: text }.to_json,
+      body:    { model: cfg[:model], input: text }.to_json,
       headers: headers,
       timeout: 30,
     )
     if response.code == 200
       response['data'][0]['embedding']
     else
-      LOGGER.error "EmbeddingService error: #{response.code} #{response.body}"
+      LOGGER.error "EmbeddingService [#{cfg[:model]}] error: #{response.code} #{response.body}"
       nil
     end
   rescue => e
-    LOGGER.error "EmbeddingService exception: #{e.message}"
+    LOGGER.error "EmbeddingService [#{cfg[:model] rescue '?'}] exception: #{e.message}"
     nil
   end
 end

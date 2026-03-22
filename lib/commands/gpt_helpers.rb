@@ -25,8 +25,8 @@ module Commands
     end
 
     def get_relevant_knowledge(query)
-      return '' unless Settings._settings.respond_to?(:embeddings) && Settings.embeddings
       return '' unless Settings._settings.respond_to?(:knowledge) && Settings.knowledge
+      return '' unless Settings.chat_gpt.dig('settings', 'embedder')
       top_k = Settings.knowledge['top_k']
       facts = KnowledgeBase.search(query, chat_id: chat_id, top_k: top_k)
       return '' if facts.empty?

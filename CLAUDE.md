@@ -63,16 +63,17 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | Add/change a command | New file in `lib/commands/` + require in `message_responder.rb` + entry in `lib/commands/registry.rb` |
 | New service/API | `lib/new_service.rb` + require in `config/boot.rb` |
 | Reply text templates | `config/replies/*.yml` |
-| GPT prompt/model | `config/settings.yml` (`chat_gpt` group) + `lib/gpt_master.rb` |
+| GPT prompt/model | `config/settings.yml` (`chat_gpt.settings.*` + `chat_gpt.providers.*`) + `lib/gpt_master.rb` |
 | TTS / audio | `lib/polly.rb` (AWS Polly + FFmpeg → OGG Opus) + `lib/tts_service.rb` |
-| Radio (Icecast TCP) | `lib/radio.rb` |
+| Radio (Liquidsoap TCP) | `lib/radio.rb` |
+| Agent mode tools | `lib/agent/tools/*.rb` + `lib/agent/tool_registry.rb` + `lib/agent/runner.rb` |
 | DB schema | `db/migrate/` + `models/` — run with `bundle exec rake db:migrate` |
 | Sticker IDs | `config/initializers/telegram_stickers.rb` |
 | SOCKS proxy | `config/settings.yml` (`proxy` group) + `lib/app_configurator.rb` |
 
 ## Services
 
-`Radio` (TCP socket, lazy connect), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
+`Radio` (Liquidsoap TCP socket, lazy connect), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`/`.call_raw`), `Agent::Runner` (agentic tool-use loop over GptMaster), `Agent::ToolRegistry` (tool definitions for agent mode), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
 
 ## DB Tables
 
@@ -99,3 +100,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - Knowledge auto-extraction runs in a background Thread every `knowledge.extract_every` messages per chat
 - Embeddings deduplication threshold is 0.92 cosine similarity — near-duplicate facts are not stored
 - `бот найди/ищи/пошукай` → Google search; bare `бот <text>` → GPT chat
+- Agent mode (`chat_gpt.agent_mode: true`) lets GPT call bot tools (radio, weather, search, etc.) autonomously; toggle off to revert to simple GPT
+- `GptQuestion`/`GptChat` must be last `бот`-prefixed commands in registry — they match `бот <anything>`
+- `chat_gpt.providers` holds API credentials; `chat_gpt.settings` holds named configs (`main`, `agent`, `embedder`) referencing providers
+- `GptMaster.new(messages, setting: 'main')` resolves provider + model from settings; class methods `.chat`/`.ask` default to `setting: 'main'`
