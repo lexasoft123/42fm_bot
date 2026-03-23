@@ -10,4 +10,5 @@ require './models/background_task'
 require './lib/chat_context'
 require './lib/task_runner'
 Dir['./lib/task_handlers/*.rb'].each { |f| require f }
+require './lib/music_scanner'
 require './lib/app_configurator'
