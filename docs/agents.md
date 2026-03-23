@@ -10,7 +10,7 @@ This document is the entry point for AI-assisted development on this project. Re
 - **Framework:** None (plain Ruby + ActiveRecord)
 - **DB:** SQLite3 at `db/bot.db` via ActiveRecord 6.1
 - **Key entry point:** `lib/bot.rb` → `lib/message_responder.rb` → `lib/commands/registry.rb`
-- **Config:** `config/settings.yml` (gitignored — never committed)
+- **Config:** `config/settings.common.yml` (defaults, committed) + `config/settings.yml` (secrets, gitignored)
 - **Docs:** `docs/architecture.md` — full architecture reference
 
 ---
@@ -219,7 +219,9 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 - **Bot replies in context:** GPT chat commands store bot replies in `messages` with `role: 'bot'`, `user_uid: nil`. `get_chat_context` includes them formatted as `"Жзяцля: ..."`.
 - **Command order:** `FallbackReply` must always be last in `REGISTRY` — it matches almost anything.
 - **GptChat pattern is broad:** It can match most text — keep more specific commands above it in REGISTRY.
-- **Background tasks:** The `compose_song` agent tool creates a `BackgroundTask` instead of blocking — the song is generated asynchronously and delivered to the chat when ready. The agent receives a confirmation message immediately.
+- **Background tasks:** The `compose_song` and `generate_image` agent tools create `BackgroundTask` records instead of blocking — songs/images are generated asynchronously and delivered to the chat when ready. The agent receives a confirmation message immediately.
+- **Suno tags:** Never include artist names in Suno tags — Suno blocks them. Describe the sound characteristics instead.
+- **ChatContext module:** `lib/chat_context.rb` provides `get_chat_context` and `get_relevant_knowledge` — shared by task handlers for context-aware generation.
 
 ---
 
@@ -228,7 +230,10 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 | Task | File(s) |
 |------|---------|
 | Add/modify a bot command | `lib/commands/new_cmd.rb` + `message_responder.rb` (require) + `registry.rb` (position) |
-| Add a service/API integration | `lib/new_service.rb` + `config/boot.rb` |
+| Add a service/API integration | `lib/new_service.rb` + `config/boot.rb` (or `message_responder.rb`) |
+| Add a background task handler | `lib/task_handlers/my_handler.rb` + `TaskRunner.register(...)` |
+| FLUX image generation | `lib/flux_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/commands/image_gen.rb` |
+| Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/commands/suno_sing.rb` |
 | Change reply/response text | `config/replies/*.yml` |
 | Change TTS behavior | `lib/polly.rb` + `lib/tts_service.rb` |
 | Change GPT prompt/model | `config/settings.yml` (`chat_gpt` group) |

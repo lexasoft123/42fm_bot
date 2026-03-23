@@ -105,6 +105,8 @@ bin/bot
 │   │   ├── knowledge_add.rb
 │   │   ├── knowledge_list.rb
 │   │   ├── knowledge_delete.rb
+│   │   ├── image_gen.rb      # "бот нарисуй" — FLUX 2 image generation
+│   │   ├── task_queue.rb     # "бот задачи" — background task status
 │   │   ├── suno_sing.rb      # "бот спой" — Suno AI song generation
 │   │   └── fallback_reply.rb
 │   ├── agent/
@@ -116,11 +118,15 @@ bin/bot
 │   │       ├── google_search.rb  # Google search tool
 │   │       ├── knowledge.rb   # Knowledge search/add/delete tools
 │   │       ├── horoscope.rb   # Horoscope tool
-│   │       └── suno.rb        # Suno song generation tool
+│   │       ├── suno.rb        # Suno song generation tool
+│   │       └── image_gen.rb   # FLUX image generation tool
+│   ├── chat_context.rb        # ChatContext module: shared chat context + knowledge lookup for handlers
 │   ├── task_handlers/
-│   │   └── suno_handler.rb    # Suno background task: GPT lyrics → submit → poll → deliver
+│   │   ├── suno_handler.rb    # Suno background task: LLM parse → GPT lyrics → submit → poll → deliver
+│   │   └── image_gen_handler.rb # FLUX background task: LLM prompt → submit → poll → deliver photo
 │   ├── task_runner.rb         # Generic DB-backed task poller + handler registry
 │   ├── suno_client.rb         # Suno AI API client (submit, poll, compose)
+│   ├── flux_client.rb         # FLUX 2 image generation API client (submit, poll)
 │   └── robot/
 │       └── robocoder.rb       # Base64+XOR encode/decode util
 ├── models/
@@ -256,7 +262,7 @@ When `chat_gpt.agent_mode: true`, GPT commands (`GptChat`, `GptQuestion`) use `A
 **Components:**
 - `Agent::ToolRegistry` — central registry; tools register via `ToolRegistry.register(name:, description:, parameters:, handler:, admin_only:)`
 - `Agent::Runner` — orchestrates the loop, handles provider differences (Anthropic vs OpenAI tool-calling formats)
-- `lib/agent/tools/*.rb` — tool definitions (radio×8, weather, google_search, knowledge×3, horoscope)
+- `lib/agent/tools/*.rb` — tool definitions (radio×8, weather, google_search, knowledge×3, horoscope, compose_song, generate_image)
 
 **Tool-calling formats:**
 - Anthropic: `tools: [{name, description, input_schema}]`, response `content: [{type: "tool_use"}]`, results as `{type: "tool_result"}`
@@ -280,14 +286,27 @@ Generic DB-backed persistent task system for long-running operations. A poller t
 3. Enqueue: `BackgroundTask.create!(task_type: 'my_type', chat_id: ..., params: {}.to_json)`
 
 **Current handlers:**
-- `SunoTaskHandler` (`suno_generate`) — GPT lyrics composition → Suno API submit → poll for result → send audio with lyrics caption
+- `SunoTaskHandler` (`suno_generate`) — LLM request parsing → GPT lyrics composition → LLM tag enrichment → Suno V5 API submit → poll → send audio with lyrics caption. Uses `ChatContext` for context-aware lyrics.
+- `ImageGenTaskHandler` (`image_generate`) — LLM English prompt generation (with chat context + knowledge) → FLUX 2 API submit → poll → send photo. Uses `ChatContext` for context-aware prompts.
+
+### ChatContext — `lib/chat_context.rb`
+Shared module included by task handlers. Provides:
+- `get_chat_context(chat_id)` — fetches recent messages (user names + bot replies) as JSON
+- `get_relevant_knowledge(query, chat_id)` — embeds query, retrieves top-K knowledge facts as JSON
 
 ### SunoClient — `lib/suno_client.rb`
-HTTP client for the Suno AI song generation API (`sunoapi.org`). Key methods:
+HTTP client for the Suno AI song generation API (`sunoapi.org`), using V5 model. Key methods:
 - `submit(title:, lyrics:, tags:)` — POST to `/api/v1/generate`, returns `task_id`
 - `poll_once(task_id)` — GET status, returns `:pending`, `:failed`, or `{ audio_url:, title:, duration: }`
 - `compose(...)` — blocking convenience (submit + poll loop)
-- `SunoClient.resolve_genre(text)` — maps Russian genre names to English style tags
+- `SunoClient.resolve_genre(text)` — maps Russian genre names to English style tags (~50 genres)
+- **Important:** Suno blocks artist names in tags — describe sound characteristics instead
+
+### FluxClient — `lib/flux_client.rb`
+HTTP client for the FLUX 2 image generation API (`api.bfl.ai`). Async: submit → poll.
+- `submit(prompt:, width:, height:)` — POST to `/v1/{model}`, returns `task_id`
+- `poll_once(task_id)` — GET `/v1/get_result`, returns `:pending`, `:failed`, or `{ url: "..." }`
+- Uses `safety_tolerance: 5` (max without special auth) and `output_format: 'jpeg'`
 
 ### TtsService — `lib/tts_service.rb`
 Facade over Polly. `TtsService.speak(text, voice:, speed:, minus:, track_id:)` generates OGG and returns the public URL.
@@ -327,6 +346,7 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 | newsler.ru | HTTP scrape | None |
 | lenta.ru | RSS | None |
 | Suno AI (sunoapi.org) | REST/HTTParty | Bearer token |
+| FLUX 2 (api.bfl.ai) | REST/HTTParty | x-key header |
 
 ---
 
@@ -353,7 +373,17 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 ### Suno Song Generation
 | Command | Description |
 |---------|-------------|
-| `бот спой [жанр] [тема]` | Generate a song via Suno AI (genres: рок, метал, хеви/блэк/дэт метал, рэп, блюз; default: рок) |
+| `бот спой/сочини/запиши/сыграй [request]` | Generate a song via Suno AI V5 — freeform requests parsed by LLM (genre, artist style, topic) |
+
+### FLUX Image Generation
+| Command | Description |
+|---------|-------------|
+| `бот нарисуй/рисуй/картинку [request]` | Generate an image via FLUX 2 — LLM generates English prompt with chat context |
+
+### Task Queue
+| Command | Description |
+|---------|-------------|
+| `бот задачи` | Show last 10 background tasks for the current chat |
 
 ### AI / Text
 | Command | Description |
@@ -398,7 +428,11 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 
 ## Configuration
 
-All secrets live in `config/settings.yml` (gitignored). Key setting groups:
+Settings are split into two files, deep-merged (`settings.yml` overrides `settings.common.yml`):
+- `config/settings.common.yml` — non-secret defaults (prompts, models, URLs); committed to git
+- `config/settings.yml` — secrets & overrides (API keys, chat IDs); gitignored
+
+Key setting groups:
 
 ```yaml
 telegram:
@@ -448,7 +482,11 @@ knowledge:
 suno:
   api_url: https://api.sunoapi.org
   api_key: ...
-  model: V4                      # V4, V4_5, V4_5ALL, etc.
+  model: V5
+flux:
+  api_url: https://api.bfl.ai
+  api_key: ...
+  model: flux-2-pro
 weather:
   api_url: ...
   api_key: ...
