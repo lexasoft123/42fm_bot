@@ -67,7 +67,8 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | Reply text templates | `config/replies/*.yml` |
 | GPT prompt/model | `config/settings.yml` (`chat_gpt.settings.*` + `chat_gpt.providers.*`) + `lib/gpt_master.rb` |
 | TTS / audio | `lib/polly.rb` (AWS Polly + FFmpeg → OGG Opus) + `lib/tts_service.rb` |
-| Radio (Liquidsoap TCP) | `lib/radio.rb` |
+| Radio (Liquidsoap TCP) | `lib/radio.rb` + `config/radio.yml` |
+| Music search / song DB | `models/song.rb` + `lib/music_scanner.rb` + `rake music:scan` |
 | Agent mode tools | `lib/agent/tools/*.rb` + `lib/agent/tool_registry.rb` + `lib/agent/runner.rb` |
 | Background tasks | `lib/task_runner.rb` + `lib/task_handlers/*.rb` + `models/background_task.rb` |
 | Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/commands/suno_sing.rb` |
@@ -79,7 +80,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 
 ## Services
 
-`Radio` (Liquidsoap TCP socket, lazy connect), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`/`.call_raw`), `Agent::Runner` (agentic tool-use loop over GptMaster), `Agent::ToolRegistry` (tool definitions for agent mode), `TaskRunner` (generic DB-backed background task poller + handler registry), `SunoClient` (Suno AI song generation API, V5 model), `FluxClient` (FLUX 2 image generation API via api.bfl.ai), `ChatContext` (shared module providing chat context + knowledge lookup for task handlers), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
+`Radio` (Liquidsoap TCP socket, lazy connect), `Song` (music library with FTS5 search, populated by `MusicScanner`), `MusicScanner` (reads audio file tags via taglib-ruby, populates songs DB), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`/`.call_raw`), `Agent::Runner` (agentic tool-use loop over GptMaster), `Agent::ToolRegistry` (tool definitions for agent mode), `TaskRunner` (generic DB-backed background task poller + handler registry), `SunoClient` (Suno AI song generation API, V5 model), `FluxClient` (FLUX 2 image generation API via api.bfl.ai), `ChatContext` (shared module providing chat context + knowledge lookup for task handlers), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
 
 ## DB Tables
 
@@ -90,6 +91,8 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | `phrases` | `user_id`, `content` |
 | `knowledge` | `topic`, `content`, `embedding` (JSON), `source` (`manual`/`auto`), `chat_id` |
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
+| `songs` | `title`, `artist`, `album`, `genre`, `year`, `filepath` (unique, relative to music root), `duration`, `category` |
+| `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — auto-synced via triggers |
 
 ## Gotchas
 
@@ -121,3 +124,8 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - FLUX API settings in `config/settings.yml` under `flux` group: `api_key`; non-secret config (`api_url`, `model`) in `settings.common.yml`
 - Suno API settings in `config/settings.yml` under `suno` group: `api_key`; non-secret config (`api_url`, `model`) in `settings.common.yml`
 - `ChatContext` module (`lib/chat_context.rb`) provides `get_chat_context` and `get_relevant_knowledge` — included by both `SunoTaskHandler` and `ImageGenTaskHandler`
+- Radio search uses `Song.search` (FTS5) with fallback to legacy file-path matching if DB is empty; `radio.request` flow is unchanged
+- `Song.search` uses FTS5 prefix matching (`word*`) with `unicode61` tokenizer for Cyrillic+Latin; falls back to LIKE queries on FTS5 syntax errors
+- `MusicScanner` reads tags via `taglib-ruby`, falls back to parsing artist/title from filepath; run `bundle exec rake music:scan` to populate/refresh
+- `config/radio.yml` has `path` (music directory root) and `db` (legacy music.txt); `Song#absolute_path` joins `path` + relative `filepath`
+- `taglib-ruby` gem requires `libtag` C++ library: `brew install taglib` (macOS), already installed on production (FreeBSD pkg `taglib-1.10`)

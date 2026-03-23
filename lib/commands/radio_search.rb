@@ -10,15 +10,11 @@ module Commands
       query = cmd.match(PATTERN)[2]
       return CommandResult.none if query.size < 4
 
-      tr = radio.search(query)
-      if tr.empty?
+      songs = Song.search(query, limit: 20)
+      if songs.empty?
         CommandResult.text("Нихуя нет...")
       else
-        formatted = tr.map do |t|
-          tp = t.split("/").map { |p| p.gsub("_", " ") }
-          "#{tp[-2]} — #{tp[-1].gsub(/.mp3/i, "")}"
-        end
-        CommandResult.text(formatted.join("\n"))
+        CommandResult.text(songs.map(&:display_name).join("\n"))
       end
     end
   end

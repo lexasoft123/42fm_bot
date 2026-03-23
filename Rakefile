@@ -18,8 +18,21 @@ namespace :db do
   task :rollback do
     ActiveRecord::Base.establish_connection(YAML.load(File.open('config/database.yml')))
     migration_context = ActiveRecord::MigrationContext.new(File.join(__dir__, 'db/migrate'), ActiveRecord::SchemaMigration)
-    
+
     steps = ENV["STEP"] ? ENV["STEP"].to_i : 1
     migration_context.rollback(steps)
+  end
+end
+
+namespace :music do
+  desc "Scan music library and populate songs database"
+  task :scan do
+    require './config/boot'
+    config = AppConfigurator.new
+    config.configure
+
+    scanner = MusicScanner.new
+    stats = scanner.scan
+    puts "Scan complete: #{stats}"
   end
 end

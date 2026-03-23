@@ -222,6 +222,8 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 - **Background tasks:** The `compose_song` and `generate_image` agent tools create `BackgroundTask` records instead of blocking — songs/images are generated asynchronously and delivered to the chat when ready. The agent receives a confirmation message immediately.
 - **Suno tags:** Never include artist names in Suno tags — Suno blocks them. Describe the sound characteristics instead.
 - **ChatContext module:** `lib/chat_context.rb` provides `get_chat_context` and `get_relevant_knowledge` — shared by task handlers for context-aware generation.
+- **Music search:** `Song.search` uses FTS5 full-text search on metadata (title, artist, album, genre). Populated by `MusicScanner` via `rake music:scan`. Falls back to legacy file-path matching if DB is empty.
+- **taglib-ruby:** Requires `libtag` C++ library (`brew install taglib` on macOS, `pkg install taglib` on FreeBSD).
 
 ---
 
@@ -240,6 +242,7 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 | Change GPT API logic | `lib/gpt_master.rb` |
 | Change chat context window | `lib/commands/gpt_helpers.rb` + `context_messages_size` in settings |
 | Change radio commands | `lib/radio.rb` + relevant command in `lib/commands/` |
+| Music library / search | `models/song.rb` + `lib/music_scanner.rb` + `rake music:scan` |
 | Database schema change | `db/migrate/NNN_*.rb` + model in `models/` |
 | Add new settings | `config/settings.yml` + optionally `REQUIRED_KEYS` in `lib/settings.rb` |
 | Sticker IDs | `config/initializers/telegram_stickers.rb` |

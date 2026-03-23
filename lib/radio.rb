@@ -111,6 +111,10 @@ class Radio
     search_track track
   end
 
+  def search_songs(query, limit: 20)
+    Song.search(query, limit: limit)
+  end
+
   private
 
   def parse_metadata text
@@ -134,15 +138,24 @@ class Radio
     res
   end
 
-  def search_track track
+  def search_track(query)
+    songs = Song.search(query, limit: 50)
+    if songs.any?
+      songs.map(&:absolute_path)
+    else
+      legacy_search(query)
+    end
+  end
+
+  def legacy_search(query)
     music = File.read(CONFIG['db']).split(/[\r\n]+/)
-
-    Translit.convert! track if /\p{Cyrillic}/.match track
-
-    req = UnicodeUtils.downcase track
-    q = req.split(/\s/) # Mega important optimization
-    result = music.select { |tr| r = q.select{ |w| tr.downcase.gsub(".", "").index w }; r.size == q.size }
-    result
+    Translit.convert! query if /\p{Cyrillic}/.match query
+    req = UnicodeUtils.downcase query
+    q = req.split(/\s/)
+    music.select { |tr| r = q.select { |w| tr.downcase.gsub(".", "").index w }; r.size == q.size }
+  rescue => e
+    LOGGER.warn "Radio legacy_search: #{e.message}" if defined?(LOGGER)
+    []
   end
 
   def get_track_metadata req_id

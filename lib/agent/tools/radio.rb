@@ -12,11 +12,20 @@ Agent::ToolRegistry.register(
 
 Agent::ToolRegistry.register(
   name: 'radio_search',
-  description: 'Ищет треки в базе радиостанции по запросу. Возвращает список путей к файлам',
-  parameters: { 'query' => { type: 'string', description: 'Поисковый запрос (исполнитель, название трека)' } },
+  description: 'Ищет треки в базе радиостанции по запросу. Поиск по исполнителю, названию, альбому, жанру',
+  parameters: { 'query' => { type: 'string', description: 'Поисковый запрос (исполнитель, название трека, альбом, жанр)' } },
   handler: ->(args, ctx) {
-    results = ctx[:radio].search(args['query'])
-    results.empty? ? 'Ничего не найдено' : results.first(10).join("\n")
+    songs = Song.search(args['query'], limit: 10)
+    if songs.empty?
+      'Ничего не найдено'
+    else
+      songs.map { |s|
+        line = s.display_name
+        line += " [#{s.genre}]" if s.genre.to_s != ''
+        line += " — #{s.album}" if s.album.to_s != ''
+        line
+      }.join("\n")
+    end
   }
 )
 
