@@ -131,7 +131,7 @@ bin/bot
 │       └── robocoder.rb       # Base64+XOR encode/decode util
 ├── models/
 │   ├── user.rb       # ActiveRecord: users
-│   ├── song.rb       # ActiveRecord: songs (FTS5 search, metadata from audio tags)
+│   ├── song.rb       # ActiveRecord: songs (FTS4 search, metadata from audio tags)
 │   ├── message.rb    # ActiveRecord: messages (user optional for bot replies)
 │   ├── phrase.rb     # ActiveRecord: phrases
 │   ├── knowledge.rb       # ActiveRecord: knowledge facts (with embedding_vector serialization)
@@ -214,7 +214,7 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 | `knowledge` | `topic`, `content`, `embedding` (JSON float array), `source` (`manual`/`auto`), `chat_id` (bigint, indexed) |
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 | `songs` | `title`, `artist`, `album`, `genre`, `year` (int), `filepath` (unique, relative to music root), `duration` (int, seconds), `category` (top-level dir) |
-| `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — content table mode (`content='songs'`), auto-synced via INSERT/UPDATE/DELETE triggers |
+| `songs_fts` | FTS4 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — content table mode (`content='songs'`), auto-synced via INSERT/UPDATE/DELETE triggers |
 
 **Relationships:**
 - `User` has_many `messages` (FK: `user_uid` → `users.uid`)
@@ -228,11 +228,11 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 ### Radio — `lib/radio.rb`
 Communicates with Liquidsoap server over a raw TCP socket on `localhost:1234`. Connection is **lazy** — socket opens on first use, not at startup. Sends text commands, parses responses. Key operations: get current track, search, request, manage queue, fetch stats.
 
-Search uses `Song.search` (FTS5) with fallback to legacy file-path matching (`music.txt`). `radio.request` picks a random match and pushes the absolute path to Liquidsoap.
+Search uses `Song.search` (FTS4) with fallback to legacy file-path matching (`music.txt`). `radio.request` picks a random match and pushes the absolute path to Liquidsoap.
 
 ### Song — `models/song.rb`
 ActiveRecord model for the music library. Populated by `MusicScanner` from audio file tags.
-- `Song.search(query, limit:)` — FTS5 MATCH with prefix matching (`word*`), ordered by rank; falls back to LIKE on syntax errors
+- `Song.search(query, limit:)` — FTS4 MATCH with prefix matching (`word*`); falls back to LIKE on syntax errors
 - `Song#absolute_path` — joins `Settings.radio['path']` + `filepath` for Liquidsoap `request.push`
 - `Song#display_name` — `"Artist — Title (Year)"` from metadata
 

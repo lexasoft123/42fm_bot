@@ -222,7 +222,7 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 - **Background tasks:** The `compose_song` and `generate_image` agent tools create `BackgroundTask` records instead of blocking — songs/images are generated asynchronously and delivered to the chat when ready. The agent receives a confirmation message immediately.
 - **Suno tags:** Never include artist names in Suno tags — Suno blocks them. Describe the sound characteristics instead.
 - **ChatContext module:** `lib/chat_context.rb` provides `get_chat_context` and `get_relevant_knowledge` — shared by task handlers for context-aware generation.
-- **Music search:** `Song.search` uses FTS5 full-text search on metadata (title, artist, album, genre). Populated by `MusicScanner` via `rake music:scan`. Falls back to legacy file-path matching if DB is empty.
+- **Music search:** `Song.search` uses FTS4 full-text search on metadata (title, artist, album, genre). Populated by `MusicScanner` via `rake music:scan`. Falls back to legacy file-path matching if DB is empty.
 - **taglib-ruby:** Requires `libtag` C++ library (`brew install taglib` on macOS, `pkg install taglib` on FreeBSD).
 
 ---

@@ -1,5 +1,5 @@
 class Song < ActiveRecord::Base
-  # FTS5 search: returns Song records ordered by relevance
+  # FTS4 search: returns Song records matching query
   def self.search(query, limit: 20)
     return [] if query.nil? || query.strip.empty?
 
@@ -8,9 +8,8 @@ class Song < ActiveRecord::Base
 
     find_by_sql([
       "SELECT songs.* FROM songs " \
-      "JOIN songs_fts ON songs.id = songs_fts.rowid " \
+      "JOIN songs_fts ON songs.id = songs_fts.docid " \
       "WHERE songs_fts MATCH ? " \
-      "ORDER BY rank " \
       "LIMIT ?",
       sanitized, limit
     ])
