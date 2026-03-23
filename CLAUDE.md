@@ -67,7 +67,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | Reply text templates | `config/replies/*.yml` |
 | GPT prompt/model | `config/settings.yml` (`chat_gpt.settings.*` + `chat_gpt.providers.*`) + `lib/gpt_master.rb` |
 | TTS / audio | `lib/polly.rb` (AWS Polly + FFmpeg → OGG Opus) + `lib/tts_service.rb` |
-| Radio (Liquidsoap TCP) | `lib/radio.rb` + `config/radio.yml` |
+| Radio (Liquidsoap TCP) | `lib/radio.rb` |
 | Music search / song DB | `models/song.rb` + `lib/music_scanner.rb` + `rake music:scan` |
 | Agent mode tools | `lib/agent/tools/*.rb` + `lib/agent/tool_registry.rb` + `lib/agent/runner.rb` |
 | Background tasks | `lib/task_runner.rb` + `lib/task_handlers/*.rb` + `models/background_task.rb` |
@@ -127,5 +127,5 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - Radio search uses `Song.search` (FTS5) with fallback to legacy file-path matching if DB is empty; `radio.request` flow is unchanged
 - `Song.search` uses FTS5 prefix matching (`word*`) with `unicode61` tokenizer for Cyrillic+Latin; falls back to LIKE queries on FTS5 syntax errors
 - `MusicScanner` reads tags via `taglib-ruby`, falls back to parsing artist/title from filepath; run `bundle exec rake music:scan` to populate/refresh
-- `config/radio.yml` has `path` (music directory root) and `db` (legacy music.txt); `Song#absolute_path` joins `path` + relative `filepath`
+- `Settings.radio['path']` (music directory root) and `Settings.radio['db']` (legacy music.txt) are in `settings.common.yml`; `Song#absolute_path` joins `path` + relative `filepath`
 - `taglib-ruby` gem requires `libtag` C++ library: `brew install taglib` (macOS), already installed on production (FreeBSD pkg `taglib-1.10`)

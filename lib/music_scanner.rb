@@ -5,7 +5,7 @@ class MusicScanner
   BATCH_SIZE = 500
 
   def initialize(music_path: nil, logger: nil)
-    @music_path = music_path || CONFIG['path']
+    @music_path = music_path || Settings.radio['path']
     @logger = logger || (defined?(LOGGER) ? LOGGER : Logger.new($stdout))
   end
 

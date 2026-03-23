@@ -101,6 +101,10 @@ flux:
   api_url: 'https://api.bfl.ai'
   model: 'flux-2-pro'
 
+radio:
+  db: '/home/radio/content/music.txt'
+  path: '/home/radio/content/music'
+
 logging:
   path: log/bot.log
   level: debug

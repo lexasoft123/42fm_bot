@@ -36,7 +36,6 @@ bin/bot
 │   ├── boot.rb          # Bootstrap: loads all modules
 │   ├── database.yml     # SQLite3 connection (db/bot.db)
 │   ├── settings.yml     # Secrets (gitignored)
-│   ├── radio.yml        # Radio server config
 │   ├── bober.yml        # Bober command phrases
 │   ├── initializers/
 │   │   ├── 01_settings.rb        # Loads settings.yml
@@ -234,7 +233,7 @@ Search uses `Song.search` (FTS5) with fallback to legacy file-path matching (`mu
 ### Song — `models/song.rb`
 ActiveRecord model for the music library. Populated by `MusicScanner` from audio file tags.
 - `Song.search(query, limit:)` — FTS5 MATCH with prefix matching (`word*`), ordered by rank; falls back to LIKE on syntax errors
-- `Song#absolute_path` — joins `CONFIG['path']` + `filepath` for Liquidsoap `request.push`
+- `Song#absolute_path` — joins `Settings.radio['path']` + `filepath` for Liquidsoap `request.push`
 - `Song#display_name` — `"Artist — Title (Year)"` from metadata
 
 ### MusicScanner — `lib/music_scanner.rb`

@@ -20,7 +20,7 @@ class Song < ActiveRecord::Base
 
   # Full absolute path for Liquidsoap request.push
   def absolute_path
-    File.join(CONFIG['path'], filepath)
+    File.join(Settings.radio['path'], filepath)
   end
 
   def display_name

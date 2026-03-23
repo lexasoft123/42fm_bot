@@ -2,9 +2,6 @@ require 'socket'
 require 'translit'
 require 'unicode_utils'
 require 'rest-client'
-require 'yaml'
-
-CONFIG = YAML.load(File.read('config/radio.yml'))
 
 class Radio
   def initialize
@@ -148,7 +145,7 @@ class Radio
   end
 
   def legacy_search(query)
-    music = File.read(CONFIG['db']).split(/[\r\n]+/)
+    music = File.read(Settings.radio['db']).split(/[\r\n]+/)
     Translit.convert! query if /\p{Cyrillic}/.match query
     req = UnicodeUtils.downcase query
     q = req.split(/\s/)
