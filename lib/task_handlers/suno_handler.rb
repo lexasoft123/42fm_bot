@@ -116,7 +116,7 @@ class SunoTaskHandler
   def poll_and_deliver(task, api)
     result = SunoClient.new.poll_once(task.external_id)
 
-    LOGGER.debug "SunoTaskHandler[#{task.id}]: polling #{task.external_id} (attempt #{task.attempts + 1}/#{task.max_attempts})"
+    LOGGER.debug "SunoTaskHandler[#{task.id}]: polling #{task.external_id} (attempt #{task.attempts + 1}/#{task.max_attempts}) → #{result.inspect}"
 
     case result
     when :pending
