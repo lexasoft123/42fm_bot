@@ -8,6 +8,7 @@ Full docs: `docs/architecture.md` | Agent guide: `docs/agents.md`
 
 - **Never commit automatically.** Always ask the user before creating a git commit.
 - **Never run `ruby lib/bot.rb` directly.** Always use `./bin/bot start/stop/restart`.
+- Always update all documents on changes.
 
 ---
 
