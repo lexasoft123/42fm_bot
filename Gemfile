@@ -28,7 +28,7 @@ gem 'logger'
 gem 'csv'
 gem 'observer'
 gem 'rake'
-gem 'taglib-ruby'
+gem 'wahwah'
 
 group :development do
   gem 'irb', require: false

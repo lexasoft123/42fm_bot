@@ -147,7 +147,6 @@ GEM
     sqlite3 (1.7.3)
       mini_portile2 (~> 2.8.0)
     stringio (3.2.0)
-    taglib-ruby (2.0.0)
     telegram-bot-ruby (2.5.0)
       dry-struct (~> 1.6)
       faraday (~> 2.0)
@@ -159,6 +158,7 @@ GEM
       concurrent-ruby (~> 1.0)
     unicode_utils (1.4.0)
     uri (1.1.1)
+    wahwah (1.6.7)
     zeitwerk (2.7.5)
 
 PLATFORMS
@@ -190,10 +190,10 @@ DEPENDENCIES
   sk_google_custom_search_api (~> 2.0.1)
   socksify
   sqlite3 (~> 1.4)
-  taglib-ruby
   telegram-bot-ruby (~> 2)
   translit
   unicode_utils
+  wahwah
 
 BUNDLED WITH
   4.0.3

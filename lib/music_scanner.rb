@@ -1,4 +1,4 @@
-require 'taglib'
+require 'wahwah'
 
 class MusicScanner
   AUDIO_EXTENSIONS = %w[.mp3 .ogg .m4a .flac .wav].freeze
@@ -69,24 +69,17 @@ class MusicScanner
   end
 
   def read_tags(path)
+    tag = WahWah.open(path)
     tags = {}
-    TagLib::FileRef.open(path) do |file|
-      unless file.null?
-        t = file.tag
-        if t
-          tags[:title]  = t.title.to_s.strip
-          tags[:artist] = t.artist.to_s.strip
-          tags[:album]  = t.album.to_s.strip
-          tags[:genre]  = t.genre.to_s.strip
-          tags[:year]   = t.year if t.year > 0
-        end
-        props = file.audio_properties
-        tags[:duration] = props.length_in_seconds if props
-      end
-    end
+    tags[:title]    = tag.title.to_s.strip
+    tags[:artist]   = tag.artist.to_s.strip
+    tags[:album]    = tag.album.to_s.strip
+    tags[:genre]    = tag.genre.to_s.strip
+    tags[:year]     = tag.year.to_i if tag.year.to_i > 0
+    tags[:duration] = tag.duration.to_i if tag.duration.to_i > 0
     tags
   rescue => e
-    @logger.warn "MusicScanner: taglib error on #{path}: #{e.message}"
+    @logger.warn "MusicScanner: tag read error on #{path}: #{e.message}"
     {}
   end
 

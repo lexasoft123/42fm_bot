@@ -57,7 +57,7 @@ bin/bot
 │   ├── app_configurator.rb    # i18n, DB, SOCKS proxy init
 │   ├── database_connector.rb  # ActiveRecord setup
 │   ├── radio.rb               # Liquidsoap TCP client (lazy connect) + Song-backed search
-│   ├── music_scanner.rb       # Reads audio file tags (taglib-ruby), populates songs DB
+│   ├── music_scanner.rb       # Reads audio file tags (wahwah), populates songs DB
 │   ├── gpt_master.rb          # Anthropic/OpenAI-compatible API client (.chat / .ask / .call_raw)
 │   ├── embedding_service.rb   # OpenAI-compatible embeddings API
 │   ├── knowledge_base.rb      # Semantic RAG: add/search/extract_and_store facts
@@ -237,7 +237,7 @@ ActiveRecord model for the music library. Populated by `MusicScanner` from audio
 - `Song#display_name` — `"Artist — Title (Year)"` from metadata
 
 ### MusicScanner — `lib/music_scanner.rb`
-Reads audio file tags via `taglib-ruby` (`TagLib::FileRef`), populates the `songs` table. Idempotent: updates existing records, creates new ones, removes orphans (by `updated_at` timestamp). Falls back to parsing artist/title from filepath if tags are empty. Run via `bundle exec rake music:scan`.
+Reads audio file tags via `wahwah` (pure Ruby, no native deps), populates the `songs` table. Idempotent: updates existing records, creates new ones, removes orphans (by `updated_at` timestamp). Falls back to parsing artist/title from filepath if tags are empty. Run via `bundle exec rake music:scan`.
 
 ### GptMaster — `lib/gpt_master.rb`
 HTTP client (HTTParty) supporting both Anthropic and OpenAI-compatible APIs. Provider selected via `settings.yml` `chat_gpt.provider`. Two class-method interfaces:
