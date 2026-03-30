@@ -85,7 +85,7 @@ namespace :knowledge do
     config.configure
     LOGGER = config.logger
 
-    threshold = ENV.fetch('THRESHOLD', '0.85').to_f
+    threshold = ENV['THRESHOLD'] ? ENV['THRESHOLD'].to_f : (Settings.knowledge['compact_threshold'] || 0.85)
     chat_ids  = ENV['CHAT_ID'] ? [ENV['CHAT_ID'].to_i] : Knowledge.distinct.pluck(:chat_id)
 
     chat_ids.each do |cid|
