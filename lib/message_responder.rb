@@ -55,6 +55,7 @@ require './lib/commands/google_search'
 require './lib/commands/knowledge_add'
 require './lib/commands/knowledge_list'
 require './lib/commands/knowledge_delete'
+require './lib/commands/knowledge_compact'
 require './lib/commands/fallback_reply'
 require './lib/commands/registry'
 

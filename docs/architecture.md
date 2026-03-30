@@ -134,11 +134,12 @@ bin/bot
 │   ├── song.rb       # ActiveRecord: songs (FTS4 search, metadata from audio tags)
 │   ├── message.rb    # ActiveRecord: messages (user optional for bot replies)
 │   ├── phrase.rb     # ActiveRecord: phrases
-│   ├── knowledge.rb       # ActiveRecord: knowledge facts (with embedding_vector serialization)
+│   ├── knowledge.rb              # ActiveRecord: knowledge facts (with embedding_vector serialization)
+│   ├── knowledge_compact_log.rb  # ActiveRecord: compaction run history
 │   └── background_task.rb # ActiveRecord: persistent background tasks
 ├── db/
 │   ├── bot.db        # SQLite3 database
-│   └── migrate/      # ActiveRecord migrations (009 files)
+│   └── migrate/      # ActiveRecord migrations (011 files)
 ├── lib/samples/      # MP3 backing tracks for karaoke TTS
 ├── Gemfile
 ├── Rakefile          # db:migrate tasks
@@ -261,9 +262,12 @@ Calls an OpenAI-compatible embeddings API (`embeddings.api_url`) to produce floa
 Semantic RAG store:
 - `KnowledgeBase.add(topic:, content:, source:)` — embed + store a fact; deduplicates via cosine similarity threshold (0.92)
 - `KnowledgeBase.search(query, top_k:)` — embed query, return top-K facts by cosine similarity
-- `KnowledgeBase.extract_and_store(messages)` — uses `GptMaster.ask` with a structured prompt to extract 3–7 facts from recent chat messages, stores non-duplicate ones as `source: 'auto'`
+- `KnowledgeBase.extract_and_store(messages)` — uses `GptMaster.ask` with a structured prompt to extract 3–7 facts from recent chat messages, stores non-duplicate ones as `source: 'auto'`; calls `maybe_trigger_compact` after each batch
+- `KnowledgeBase.compact!(chat_id:, threshold: 0.85)` — clusters all stored embeddings via pairwise cosine similarity + union-find (no API calls), then LLM-merges each cluster ≥ 2 into one comprehensive fact; logs all cluster before/after to `log/knowledge_compact.log`; writes result to `knowledge_compact_log` table
 
 Auto-extraction is triggered by `MessageResponder#maybe_extract_knowledge` every `knowledge.extract_every` user messages per chat, runs in a background `Thread`.
+
+Auto-compaction is triggered by `maybe_trigger_compact` after each extraction batch. Uses an adaptive threshold: if the last compaction found only small clusters (avg ≤ 2 entries), the effective threshold scales up to 3× `compact_at` before the next run. Threshold settings: `knowledge.compact_at` (entry count trigger, default 100), `knowledge.compact_threshold` (cosine similarity, default 0.85). Logs to `log/knowledge_compact.log`.
 
 ### Agent Mode — `lib/agent/`
 When `chat_gpt.agent_mode: true`, GPT commands (`GptChat`, `GptQuestion`) use `Agent::Runner` instead of `GptMaster.chat`. The runner implements an agentic tool-use loop:
@@ -302,6 +306,7 @@ Generic DB-backed persistent task system for long-running operations. A poller t
 **Current handlers:**
 - `SunoTaskHandler` (`suno_generate`) — LLM request parsing → GPT lyrics composition → LLM tag enrichment → Suno V5 API submit → poll → send audio with lyrics caption. Uses `ChatContext` for context-aware lyrics.
 - `ImageGenTaskHandler` (`image_generate`) — LLM English prompt generation (with chat context + knowledge) → FLUX 2 API submit → poll → send photo. Uses `ChatContext` for context-aware prompts.
+- `KnowledgeCompactHandler` (`knowledge_compact`) — calls `KnowledgeBase.compact!` for the task's chat; logs to `log/knowledge_compact.log`; enqueued automatically by `maybe_trigger_compact` when entry count crosses the adaptive threshold.
 
 ### ChatContext — `lib/chat_context.rb`
 Shared module included by task handlers. Provides:
@@ -408,6 +413,7 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 | `бот запомни <content>` | Add fact to knowledge base (admin only) |
 | `бот знания` | List all knowledge base entries with IDs |
 | `бот забудь <id>` | Delete a knowledge base entry (admin only) |
+| `бот сожми знания` | LLM-compact near-duplicate knowledge entries (admin only) |
 
 ### Voice TTS
 | Command | Description |
@@ -493,6 +499,8 @@ chat_gpt:
 knowledge:
   top_k: 3            # facts to inject per GPT call
   extract_every: 50   # auto-extract after every N user messages per chat
+  compact_at: 100     # trigger background compaction when entry count reaches this
+  compact_threshold: 0.85  # cosine similarity threshold for clustering near-dupes
 suno:
   api_url: https://api.sunoapi.org
   api_key: ...

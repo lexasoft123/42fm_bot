@@ -80,7 +80,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 
 ## Services
 
-`Radio` (Liquidsoap TCP socket, lazy connect), `Song` (music library with FTS4 search, populated by `MusicScanner`), `MusicScanner` (reads audio file tags via wahwah, populates songs DB), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`/`.call_raw`), `Agent::Runner` (agentic tool-use loop over GptMaster), `Agent::ToolRegistry` (tool definitions for agent mode), `TaskRunner` (generic DB-backed background task poller + handler registry), `SunoClient` (Suno AI song generation API, V5 model), `FluxClient` (FLUX 2 image generation API via api.bfl.ai), `ChatContext` (shared module providing chat context + knowledge lookup for task handlers), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
+`Radio` (Liquidsoap TCP socket, lazy connect), `Song` (music library with FTS4 search, populated by `MusicScanner`), `MusicScanner` (reads audio file tags via wahwah, populates songs DB), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`/`.call_raw`), `Agent::Runner` (agentic tool-use loop over GptMaster), `Agent::ToolRegistry` (tool definitions for agent mode), `TaskRunner` (generic DB-backed background task poller + handler registry), `SunoClient` (Suno AI song generation API, V5 model), `FluxClient` (FLUX 2 image generation API via api.bfl.ai), `ChatContext` (shared module providing chat context + knowledge lookup for task handlers), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract/compact facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
 
 ## DB Tables
 
@@ -90,6 +90,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | `messages` | `user_uid` (nullable), `chat_id`, `body`, `role` (`user`/`bot`) |
 | `phrases` | `user_id`, `content` |
 | `knowledge` | `topic`, `content`, `embedding` (JSON), `source` (`manual`/`auto`), `chat_id` |
+| `knowledge_compact_log` | `chat_id`, `merged`, `removed`, `kept`, `threshold`, `created_at` — one row per compaction run |
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 | `songs` | `title`, `artist`, `album`, `genre`, `year`, `filepath` (unique, relative to music root), `duration`, `category` |
 | `songs_fts` | FTS4 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — auto-synced via triggers |
@@ -110,6 +111,8 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - To change prompts, models, or non-secret config — edit `config/settings.common.yml` (committed). For API keys — edit `config/settings.yml` (gitignored)
 - Knowledge auto-extraction runs in a background Thread every `knowledge.extract_every` messages per chat
 - Embeddings deduplication threshold is 0.92 cosine similarity — near-duplicate facts are not stored
+- Knowledge auto-compaction (`KnowledgeBase.compact!`) clusters near-dupes via stored embeddings (no API calls) and LLM-merges each cluster; triggered as a `knowledge_compact` background task when count >= adaptive threshold (`compact_at` × factor based on last run's avg cluster size); logs to `log/knowledge_compact.log`; history in `knowledge_compact_log` table
+- `бот сожми знания` (admin only) triggers compaction immediately for the current chat
 - `бот найди/ищи/пошукай` → Google search; bare `бот <text>` → GPT chat
 - Agent mode (`chat_gpt.agent_mode: true`) lets GPT call bot tools (radio, weather, search, etc.) autonomously; toggle off to revert to simple GPT
 - `GptQuestion`/`GptChat` must be last `бот`-prefixed commands in registry — they match `бот <anything>`

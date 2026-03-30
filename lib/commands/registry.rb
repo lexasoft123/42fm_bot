@@ -22,6 +22,7 @@ module Commands
     KnowledgeAdd,
     KnowledgeList,
     KnowledgeDelete,
+    KnowledgeCompact,
     Translate,
     HoroscopeSign,
     HoroscopeGeneral,
