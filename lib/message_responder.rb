@@ -144,13 +144,15 @@ class MessageResponder
 
     chat_id = @chat_id
     Thread.new do
-      recent = Message.left_outer_joins(:user)
-        .select('users.name, messages.body')
-        .where(chat_id: chat_id, role: 'user')
-        .order('messages.created_at DESC')
-        .limit(extract_every)
-        .reverse
-      KnowledgeBase.extract_and_store(recent, chat_id: chat_id)
+      ActiveRecord::Base.connection_pool.with_connection do
+        recent = Message.left_outer_joins(:user)
+          .select('users.name, messages.body')
+          .where(chat_id: chat_id, role: 'user')
+          .order('messages.created_at DESC')
+          .limit(extract_every)
+          .reverse
+        KnowledgeBase.extract_and_store(recent, chat_id: chat_id)
+      end
     rescue => e
       LOGGER.error "maybe_extract_knowledge thread error: #{e.message}"
     end

@@ -16,7 +16,9 @@ class TaskRunner
       Thread.new do
         runner = new(bot_api)
         loop do
-          runner.process_pending
+          ActiveRecord::Base.connection_pool.with_connection do
+            runner.process_pending
+          end
           sleep POLL_INTERVAL
         rescue => e
           LOGGER.error "TaskRunner: #{e.class}: #{e.message}"

@@ -1,2 +1,4 @@
 adapter: sqlite3
 database: db/bot.db
+pool: 10
+reaping_frequency: 30
