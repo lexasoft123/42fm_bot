@@ -19,6 +19,8 @@ module Agent
       messages = build_initial_messages
       tools    = ToolRegistry.definitions_for(user_role: @user.role, api_type: @api_type)
 
+      agent_logger.info "START chat=#{@chat_id} user=#{@user.name} (#{@user.role})\nREQUEST: #{@text}"
+
       MAX_ITERATIONS.times do |i|
         raw = GptMaster.new(messages, setting: @setting).call_raw(tools: tools)
         return 'жпт не жпт' unless raw
@@ -26,21 +28,25 @@ module Agent
         tool_calls = extract_tool_calls(raw)
 
         if tool_calls.empty?
-          return extract_text(raw) || 'жпт не жпт'
+          text = extract_text(raw) || 'жпт не жпт'
+          agent_logger.info "DONE (#{i + 1} iteration#{i > 0 ? 's' : ''}, no tools)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
+          return text
         end
 
+        agent_logger.info "iteration #{i + 1}: #{tool_calls.map { |t| "#{t[:name]}(#{t[:input].to_json})" }.join(', ')}"
         messages << build_assistant_message(raw)
 
         tool_calls.each do |tc|
           result = execute_tool(tc[:name], tc[:input])
+          agent_logger.info "  #{tc[:name]} → #{result[0..300]}#{result.length > 300 ? '...' : ''}"
           messages << build_tool_result_message(tc[:id], result)
         end
-
-        LOGGER.debug "Agent iteration #{i + 1}: #{tool_calls.map { |t| t[:name] }.join(', ')}"
       end
 
       # Safety: final call without tools to force a text response
-      GptMaster.new(messages, setting: @setting).call || 'жпт не жпт'
+      text = GptMaster.new(messages, setting: @setting).call || 'жпт не жпт'
+      agent_logger.info "DONE (#{MAX_ITERATIONS} iterations, forced final)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
+      text
     end
 
     private
@@ -69,7 +75,12 @@ module Agent
       truncate(result.to_s)
     rescue => e
       LOGGER.error "Agent tool #{name} error: #{e.class}: #{e.message}"
+      agent_logger.error "  #{name} ERROR: #{e.class}: #{e.message}"
       "идите нахуй"
+    end
+
+    def agent_logger
+      @agent_logger ||= Logger.new('log/agent.log', 10, 10 * 1024 * 1024)
     end
 
     def truncate(str)
