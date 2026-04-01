@@ -25,6 +25,22 @@ Full docs: `docs/architecture.md` | Agent guide: `docs/agents.md`
 
 Logs: `log/bot.log` (app + SQL). PID file: `pids/42fm_bot.pid`.
 
+## Deploying to Production
+
+```bash
+# On local: commit and push
+git push origin master
+
+# On prod: pull and restart
+ssh radio@42fm.ru
+cd ~/bot
+/usr/local/rvm/bin/rvm $(cat .ruby-version) do ./bin/bot restart
+```
+
+RVM is at `/usr/local/rvm/bin/rvm` (system-wide install). Always use `rvm $(cat .ruby-version) do` to load the correct Ruby — never call `./bin/bot` directly in a non-login SSH session as `ruby` won't be in PATH.
+
+If migrations are needed: `/usr/local/rvm/bin/rvm $(cat .ruby-version) do bundle exec rake db:migrate` before restart.
+
 ---
 
 ## Keeping Docs Up to Date
