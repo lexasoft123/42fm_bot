@@ -1,5 +1,6 @@
 require 'rss'
 require 'yaml'
+require 'fileutils'
 require 'unicode_utils'
 
 require './lib/message_sender'
@@ -121,7 +122,10 @@ class MessageResponder
     when :text    then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send if result.payload
     when :sticker then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_sticker
     when :image   then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_image
-    when :voice   then @bot.api.sendVoice(chat_id: @chat_id, voice: Faraday::UploadIO.new(result.payload, 'audio/ogg'))
+    when :voice
+      path = result.payload
+      @bot.api.sendVoice(chat_id: @chat_id, voice: Faraday::UploadIO.new(path, 'audio/ogg'))
+      FileUtils.rm_f(path)
     when :audio   then @bot.api.sendAudio(
       chat_id: @chat_id, audio: result.payload,
       title: result.meta[:title], performer: result.meta[:performer])
