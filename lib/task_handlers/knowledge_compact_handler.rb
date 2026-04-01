@@ -1,6 +1,6 @@
 class KnowledgeCompactHandler
   def call(task, _api)
-    threshold = task.params.fetch('threshold', 0.85)
+    threshold = task.params_hash.fetch('threshold', 0.85)
     stats = KnowledgeBase.compact!(chat_id: task.chat_id, threshold: threshold)
     task.mark_done!(stats)
     LOGGER.info "KnowledgeCompact task #{task.id}: #{stats}"

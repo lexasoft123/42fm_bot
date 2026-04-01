@@ -16,34 +16,40 @@ class Polly
     )
   end
 
+  WEB_DIR     = File.expand_path('../web', __dir__)
+  SAMPLES_DIR = File.expand_path('samples', __dir__)
+
   def generate
     resp = @client.synthesize_speech({
       output_format: "mp3",
       text: @phrase,
       voice_id: @voice
     })
-    filepath = File.join(__dir__, "../web/message.mp3")
-    clear_old_files
-    IO.copy_stream(resp.audio_stream, filepath)
+    mp3  = File.join(WEB_DIR, 'message.mp3')
+    wav  = File.join(WEB_DIR, 'message.wav')
     filename = "#{SecureRandom.hex(4)}.ogg"
-    Dir.chdir File.join(__dir__, "../web/")
+    ogg  = File.join(WEB_DIR, filename)
+    clear_old_files
+    IO.copy_stream(resp.audio_stream, mp3)
 
     if @speed
-      exec_command "ffmpeg -i message.mp3 -filter:a \"atempo=#{@speed}\" out.mp3 && mv out.mp3 message.mp3"
+      out = File.join(WEB_DIR, 'out.mp3')
+      exec_command "ffmpeg -i #{mp3} -filter:a \"atempo=#{@speed}\" #{out} && mv #{out} #{mp3}"
     end
 
-    samples = Dir.entries("../lib/samples/").select{|f| f =~ /.mp3$/}
+    samples = Dir.entries(SAMPLES_DIR).select { |f| f =~ /.mp3$/ }
     if @minus
       track = if @track_id
         "minus#{@track_id % samples.size}.mp3"
       else
         samples.sample
       end
-      exec_command "ffmpeg -y -i message.mp3 -i ../lib/samples/#{track} -filter_complex amerge=inputs=2 -ac 2 output.mp3 && mv output.mp3 message.mp3"
+      out = File.join(WEB_DIR, 'output.mp3')
+      exec_command "ffmpeg -y -i #{mp3} -i #{File.join(SAMPLES_DIR, track)} -filter_complex amerge=inputs=2 -ac 2 #{out} && mv #{out} #{mp3}"
     end
 
-    exec_command "ffmpeg -y -i message.mp3 -acodec pcm_s16le -ar 44100 message.wav"
-    exec_command "opusenc --bitrate #{BITRATE} message.wav #{filename}"
+    exec_command "ffmpeg -y -i #{mp3} -acodec pcm_s16le -ar 44100 #{wav}"
+    exec_command "opusenc --bitrate #{BITRATE} #{wav} #{ogg}"
     return filename
   end
   def exec_command command

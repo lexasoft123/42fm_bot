@@ -141,7 +141,7 @@ class KnowledgeBase
       return if BackgroundTask.where(task_type: 'knowledge_compact', chat_id: chat_id, status: 'pending').exists?
 
       threshold = cfg.fetch('compact_threshold', 0.85)
-      BackgroundTask.create!(task_type: 'knowledge_compact', chat_id: chat_id, params: { 'threshold' => threshold })
+      BackgroundTask.create!(task_type: 'knowledge_compact', chat_id: chat_id, params: { 'threshold' => threshold }.to_json)
       LOGGER.info "KnowledgeBase: queued compaction for chat #{chat_id} (count=#{count}, effective_at=#{(base * factor).round}, factor=#{factor.round(2)})"
     end
 
