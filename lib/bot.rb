@@ -27,7 +27,7 @@ begin
         next unless message.from
         options = { bot: bot, message: message, radio: @radio }
         logger.debug "@#{message.from.username}: #{message.text if message.respond_to?(:text)} chat: #{message.chat.id}"
-        if Settings.auth['chat_ids'].include?(message.chat.id)
+        if Settings.auth['chats'].any? { |c| c['id'] == message.chat.id }
           MessageResponder.new(options).respond
         else
           logger.error "unauthorized chat id: #{message.chat.id}"

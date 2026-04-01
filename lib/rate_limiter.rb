@@ -1,0 +1,59 @@
+module RateLimiter
+  TASK_TYPES = {
+    'image' => 'image_generate',
+    'suno'  => 'suno_generate'
+  }.freeze
+
+  RATE_LIMIT_REPLIES = {
+    'image' => [
+      "Не части, %{mins} мин жди ещё.",
+      "Харэ спамить, следующая картинка через %{mins} мин.",
+      "Охади, художник хуев. Через %{mins} мин.",
+      "Лимит исчерпан. Следующая картинка через %{mins} мин, жди.",
+    ],
+    'suno' => [
+      "Не гони, следующая песня через %{mins} мин.",
+      "Харэ спамить, через %{mins} мин. сочиню ещё.",
+      "Лимит исчерпан. Подожди %{mins} мин., меломан хуев.",
+      "Всё, харэ. Следующая песня через %{mins} мин.",
+    ]
+  }.freeze
+
+  def self.limit_for(chat_id, service)
+    chats = Settings.auth['chats'] || []
+    chat  = chats.find { |c| c['id'] == chat_id }
+    chat&.dig('rate_limits', service) ||
+      Settings.auth.dig('rate_limits', service) ||
+      { 'max' => 1, 'window_minutes' => 20 }
+  end
+
+  def self.exceeded?(chat_id, service)
+    limit     = limit_for(chat_id, service)
+    task_type = TASK_TYPES[service]
+    window    = limit['window_minutes'] * 60
+    count     = BackgroundTask
+                  .where(task_type: task_type, chat_id: chat_id)
+                  .where('created_at > ?', Time.now - window)
+                  .count
+    count >= limit['max']
+  end
+
+  def self.minutes_until_free(chat_id, service)
+    limit     = limit_for(chat_id, service)
+    task_type = TASK_TYPES[service]
+    window    = limit['window_minutes'] * 60
+    oldest    = BackgroundTask
+                  .where(task_type: task_type, chat_id: chat_id)
+                  .where('created_at > ?', Time.now - window)
+                  .order(:created_at)
+                  .first
+    return 0 unless oldest
+    [((oldest.created_at + window - Time.now) / 60).ceil, 1].max
+  end
+
+  def self.reply(chat_id, service)
+    mins     = minutes_until_free(chat_id, service)
+    template = RATE_LIMIT_REPLIES[service].sample
+    template % { mins: mins }
+  end
+end

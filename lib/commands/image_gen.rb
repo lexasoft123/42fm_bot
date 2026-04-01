@@ -10,6 +10,10 @@ module Commands
       rest = cmd.match(PATTERN)[:rest].to_s.strip
       return CommandResult.text("Что нарисовать?") if rest.empty?
 
+      if RateLimiter.exceeded?(chat_id, 'image')
+        return CommandResult.text(RateLimiter.reply(chat_id, 'image'))
+      end
+
       BackgroundTask.create!(
         task_type: 'image_generate',
         chat_id: chat_id,

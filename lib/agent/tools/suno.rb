@@ -9,6 +9,9 @@ Agent::ToolRegistry.register(
     'genre'  => { type: 'string', description: 'Жанр на русском (e.g. "рок", "метал", "рэп")' },
   },
   handler: ->(args, ctx) {
+    if RateLimiter.exceeded?(ctx[:chat_id], 'suno')
+      next RateLimiter.reply(ctx[:chat_id], 'suno')
+    end
     BackgroundTask.create!(
       task_type: 'suno_generate',
       chat_id: ctx[:chat_id],

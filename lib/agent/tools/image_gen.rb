@@ -5,6 +5,9 @@ Agent::ToolRegistry.register(
     'prompt' => { type: 'string', description: 'Точная формулировка запроса пользователя — что нарисовать.' },
   },
   handler: ->(args, ctx) {
+    if RateLimiter.exceeded?(ctx[:chat_id], 'image')
+      next RateLimiter.reply(ctx[:chat_id], 'image')
+    end
     BackgroundTask.create!(
       task_type: 'image_generate',
       chat_id: ctx[:chat_id],

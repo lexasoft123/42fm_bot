@@ -19,6 +19,7 @@ require './lib/suno_client'
 require './lib/flux_client'
 require './lib/polly'
 require './lib/tts_service'
+require './lib/rate_limiter'
 require './lib/command_context'
 require './lib/command_result'
 require './lib/commands/base'
@@ -173,7 +174,8 @@ class MessageResponder
   end
 
   def process_voice_message
-    return unless Settings.auth['audio_chat_ids'].include?(@chat_id)
+    audio_ids = Settings.auth['chats'].select { |c| c['audio'] }.map { |c| c['id'] }
+    return unless audio_ids.include?(@chat_id)
 
     file_id = message.voice.file_id
     file = bot.api.getFile(file_id: file_id)

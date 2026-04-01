@@ -9,6 +9,10 @@ module Commands
     def execute
       rest = cmd.match(PATTERN)[:rest].to_s.strip
 
+      if RateLimiter.exceeded?(chat_id, 'suno')
+        return CommandResult.text(RateLimiter.reply(chat_id, 'suno'))
+      end
+
       BackgroundTask.create!(
         task_type: 'suno_generate',
         chat_id: chat_id,

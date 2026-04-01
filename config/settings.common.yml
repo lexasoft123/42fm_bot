@@ -107,6 +107,11 @@ radio:
   db: '/home/radio/content/music.txt'
   path: '/home/radio/content/music'
 
+auth:
+  rate_limits:
+    image: { max: 1, window_minutes: 20 }
+    suno:  { max: 1, window_minutes: 20 }
+
 logging:
   path: log/bot.log
   level: debug
