@@ -59,7 +59,11 @@ class TaskRunner
     rescue => e
       LOGGER.error "TaskRunner task #{task.id}: #{e.class}: #{e.message}"
       task.increment_attempts!
-      task.mark_failed!(e.message) if task.reload.timed_out?
+      permanent = e.message.match?(/\s4\d{2}[\s{]/)
+      if task.reload.timed_out? || permanent
+        task.mark_failed!(e.message)
+        @api.sendMessage(chat_id: task.chat_id, text: "Ошибка: #{e.message.truncate(200)}") rescue nil
+      end
     end
   end
 end
