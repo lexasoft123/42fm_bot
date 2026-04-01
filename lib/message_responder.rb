@@ -121,7 +121,7 @@ class MessageResponder
     when :text    then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send if result.payload
     when :sticker then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_sticker
     when :image   then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_image
-    when :voice   then @bot.api.sendVoice(chat_id: @chat_id, voice: result.payload)
+    when :voice   then @bot.api.sendVoice(chat_id: @chat_id, voice: Faraday::UploadIO.new(result.payload, 'audio/ogg'))
     when :audio   then @bot.api.sendAudio(
       chat_id: @chat_id, audio: result.payload,
       title: result.meta[:title], performer: result.meta[:performer])
