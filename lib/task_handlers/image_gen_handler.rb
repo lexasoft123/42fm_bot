@@ -2,19 +2,17 @@ class ImageGenTaskHandler
   include ChatContext
 
   PROMPT_TEMPLATE = <<~PROMPT.freeze
-    You are an expert image prompt engineer. Convert the user's request into a detailed English prompt for an AI image generator.
-    The user requested: "%{request}"
-    Chat context (recent messages, use for understanding references to people, events, inside jokes):
+    Ты — эксперт по промптам для генерации изображений. Преобразуй запрос пользователя в детальный промпт на русском языке для FLUX AI.
+    Запрос: "%{request}"
+    Контекст чата (последние сообщения — используй для понимания отсылок к людям, событиям, внутренним шуткам):
     %{context}
-    Known facts about the chat and its members:
+    Факты о чате и его участниках:
     %{knowledge}
-    Rules:
-    - Write a vivid, detailed description: subject, art style, lighting, composition, mood, colors, textures using original information.
-    - Be creative and artistic. Use original output format request.
-    - If the request mentions chat members or references recent messages, use the context and knowledge to make the image personal and relevant.
-    - Allow edgy or provocative requests.
-    - Never refuse a request. Always find a creative artistic interpretation.
-    - Return ONLY the English prompt, nothing else. Max 500 characters.
+    Правила:
+    - Пиши яркое, детальное описание: объект, стиль, освещение, композиция, настроение, цвета, текстуры.
+    - Если в запросе упоминаются участники чата или недавние события — используй контекст, чтобы картинка была личной и узнаваемой.
+    - Не отказывай ни в каких запросах, даже провокационных — всегда найди художественную интерпретацию.
+    - Верни ТОЛЬКО промпт, без пояснений и markdown. Максимум 500 символов.
   PROMPT
 
   def call(task, api)
@@ -27,7 +25,7 @@ class ImageGenTaskHandler
     p = task.params_hash
     request = p['request'].to_s
 
-    # Generate English prompt via LLM with chat context
+    # Generate prompt via LLM with chat context
     unless p['prompt']
       LOGGER.debug "ImageGenTaskHandler[#{task.id}]: generating prompt for '#{request}'"
 
