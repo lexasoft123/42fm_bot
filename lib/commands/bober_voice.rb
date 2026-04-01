@@ -14,8 +14,11 @@ module Commands
       minus = !!track
       track_id = track ? track.to_i : nil
 
-      url = TtsService.speak(phrase, speed: 0.8, minus: minus, track_id: track_id)
-      CommandResult.voice(url)
+      path = TtsService.speak(phrase, speed: 0.8, minus: minus, track_id: track_id)
+      CommandResult.voice(path)
+    rescue => e
+      LOGGER.error "BoberVoice failed: #{e.message}"
+      CommandResult.text('Не смог зачитать :(')
     end
   end
 end

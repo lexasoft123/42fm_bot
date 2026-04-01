@@ -17,8 +17,11 @@ module Commands
 
       text = Horoscope.new(user.name).predict! if horoscope && !horoscope.empty?
 
-      url = TtsService.speak(text, voice: voice_id, minus: minus, track_id: track_id)
-      CommandResult.voice(url)
+      path = TtsService.speak(text, voice: voice_id, minus: minus, track_id: track_id)
+      CommandResult.voice(path)
+    rescue => e
+      LOGGER.error "TtsVoice failed: #{e.message}"
+      CommandResult.text('Не смог зачитать :(')
     end
   end
 end
