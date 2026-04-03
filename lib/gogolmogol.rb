@@ -36,6 +36,19 @@ class Gogolmogol
     return "хуйня какая-то..."
   end
 
+  def search_results(limit: 3)
+    @@access_rights.size.times do |attempt|
+      search = search_attempt(attempt)
+      next if search["error"] && (search["error"]["errors"][0]["reason"] == "dailyLimitExceeded")
+      items = search.items
+      return items.first(limit).map { |item| { title: item.title, link: item.link, snippet: item.snippet } }
+    end
+    []
+  rescue Exception => e
+    LOGGER.error "Gogolmogol#search_results: #{e.message}"
+    []
+  end
+
   def catch_result search
     items = search.items
     if items.count > 0
@@ -51,7 +64,7 @@ class Gogolmogol
   end
 
   def get_search query, opts = {}
-    image_pattern = /\s*фото\s*/
+    image_pattern = /\s*(фото|картинк)/
     gif_pattern = /(гиф|gif)/
     if query =~ image_pattern
       opts["searchType"] = "image"
