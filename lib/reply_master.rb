@@ -52,6 +52,19 @@ class ReplyMaster
     end
   end
 
+  def reply_pattern_only(msg)
+    @replies.each do |regex, replies|
+      if msg =~ /#{regex}/i
+        if replies.is_a?(Hash)
+          return replies['answers'].sample if reply_now?(replies["rate"])
+        else
+          return replies.sample
+        end
+      end
+    end
+    nil
+  end
+
   def reply_now? rate
     rand(100) < rate.to_i
   end

@@ -10,6 +10,10 @@ module Commands
 
     def execute
       text  = cmd.match(PATTERN)[:text]
+
+      quick = reply_master.reply_pattern_only(text)
+      return CommandResult.text(quick) if quick
+
       reply = if Settings.chat_gpt['agent_mode']
         Agent::Runner.new(
           text: text, context: get_chat_context,
