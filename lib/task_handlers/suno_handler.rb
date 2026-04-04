@@ -52,7 +52,7 @@ class SunoTaskHandler
       parsed = parse_request(p['request'])
       p.merge!(parsed)
       p['parsed'] = true
-      task.update!(params: p.to_json)
+      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
 
       LOGGER.debug "SunoTaskHandler[#{task.id}]: parsed → genre=#{p['genre']}, artist=#{p['artist']}, topic=#{p['topic']}, tags=#{p['tags']}"
     end
@@ -108,8 +108,9 @@ class SunoTaskHandler
     suno_task_id = SunoClient.new.submit(title: title, lyrics: p['lyrics'], tags: tags)
     LOGGER.debug "SunoTaskHandler[#{task.id}]: submitted #{suno_task_id} with tags '#{tags}'"
 
-    task.update!(external_id: suno_task_id,
-                 params: p.merge('title' => title).to_json)
+    ActiveRecord::Base.connection_pool.with_connection do
+      task.update!(external_id: suno_task_id, params: p.merge('title' => title).to_json)
+    end
     :pending
   end
 
@@ -123,12 +124,12 @@ class SunoTaskHandler
       :pending
     when :failed
       LOGGER.error "SunoTaskHandler[#{task.id}]: Suno generation failed for #{task.external_id}"
-      task.mark_failed!('suno_failed')
+      ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!('suno_failed') }
       api.sendMessage(chat_id: task.chat_id, text: "Не удалось сгенерировать песню") rescue nil
       :failed
     when Hash
       LOGGER.info "SunoTaskHandler[#{task.id}]: complete! #{result[:audio_url]} (#{result[:duration]}s)"
-      task.mark_done!(result)
+      ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
       title = task.params_hash['title'] || 'Песня от 42FM'
       send_audio(api, task.chat_id, result[:audio_url], title, task.params_hash)
       :done

@@ -39,12 +39,12 @@ class ImageGenTaskHandler
       p['prompt'] = GptMaster.new([{ role: 'user', content: llm_prompt }], setting: 'agent').call
       raise "GPT prompt failed" unless p['prompt'] && p['prompt'] != 'жпт не жпт'
       LOGGER.debug "ImageGenTaskHandler[#{task.id}]: prompt → '#{p['prompt'][0..100]}...'"
-      task.update!(params: p.to_json)
+      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
     end
 
     task_id = FluxClient.new.submit(prompt: p['prompt'])
     LOGGER.debug "ImageGenTaskHandler[#{task.id}]: submitted #{task_id}"
-    task.update!(external_id: task_id, params: p.to_json)
+    ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: task_id, params: p.to_json) }
     :pending
   end
 
@@ -58,12 +58,12 @@ class ImageGenTaskHandler
       :pending
     when :failed
       LOGGER.error "ImageGenTaskHandler[#{task.id}]: generation failed for #{task.external_id}"
-      task.mark_failed!('flux_failed')
+      ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!('flux_failed') }
       api.sendMessage(chat_id: task.chat_id, text: "Не удалось сгенерировать картинку") rescue nil
       :failed
     when Hash
       LOGGER.info "ImageGenTaskHandler[#{task.id}]: complete! #{result[:url]}"
-      task.mark_done!(result)
+      ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
       caption = "🎨 #{task.params_hash['request']}"
       send_photo(api, task.chat_id, result[:url], caption)
       :done

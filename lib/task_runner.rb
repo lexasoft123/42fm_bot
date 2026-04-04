@@ -16,9 +16,7 @@ class TaskRunner
       Thread.new do
         runner = new(bot_api)
         loop do
-          ActiveRecord::Base.connection_pool.with_connection do
-            runner.process_pending
-          end
+          runner.process_pending
           sleep POLL_INTERVAL
         rescue => e
           LOGGER.error "TaskRunner: #{e.class}: #{e.message}"
@@ -33,11 +31,15 @@ class TaskRunner
   end
 
   def process_pending
-    BackgroundTask.pending.find_each do |task|
+    tasks = ActiveRecord::Base.connection_pool.with_connection do
+      BackgroundTask.pending.to_a
+    end
+
+    tasks.each do |task|
       handler_class = self.class.handler_for(task.task_type)
       unless handler_class
         LOGGER.error "TaskRunner: unknown task_type '#{task.task_type}'"
-        task.mark_failed!("unknown task_type")
+        ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!("unknown task_type") }
         next
       end
 
@@ -45,11 +47,13 @@ class TaskRunner
 
       case result
       when :pending
-        task.increment_attempts!
-        if task.timed_out?
-          LOGGER.error "TaskRunner: task #{task.id} (#{task.task_type}) timed out after #{task.attempts} attempts"
-          task.mark_failed!('timeout')
-          @api.sendMessage(chat_id: task.chat_id, text: "Задача не выполнена (таймаут)") rescue nil
+        ActiveRecord::Base.connection_pool.with_connection do
+          task.increment_attempts!
+          if task.reload.timed_out?
+            LOGGER.error "TaskRunner: task #{task.id} (#{task.task_type}) timed out after #{task.attempts} attempts"
+            task.mark_failed!('timeout')
+            @api.sendMessage(chat_id: task.chat_id, text: "Задача не выполнена (таймаут)") rescue nil
+          end
         end
       when :done
         nil # handler already called mark_done! and sent result
@@ -58,11 +62,13 @@ class TaskRunner
       end
     rescue => e
       LOGGER.error "TaskRunner task #{task.id}: #{e.class}: #{e.message}"
-      task.increment_attempts!
-      permanent = e.message.match?(/\s4\d{2}[\s{]/)
-      if task.reload.timed_out? || permanent
-        task.mark_failed!(e.message)
-        @api.sendMessage(chat_id: task.chat_id, text: "Ошибка: #{e.message.truncate(200)}") rescue nil
+      ActiveRecord::Base.connection_pool.with_connection do
+        task.increment_attempts!
+        permanent = e.message.match?(/\s4\d{2}[\s{]/)
+        if task.reload.timed_out? || permanent
+          task.mark_failed!(e.message)
+          @api.sendMessage(chat_id: task.chat_id, text: "Ошибка: #{e.message.truncate(200)}") rescue nil
+        end
       end
     end
   end
