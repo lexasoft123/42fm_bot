@@ -98,7 +98,7 @@ class MessageResponder
       cmd: cmd
     )
 
-    LOGGER.debug "respond: dispatching cmd=#{cmd.inspect}"
+    LOGGER.debug "respond: dispatching cmd=#{cmd}"
     result = dispatch(ctx)
     LOGGER.debug "respond: delivering #{result&.type}"
     deliver(result)
