@@ -14,6 +14,7 @@ class MessageSender
     @text = options[:text]
     @chat = options[:chat]
     @answers = options[:answers]
+    @reply_to_message_id = options[:reply_to_message_id]
     @logger = LOGGER
   end
 
@@ -64,6 +65,7 @@ class MessageSender
 
   def send_chunk(chunk)
     params = { chat_id: chat.id, text: sanitize_markdown(chunk), parse_mode: 'Markdown' }
+    params[:reply_to_message_id] = @reply_to_message_id if @reply_to_message_id
     params[:reply_markup] = reply_markup if reply_markup
 
     begin

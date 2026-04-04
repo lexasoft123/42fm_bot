@@ -31,7 +31,7 @@ module Commands
         GptMaster.chat(text, context: get_chat_context, knowledge: get_relevant_knowledge(text))
       end
       save_bot_reply(reply)
-      CommandResult.text("@#{user.name} #{reply}")
+      CommandResult.text(reply, reply_to_message_id: message.message_id)
     end
 
     private

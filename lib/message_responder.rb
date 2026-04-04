@@ -120,7 +120,7 @@ class MessageResponder
   def deliver(result)
     return unless result
     case result.type
-    when :text    then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send if result.payload
+    when :text    then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload, reply_to_message_id: result.meta[:reply_to_message_id]).send if result.payload
     when :sticker then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_sticker
     when :image   then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_image
     when :voice

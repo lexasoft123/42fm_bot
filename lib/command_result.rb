@@ -9,7 +9,9 @@ class CommandResult
     @meta    = meta
   end
 
-  def self.text(str)    = new(type: :text,    payload: str)
+  def self.text(str, reply_to_message_id: nil)
+    new(type: :text, payload: str, meta: { reply_to_message_id: reply_to_message_id })
+  end
   def self.sticker(id)  = new(type: :sticker, payload: id)
   def self.image(url)   = new(type: :image,   payload: url)
   def self.voice(url)   = new(type: :voice,   payload: url)
