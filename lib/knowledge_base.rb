@@ -1,5 +1,6 @@
 class KnowledgeBase
   SIMILARITY_THRESHOLD = 0.92
+  COMPACT_MUTEX = Mutex.new
 
   EXTRACTION_PROMPT = <<~PROMPT.freeze
     Ты — аналитик чата. Тебе насрать на приличия, политкорректность и прочую хуйню. Задача — вытащить из переписки 3-7 фактов, которые реально стоит запомнить.
@@ -131,6 +132,11 @@ class KnowledgeBase
       base  = cfg['compact_at']
 
       last = KnowledgeCompactLog.where(chat_id: chat_id).order(created_at: :desc).first
+
+      # Cooldown: skip if a run completed recently, regardless of whether it found anything
+      cooldown = cfg.fetch('compact_cooldown_hours', 6) * 3600
+      return if last && last.created_at > Time.now - cooldown
+
       factor = if last && last.merged > 0
         avg_size = last.removed.to_f / last.merged
         [4.0 / avg_size, 3.0].min.clamp(1.0, 3.0)
@@ -139,11 +145,14 @@ class KnowledgeBase
       end
 
       return unless count >= (base * factor).round
-      return if BackgroundTask.where(task_type: 'knowledge_compact', chat_id: chat_id, status: 'pending').exists?
 
-      threshold = cfg.fetch('compact_threshold', 0.85)
-      BackgroundTask.create!(task_type: 'knowledge_compact', chat_id: chat_id, params: { 'threshold' => threshold }.to_json)
-      LOGGER.info "KnowledgeBase: queued compaction for chat #{chat_id} (count=#{count}, effective_at=#{(base * factor).round}, factor=#{factor.round(2)})"
+      # Mutex + re-check inside to prevent concurrent threads queuing duplicate tasks
+      COMPACT_MUTEX.synchronize do
+        return if BackgroundTask.where(task_type: 'knowledge_compact', chat_id: chat_id, status: 'pending').exists?
+        threshold = cfg.fetch('compact_threshold', 0.85)
+        BackgroundTask.create!(task_type: 'knowledge_compact', chat_id: chat_id, params: { 'threshold' => threshold }.to_json)
+        LOGGER.info "KnowledgeBase: queued compaction for chat #{chat_id} (count=#{count}, effective_at=#{(base * factor).round}, factor=#{factor.round(2)})"
+      end
     end
 
     def cosine_similarity(a, b)
