@@ -5,11 +5,15 @@ module Commands
     PATTERN = /^(?:бот[,]?\s+|[.]\s+|(?:балаболь|жпт)\s+)(?<text>.+)/im
 
     def match?
-      cmd =~ PATTERN
+      cmd =~ PATTERN || reply_to_bot?
     end
 
     def execute
-      text  = cmd.match(PATTERN)[:text]
+      text = if (m = cmd&.match(PATTERN))
+        m[:text]
+      else
+        cmd
+      end
 
       quick = reply_master.reply_pattern_only(text)
       return CommandResult.text(quick) if quick
@@ -25,6 +29,14 @@ module Commands
       end
       save_bot_reply(reply)
       CommandResult.text("@#{user.name} #{reply}")
+    end
+
+    private
+
+    def reply_to_bot?
+      return false unless cmd && message.reply_to_message
+      bot_id = Settings.telegram['token'].split(':').first.to_i
+      message.reply_to_message.from&.id == bot_id
     end
   end
 end
