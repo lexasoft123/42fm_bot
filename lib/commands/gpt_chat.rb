@@ -18,11 +18,14 @@ module Commands
       quick = reply_master.reply_pattern_only(text)
       return CommandResult.text(quick) if quick
 
+      replied_to = reply_to_bot? ? message.reply_to_message.text : nil
+
       reply = if Settings.chat_gpt['agent_mode']
         Agent::Runner.new(
           text: text, context: get_chat_context,
           knowledge: get_relevant_knowledge(text),
-          radio: radio, chat_id: chat_id, user: user, bot: bot
+          radio: radio, chat_id: chat_id, user: user, bot: bot,
+          replied_to: replied_to
         ).run
       else
         GptMaster.chat(text, context: get_chat_context, knowledge: get_relevant_knowledge(text))

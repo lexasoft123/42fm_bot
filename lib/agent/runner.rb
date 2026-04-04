@@ -1,12 +1,15 @@
+require 'erb'
+
 module Agent
   class Runner
     MAX_ITERATIONS = 5
     MAX_TOOL_RESULT_LENGTH = 2000
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, replied_to: nil)
       @text      = text
       @context   = context
       @knowledge = knowledge
+      @replied_to = replied_to
       @radio     = radio
       @chat_id   = chat_id
       @user      = user
@@ -53,10 +56,13 @@ module Agent
 
     def build_initial_messages
       prompt_template = Settings.chat_gpt['agent_prompt'] || Settings.chat_gpt['prompt']
+      # gsub main placeholders first, then ERB for conditional blocks
+      replied_to = @replied_to
       content = prompt_template
         .gsub('{REQUEST}', @text)
         .gsub('{CONTEXT}', @context)
         .gsub('{KNOWLEDGE}', @knowledge)
+      content = ERB.new(content, trim_mode: '-').result(binding)
       [{ role: 'user', content: content }]
     end
 
