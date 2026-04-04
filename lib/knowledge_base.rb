@@ -33,13 +33,14 @@ class KnowledgeBase
       k
     end
 
-    def search(query, chat_id:, top_k: 3)
+    def search(query, chat_id:, top_k: 3, offset: 0)
       query_vec = EmbeddingService.embed(query)
       return [] unless query_vec
 
       Knowledge.where(chat_id: chat_id).where.not(embedding: nil).map do |k|
         [k, cosine_similarity(query_vec, k.embedding_vector)]
       end.sort_by { |_, score| -score }
+        .drop(offset)
         .first(top_k)
         .map { |k, _| k }
     end

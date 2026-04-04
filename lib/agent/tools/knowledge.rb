@@ -1,9 +1,16 @@
 Agent::ToolRegistry.register(
   name: 'knowledge_search',
-  description: 'Ищет факты в базе знаний чата по семантической близости',
-  parameters: { 'query' => { type: 'string', description: 'Поисковый запрос' } },
+  description: 'Ищет факты в базе знаний чата по семантической близости. Результаты отсортированы по релевантности. Используй count для управления количеством результатов (по умолчанию 5, максимум 20) и offset для постраничной загрузки — если первой порции недостаточно, запроси следующую с offset равным количеству уже полученных.',
+  parameters: {
+    'query'  => { type: 'string',  description: 'Поисковый запрос' },
+    'count'  => { type: 'integer', description: 'Количество результатов (1–20, по умолчанию 5)', optional: true },
+    'offset' => { type: 'integer', description: 'Смещение для пагинации (по умолчанию 0)', optional: true },
+  },
   handler: ->(args, ctx) {
-    facts = KnowledgeBase.search(args['query'], chat_id: ctx[:chat_id], top_k: 5)
+    count  = args['count'].to_i
+    count  = count < 1 ? 5 : [count, 20].min
+    offset = [args['offset'].to_i, 0].max
+    facts  = KnowledgeBase.search(args['query'], chat_id: ctx[:chat_id], top_k: count, offset: offset)
     facts.empty? ? 'Ничего не найдено' : facts.map { |k| "[#{k.topic}] #{k.content}" }.join("\n")
   }
 )
