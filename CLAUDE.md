@@ -175,5 +175,5 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - Radio search uses `Song.search` (FTS4) with fallback to legacy file-path matching if DB is empty; `radio.request` flow is unchanged
 - `Song.search` uses FTS4 prefix matching (`word*`) with `unicode61` tokenizer for Cyrillic+Latin; falls back to LIKE queries on FTS4 syntax errors
 - `MusicScanner` reads tags via `wahwah` (pure Ruby), falls back to parsing artist/title from filepath; run `bundle exec rake music:scan` to populate/refresh
-- `Settings.radio['path']` (music directory root) and `Settings.radio['db']` (legacy music.txt) are in `settings.common.yml`; `Song#absolute_path` joins `path` + relative `filepath`
+- `Settings.radio['path']` (music directory root), `Settings.radio['db']` (legacy music.txt), and `Settings.radio['source']` (Liquidsoap source name, e.g. `42fm_radio_station`) are in `settings.common.yml`; `Song#absolute_path` joins `path` + relative `filepath`
 - `wahwah` gem is pure Ruby — no native dependencies needed for audio tag reading

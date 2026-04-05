@@ -24,7 +24,7 @@ class Radio
   end
 
   def track
-    res = send "stealkill.metadata", raw: true
+    res = send "#{Settings.radio['source']}.metadata", raw: true
     tracks = parse_metadata res
     remain = remaining
     name = format_track_name tracks.last
@@ -73,7 +73,7 @@ class Radio
   end
 
   def meta
-    res = send "stealkill.metadata", raw: true
+    res = send "#{Settings.radio['source']}.metadata", raw: true
     track = parse_metadata(res).last
     track.slice! :artist, :title, :album, :year, :genre
     out = []
@@ -94,12 +94,12 @@ class Radio
   end
 
   def remaining
-    seconds = send("stealkill.remaining").to_i
+    seconds = send("#{Settings.radio['source']}.remaining").to_i
     Time.at(seconds).utc.strftime("%M:%S")
   end
 
   def history
-    res = send "stealkill.metadata", raw: true
+    res = send "#{Settings.radio['source']}.metadata", raw: true
     tracks = parse_metadata res
     tracks.collect { |track| format_track_name track }.join("\n")
   end

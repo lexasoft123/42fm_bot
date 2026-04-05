@@ -111,6 +111,7 @@ flux:
 radio:
   db: '/home/radio/content/music.txt'
   path: '/home/radio/content/music'
+  source: '42fm_radio_station'
 
 auth:
   rate_limits:
