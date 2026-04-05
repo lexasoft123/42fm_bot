@@ -110,6 +110,7 @@ flux:
 
 radio:
   path: '/home/radio/content/music'
+  # host_path: '/content/music'  # override if Liquidsoap sees a different path than the container
   source: '42fm_radio_station'
 
 auth:
