@@ -3,6 +3,7 @@ services:
   bot:
     build: .
     restart: unless-stopped
+    network_mode: host
     volumes:
       - ./config/settings.yml:/app/config/settings.yml:ro
       - ./db:/app/db

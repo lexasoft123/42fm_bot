@@ -41,7 +41,7 @@ PID file: `pids/42fm_bot.pid`.
 |------|---------|
 | `Dockerfile` | `ruby:4.0-slim` + `ffmpeg` + `opus-tools` + sqlite3/libxml2; installs gems, runs entrypoint |
 | `docker-entrypoint.sh` | Runs `rake db:migrate` then execs `bundle exec ruby lib/bot.rb` as PID 1 |
-| `docker-compose.yml` | Bind mounts for `db/`, `config/settings.yml` (ro), `log/`, and music library |
+| `docker-compose.yml` | `network_mode: host` + bind mounts for `db/`, `config/settings.yml` (ro), `log/`, and music library |
 | `.env` | Gitignored host-local config: `DEPLOY_HOST` and `MUSIC_PATH` (see `.env.example`) |
 | `.env.example` | Committed template documenting required `.env` variables |
 
@@ -149,6 +149,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - `ffmpeg` and `opusenc` (from `opus-tools`) must be installed for TTS to work — both are included in the Docker image
 - Radio TCP socket is lazy — connects on first use, not at startup
 - In Docker, `restart: unless-stopped` handles crashes; the bot's own rescue/retry loop also retries within the process. The `daemons` gem is only used for local non-Docker runs via `./bin/bot`.
+- `network_mode: host` is required so the container can reach Liquidsoap on `localhost:1234` (the radio telnet interface). Without it, `localhost` resolves to the container itself and the connection is refused. Since the bot exposes no inbound ports, host networking has no downside here.
 - SOCKS proxy (if enabled) patches `Net::HTTP` globally via `socksify` — applies to all outbound HTTP
 - GPT bot replies are stored in `messages` with `role: 'bot'`, `user_uid: nil`
 - `Settings` deep-merges `settings.common.yml` (defaults) + `settings.yml` (secrets/overrides); add new top-level groups to `REQUIRED_KEYS` in `lib/settings.rb`
