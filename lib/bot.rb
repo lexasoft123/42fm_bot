@@ -10,7 +10,9 @@ begin
   config.configure
 
   token = Settings.telegram['token']
-  LOGGER = config.logger
+  LOGGER         = config.logger
+  AGENT_LOGGER   = config.agent_logger
+  COMPACT_LOGGER = config.compact_logger
   logger = LOGGER
 
   logger.debug 'Starting telegram bot'

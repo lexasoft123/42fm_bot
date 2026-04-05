@@ -72,7 +72,7 @@ class KnowledgeBase
 
     def compact!(chat_id:, threshold: 0.85)
       records = Knowledge.where(chat_id: chat_id).where.not(embedding: nil).to_a
-      compact_logger.info "compact! start: chat=#{chat_id} entries=#{records.size} threshold=#{threshold}"
+      COMPACT_LOGGER.info "compact! start: chat=#{chat_id} entries=#{records.size} threshold=#{threshold}"
       return { merged: 0, removed: 0, kept: records.size } if records.size < 2
 
       vecs   = records.index_by(&:id).transform_values(&:embedding_vector)
@@ -95,7 +95,7 @@ class KnowledgeBase
       end
 
       stats = { merged: merged, removed: removed, kept: records.size - removed + merged }
-      compact_logger.info "compact! done: #{stats}"
+      COMPACT_LOGGER.info "compact! done: #{stats}"
       KnowledgeCompactLog.create!(
         chat_id: chat_id, merged: merged, removed: removed,
         kept: stats[:kept], threshold: threshold, created_at: Time.now
@@ -105,22 +105,18 @@ class KnowledgeBase
 
     private
 
-    def compact_logger
-      @compact_logger ||= Logger.new('log/knowledge_compact.log', 10, 10 * 1024 * 1024)
-    end
-
     def merge_cluster(group)
       entries  = group.map { |k| "- [#{k.topic}]: #{k.content}" }.join("\n")
       prompt   = MERGE_PROMPT.gsub('{ENTRIES}', entries)
-      compact_logger.info "merge_cluster ids=#{group.map(&:id)}\nBEFORE (#{group.size} entries):\n#{entries}\nPROMPT:\n#{prompt}"
+      COMPACT_LOGGER.info "merge_cluster ids=#{group.map(&:id)}\nBEFORE (#{group.size} entries):\n#{entries}\nPROMPT:\n#{prompt}"
       raw = GptMaster.ask('', prompt: prompt)
-      compact_logger.info "RAW RESPONSE:\n#{raw}"
+      COMPACT_LOGGER.info "RAW RESPONSE:\n#{raw}"
       json_str = raw.gsub(/\A```(?:json)?\n?|\n?```\z/, '').strip
       result   = JSON.parse(json_str)
-      compact_logger.info "AFTER (1 entry):\n- [#{result['topic']}]: #{result['content']}"
+      COMPACT_LOGGER.info "AFTER (1 entry):\n- [#{result['topic']}]: #{result['content']}"
       result
     rescue => e
-      compact_logger.warn "merge_cluster failed ids=#{group.map(&:id)}: #{e.message}"
+      COMPACT_LOGGER.warn "merge_cluster failed ids=#{group.map(&:id)}: #{e.message}"
       nil
     end
 

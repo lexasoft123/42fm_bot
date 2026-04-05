@@ -81,7 +81,6 @@ class MessageResponder
 
   def respond
     save_message
-    p message
 
     return if message.date + 30 < Time.now.to_i
     process_voice_message if message.voice
