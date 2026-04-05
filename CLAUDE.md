@@ -172,8 +172,8 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - FLUX API settings in `config/settings.yml` under `flux` group: `api_key`; non-secret config (`api_url`, `model`) in `settings.common.yml`
 - Suno API settings in `config/settings.yml` under `suno` group: `api_key`; non-secret config (`api_url`, `model`) in `settings.common.yml`
 - `ChatContext` module (`lib/chat_context.rb`) provides `get_chat_context` and `get_relevant_knowledge` — included by both `SunoTaskHandler` and `ImageGenTaskHandler`
-- Radio search uses `Song.search` (FTS4) with fallback to legacy file-path matching if DB is empty; `radio.request` flow is unchanged
+- Radio search uses `Song.search` (FTS4); `radio.request` flow is unchanged
 - `Song.search` uses FTS4 prefix matching (`word*`) with `unicode61` tokenizer for Cyrillic+Latin; falls back to LIKE queries on FTS4 syntax errors
 - `MusicScanner` reads tags via `wahwah` (pure Ruby), falls back to parsing artist/title from filepath; run `bundle exec rake music:scan` to populate/refresh
-- `Settings.radio['path']` (music directory root), `Settings.radio['db']` (legacy music.txt), and `Settings.radio['source']` (Liquidsoap source name, e.g. `42fm_radio_station`) are in `settings.common.yml`; `Song#absolute_path` joins `path` + relative `filepath`
+- `Settings.radio['path']` (music directory root) and `Settings.radio['source']` (Liquidsoap source name, e.g. `42fm_radio_station`) are in `settings.common.yml`; `Song#absolute_path` joins `path` + relative `filepath`
 - `wahwah` gem is pure Ruby — no native dependencies needed for audio tag reading

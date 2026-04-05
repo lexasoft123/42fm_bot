@@ -109,7 +109,6 @@ flux:
   model: 'flux-2-pro'
 
 radio:
-  db: '/home/radio/content/music.txt'
   path: '/home/radio/content/music'
   source: '42fm_radio_station'
 
