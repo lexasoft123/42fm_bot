@@ -2,6 +2,7 @@ FROM ruby:4.0-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    pkg-config \
     libsqlite3-dev \
     sqlite3 \
     libxml2-dev \
