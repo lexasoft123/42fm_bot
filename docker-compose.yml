@@ -5,9 +5,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./config/settings.yml:/app/config/settings.yml:ro
-      - db_data:/app/db
+      - ./db:/app/db
       - ./log:/app/log
       - ${MUSIC_PATH:-/home/radio/content/music}:/home/radio/content/music:ro
 
-volumes:
-  db_data:
