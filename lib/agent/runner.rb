@@ -40,8 +40,10 @@ module Agent
         messages << build_assistant_message(raw)
 
         tool_calls.each do |tc|
+          LOGGER.debug "agent tool: #{tc[:name]}(#{tc[:input].to_json})"
           result = execute_tool(tc[:name], tc[:input])
           agent_logger.info "  #{tc[:name]} → #{result[0..300]}#{result.length > 300 ? '...' : ''}"
+          LOGGER.debug "agent result: #{result[0..300]}#{result.length > 300 ? '...' : ''}"
           messages << build_tool_result_message(tc[:id], result)
         end
       end
