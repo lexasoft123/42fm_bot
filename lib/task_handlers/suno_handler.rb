@@ -197,11 +197,9 @@ class SunoTaskHandler
     caption = "🎵 *#{title}*"
     caption += "\n🎸 #{params['genre']}" if params['genre']
     caption += " (#{params['artist']})" if params['artist'].to_s != ''
-    caption += "\n\n#{params['lyrics']}" if params['lyrics']
-    caption = caption[0..1020] + "..." if caption.length > 1024
 
     retries = 0
-    begin
+    audio_message = begin
       api.sendAudio(
         chat_id: chat_id, audio: url,
         title: title, performer: '42FM Bot',
@@ -212,6 +210,15 @@ class SunoTaskHandler
       LOGGER.warn "SunoTaskHandler sendAudio retry #{retries}: #{e.class}"
       sleep 3 and retry if retries <= 3
     end
+
+    return unless params['lyrics']
+
+    audio_message_id = audio_message&.dig('result', 'message_id')
+    api.sendMessage(
+      chat_id: chat_id,
+      text: params['lyrics'],
+      reply_to_message_id: audio_message_id
+    ) rescue nil
   end
 end
 
