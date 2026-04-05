@@ -7,14 +7,24 @@ Full docs: `docs/architecture.md` | Agent guide: `docs/agents.md`
 ## Rules
 
 - **Never commit automatically.** Always ask the user before creating a git commit.
-- **Never run `ruby lib/bot.rb` directly.** Always use `./bin/bot start/stop/restart`.
+- **Never run `ruby lib/bot.rb` directly.** Use Docker in production; use `./bin/bot start/stop/restart` only for local non-Docker development.
 - Always update all documents on changes.
 
 ---
 
-## Running the Bot
+## Running the Bot (Docker — production)
 
-**Always use the daemon script — never run `ruby lib/bot.rb` directly.**
+The bot runs as a Docker container managed by `docker compose`. The entrypoint runs DB migrations automatically on every start.
+
+```bash
+docker compose up -d --build   # build image and start (or restart after code changes)
+docker compose logs -f         # tail logs
+docker compose down            # stop
+```
+
+Logs are bind-mounted to `./log/bot.log` on the host.
+
+## Running the Bot (local, non-Docker)
 
 ```bash
 ./bin/bot start    # start daemon
@@ -23,23 +33,41 @@ Full docs: `docs/architecture.md` | Agent guide: `docs/agents.md`
 ./bin/bot status   # check if running
 ```
 
-Logs: `log/bot.log` (app + SQL). PID file: `pids/42fm_bot.pid`.
+PID file: `pids/42fm_bot.pid`.
+
+## Docker Setup
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | `ruby:4.0-slim` + `ffmpeg` + `opus-tools` + sqlite3/libxml2; installs gems, runs entrypoint |
+| `docker-entrypoint.sh` | Runs `rake db:migrate` then execs `bundle exec ruby lib/bot.rb` as PID 1 |
+| `docker-compose.yml` | Named volume for `db/`, bind mounts for `config/settings.yml` (ro), `log/`, and music library |
+| `.env` | Gitignored host-local config: `DEPLOY_HOST` and `MUSIC_PATH` (see `.env.example`) |
+| `.env.example` | Committed template documenting required `.env` variables |
+
+**Volumes:**
+- `db_data` (named volume) — SQLite DB persists across container rebuilds
+- `./config/settings.yml` → `/app/config/settings.yml` (read-only bind mount — secrets)
+- `./log` → `/app/log` — logs readable on host
+- `${MUSIC_PATH:-/home/radio/content/music}` → `/home/radio/content/music` (read-only) — music library
+- `web/` — ephemeral TTS scratch dir (created in image, not mounted; files deleted after each voice send)
 
 ## Deploying to Production
 
 ```bash
-# On local: commit and push
-git push origin master
-
-# On prod: pull and restart
-ssh radio@42fm.ru
-cd ~/bot
-/usr/local/rvm/bin/rvm $(cat .ruby-version) do ./bin/bot restart
+# From local machine (requires .env with DEPLOY_HOST set):
+make deploy
+# Equivalent to: ssh $DEPLOY_HOST 'cd ~/bot && git pull && docker compose up -d --build'
 ```
 
-RVM is at `/usr/local/rvm/bin/rvm` (system-wide install). Always use `rvm $(cat .ruby-version) do` to load the correct Ruby — never call `./bin/bot` directly in a non-login SSH session as `ruby` won't be in PATH.
-
-If migrations are needed: `/usr/local/rvm/bin/rvm $(cat .ruby-version) do bundle exec rake db:migrate` before restart.
+**First-time setup on a new server:**
+```bash
+git clone <repo> && cd 42fm_bot
+cp /path/to/settings.yml config/settings.yml
+cp .env.example .env   # edit DEPLOY_HOST and MUSIC_PATH as needed
+docker compose up -d --build
+docker compose logs -f
+```
 
 ---
 
@@ -118,9 +146,9 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - Voice messages only go to `audio_chat_ids`
 - `new` role users are rate-limited on track requests (checks `user.last_order`)
 - Google API keys are a pool in settings — `gogolmogol.rb` cycles through them
-- `ffmpeg` must be installed for TTS to work
+- `ffmpeg` and `opusenc` (from `opus-tools`) must be installed for TTS to work — both are included in the Docker image
 - Radio TCP socket is lazy — connects on first use, not at startup
-- Daemons runs with `:monitor => false` — the bot's own rescue/retry loop handles crashes
+- In Docker, `restart: unless-stopped` handles crashes; the bot's own rescue/retry loop also retries within the process. The `daemons` gem is only used for local non-Docker runs via `./bin/bot`.
 - SOCKS proxy (if enabled) patches `Net::HTTP` globally via `socksify` — applies to all outbound HTTP
 - GPT bot replies are stored in `messages` with `role: 'bot'`, `user_uid: nil`
 - `Settings` deep-merges `settings.common.yml` (defaults) + `settings.yml` (secrets/overrides); add new top-level groups to `REQUIRED_KEYS` in `lib/settings.rb`

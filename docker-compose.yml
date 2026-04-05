@@ -1,7 +1,13 @@
-version: '3'
+version: '3.8'
 services:
   bot:
     build: .
-    command: "bundle exec ./bin/console"
+    restart: unless-stopped
     volumes:
-      - .:/app
+      - ./config/settings.yml:/app/config/settings.yml:ro
+      - db_data:/app/db
+      - ./log:/app/log
+      - ${MUSIC_PATH:-/home/radio/content/music}:/home/radio/content/music:ro
+
+volumes:
+  db_data:

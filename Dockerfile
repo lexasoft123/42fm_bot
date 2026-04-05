@@ -1,16 +1,26 @@
-FROM ruby:3.0
+FROM ruby:4.0-slim
 
-RUN apt update && \
-    apt install -y sqlite3 && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libsqlite3-dev \
+    sqlite3 \
+    libxml2-dev \
+    libxslt-dev \
+    ffmpeg \
+    opus-tools \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir /app
 WORKDIR /app
 
-COPY Gemfile Gemfile.lock /app/
+COPY Gemfile Gemfile.lock ./
+RUN bundle install --without development
 
-RUN bundle install
+COPY . .
 
-COPY . /app
+RUN mkdir -p db log pids web
 
-CMD ["/app/bin/console"]
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["bundle", "exec", "ruby", "lib/bot.rb"]
