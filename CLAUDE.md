@@ -41,12 +41,12 @@ PID file: `pids/42fm_bot.pid`.
 |------|---------|
 | `Dockerfile` | `ruby:4.0-slim` + `ffmpeg` + `opus-tools` + sqlite3/libxml2; installs gems, runs entrypoint |
 | `docker-entrypoint.sh` | Runs `rake db:migrate` then execs `bundle exec ruby lib/bot.rb` as PID 1 |
-| `docker-compose.yml` | Named volume for `db/`, bind mounts for `config/settings.yml` (ro), `log/`, and music library |
+| `docker-compose.yml` | Bind mounts for `db/`, `config/settings.yml` (ro), `log/`, and music library |
 | `.env` | Gitignored host-local config: `DEPLOY_HOST` and `MUSIC_PATH` (see `.env.example`) |
 | `.env.example` | Committed template documenting required `.env` variables |
 
 **Volumes:**
-- `db_data` (named volume) — SQLite DB persists across container rebuilds
+- `./db` → `/app/db` — SQLite DB lives in the repo directory on the host; easy to back up and copy
 - `./config/settings.yml` → `/app/config/settings.yml` (read-only bind mount — secrets)
 - `./log` → `/app/log` — logs readable on host
 - `${MUSIC_PATH:-/home/radio/content/music}` → `/home/radio/content/music` (read-only) — music library
