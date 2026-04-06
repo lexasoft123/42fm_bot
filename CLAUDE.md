@@ -39,10 +39,10 @@ PID file: `pids/42fm_bot.pid`.
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | `ruby:4.0-slim` + `ffmpeg` + `opus-tools` + `curl` + sqlite3/libxml2; installs gems, runs entrypoint |
-| `docker-entrypoint.sh` | Waits for Ollama, pulls model if needed, runs `rake db:migrate`, then execs `bundle exec ruby lib/bot.rb` as PID 1 |
-| `docker-compose.yml` | Two services: `ollama` (local LLM) + `bot`; `network_mode: host`; bind mounts for `db/`, `config/settings.yml` (ro), `log/`, music library; named volume `ollama_data` for model cache |
-| `.env` | Gitignored host-local config: `DEPLOY_HOST`, `MUSIC_PATH`, `OLLAMA_MODEL` (see `.env.example`) |
+| `Dockerfile` | `ruby:4.0-slim` + `ffmpeg` + `opus-tools` + sqlite3/libxml2; installs gems, runs entrypoint |
+| `docker-entrypoint.sh` | Runs `rake db:migrate` then execs `bundle exec ruby lib/bot.rb` as PID 1 |
+| `docker-compose.yml` | `network_mode: host` + bind mounts for `db/`, `config/settings.yml` (ro), `log/`, and music library |
+| `.env` | Gitignored host-local config: `DEPLOY_HOST` and `MUSIC_PATH` (see `.env.example`) |
 | `.env.example` | Committed template documenting required `.env` variables |
 
 **Volumes:**
@@ -50,7 +50,6 @@ PID file: `pids/42fm_bot.pid`.
 - `./config/settings.yml` → `/app/config/settings.yml` (read-only bind mount — secrets)
 - `./log` → `/app/log` — logs readable on host
 - `${MUSIC_PATH:-/home/radio/content/music}` → `/home/radio/content/music` (read-only) — music library
-- `ollama_data` → `/root/.ollama` (named volume) — persists downloaded Ollama models (~6.6GB for 9B model)
 - `web/` — ephemeral TTS scratch dir (created in image, not mounted; files deleted after each voice send)
 
 ## Deploying to Production
@@ -162,9 +161,8 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - `бот найди/ищи/пошукай` → Google search; bare `бот <text>` → GPT chat
 - Agent mode (`chat_gpt.agent_mode: true`) lets GPT call bot tools (radio, weather, search, etc.) autonomously; toggle off to revert to simple GPT
 - `GptQuestion`/`GptChat` must be last `бот`-prefixed commands in registry — they match `бот <anything>`
-- `chat_gpt.providers` holds API credentials; `chat_gpt.settings` holds named configs (`main`, `agent`, `local_agent`, `embedder`) referencing providers
+- `chat_gpt.providers` holds API credentials; `chat_gpt.settings` holds named configs (`main`, `agent`, `embedder`) referencing providers
 - `GptMaster.new(messages, setting: 'main')` resolves provider + model from settings; class methods `.chat`/`.ask` default to `setting: 'main'`
-- Ollama runs as a Docker service (`ollama/ollama:0.20.2`) on `localhost:11434`; the `ollama` provider in `settings.common.yml` uses OpenAI-compatible API; `local_agent` setting routes to it; model is auto-pulled on first start via `docker-entrypoint.sh`; `OLLAMA_MODEL` env var controls which model (default: `huihui_ai/qwen3.5-abliterated:9b`)
 - `TaskRunner` poller thread starts inside `Telegram::Bot::Client.run` block, reuses `bot.api` — no second bot instance
 - Background tasks are generic: `TaskRunner.register('type', HandlerClass)` + `BackgroundTask.create!(task_type: 'type', ...)` — add new task types via handler files in `lib/task_handlers/`
 - `бот спой/сочини/запиши/сыграй <request>` creates a background task for Suno song generation; freeform requests are parsed by LLM to extract genre, artist, topic, and tags; the `compose_song` agent tool does the same

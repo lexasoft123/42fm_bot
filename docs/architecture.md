@@ -366,7 +366,6 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 | lenta.ru | RSS | None |
 | Suno AI (sunoapi.org) | REST/HTTParty | Bearer token |
 | FLUX 2 (api.bfl.ai) | REST/HTTParty | x-key header |
-| Ollama (localhost:11434) | REST/HTTParty (OpenAI-compatible) | None (local) |
 
 ---
 
@@ -480,23 +479,15 @@ chat_gpt:
       api_key: sk-...
       api_type: openai
       api_url: https://api.deepseek.com/v1/chat/completions
-    ollama:
-      api_type: openai
-      api_url: http://localhost:11434/v1/chat/completions  # no api_key needed
   settings:
     main:                         # used for GptMaster.chat / .ask
       provider: anthropic
       model: claude-sonnet-4-6
       max_tokens: 16000
       thinking_budget: 10000      # optional: Anthropic extended thinking
-    agent:                        # used for Agent::Runner final reply generation
+    agent:                        # used for Agent::Runner tool-calling loop
       provider: anthropic
-      model: claude-sonnet-4-6
-      max_tokens: 16000
-      thinking_budget: 10000
-    local_agent:                  # used for Agent::Runner tool selection (local Ollama)
-      provider: ollama
-      model: huihui_ai/qwen3.5-abliterated:9b
+      model: claude-haiku-4-5
       max_tokens: 4096
     embedder:                     # used for EmbeddingService
       provider: openai
@@ -557,8 +548,7 @@ Log rotation: size-based — rotates at `max_size_mb`, keeps `keep_files` old fi
 ## Deployment
 
 - **Ruby:** 4.0
-- **Docker:** `Dockerfile` + `docker-compose.yml` (two services: `bot` + `ollama`)
-- **Ollama:** runs as a Docker service (`ollama/ollama:0.20.2`) on `localhost:11434`; model (`OLLAMA_MODEL` env, default `huihui_ai/qwen3.5-abliterated:9b`) is auto-pulled on first start; model cache persisted in named volume `ollama_data`
+- **Docker:** `Dockerfile` + `docker-compose.yml`
 - **Process management:** `daemons` gem — PID file in `pids/42fm_bot.pid`. `:monitor => false` — the bot's own `rescue/retry` loop handles restarts.
 - **Starting/stopping:** always use `./bin/bot start|stop|restart|status`
 - **SOCKS proxy:** configured in `settings.yml`, applied globally in `AppConfigurator#setup_proxy` via `socksify` (patches `Net::HTTP`)
