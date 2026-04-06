@@ -176,12 +176,17 @@ class SongSearchTest < BotTest
     assert_respond_to Song.search("Бу-Ра-То"), :each
   end
 
-  def test_known_limitation_nirvana
-    # "нирвана" → translit "nirwana" — 'w' vs 'v' divergence; all stages fail
-    # This is a known gap; test documents current behavior
-    skip "Known limitation: Translit maps 'в' to 'w', but Nirvana uses 'v'"
+  def test_cyrillic_nirvana
+    # "нирвана" → translit "nirwana" — editdist("nirvana", "nirwana") = 1 → match via Stage 4
     ids = Song.search("нирвана").map(&:id)
     assert_includes ids, @nirvana.id
+  end
+
+  def test_cyrillic_rammstein
+    # "раммштайн" → translit "rammshtajn" — editdist("rammstein", "rammshtajn") = 3 → match via Stage 4
+    rammstein = Song.create!(artist: "Rammstein", title: "Amerika", filepath: "rammstein/amerika.mp3")
+    ids = Song.search("раммштайн").map(&:id)
+    assert_includes ids, rammstein.id
   end
 
   # ---------------------------------------------------------------------------

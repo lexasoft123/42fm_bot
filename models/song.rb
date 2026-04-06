@@ -35,6 +35,9 @@ class Song < ActiveRecord::Base
             break unless results.empty?
           end
         end
+
+        # Stage 4: edit-distance fuzzy match (catches e.g. "rammshtajn"→"rammstein")
+        results = editdist_search(latin, limit: limit) if results.empty?
       end
     end
 
@@ -62,6 +65,26 @@ class Song < ActiveRecord::Base
       "WHERE songs_fts MATCH ? LIMIT ?",
       prefixes.join(' '), limit
     ])
+  rescue ActiveRecord::StatementInvalid
+    []
+  end
+
+  EDITDIST_MIN_WORD = 6  # skip short words to avoid false positives
+  EDITDIST_MAX      = 4  # absolute cap on allowed distance
+
+  private_class_method def self.editdist_search(query, limit:)
+    words = query.gsub(/[^\p{L}\p{N}\s]/, '').split.reject { |w| w.length < EDITDIST_MIN_WORD }
+    return [] if words.empty?
+
+    scope = all
+    words.each do |w|
+      threshold = [(w.length / 3.0).ceil, EDITDIST_MAX].min
+      scope = scope.where(
+        "editdist(LOWER(artist), ?) <= ? OR editdist(LOWER(title), ?) <= ? OR editdist(LOWER(album), ?) <= ?",
+        w, threshold, w, threshold, w, threshold
+      )
+    end
+    scope.limit(limit).to_a
   rescue ActiveRecord::StatementInvalid
     []
   end

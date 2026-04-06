@@ -19,6 +19,10 @@ ActiveRecord::MigrationContext.new(
   ActiveRecord::SchemaMigration
 ).migrate
 
+# Register Levenshtein edit distance as a custom SQLite function (same as production)
+require_relative '../lib/database_connector'
+DatabaseConnector.register_editdist
+
 Dir[File.expand_path('../models/*.rb', __dir__)].sort.each { |f| require f }
 Dir[File.expand_path('fixtures/*.rb', __dir__)].sort.each  { |f| require f }
 
