@@ -8,7 +8,7 @@ module Commands
 
     def execute
       query = cmd.match(PATTERN)[2]
-      return CommandResult.none if query.size < 4
+      return CommandResult.text("Короткий запрос, минимум 4 символа") if query.size < 4
 
       songs = Song.search(query, limit: 20)
       if songs.empty?

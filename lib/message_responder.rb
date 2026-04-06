@@ -97,7 +97,6 @@ class MessageResponder
       cmd: cmd
     )
 
-    LOGGER.debug "respond: dispatching cmd=#{cmd}"
     result = dispatch(ctx)
     LOGGER.debug "respond: delivering #{result&.type}"
     deliver(result)
@@ -109,7 +108,7 @@ class MessageResponder
     Commands::REGISTRY.each do |klass|
       command = klass.new(ctx)
       if command.match?
-        LOGGER.debug "dispatch matched: #{klass.name}"
+        LOGGER.info "dispatch matched: #{klass.name}"
         return command.execute
       end
     end
@@ -132,7 +131,7 @@ class MessageResponder
     when :none    then nil
     end
   rescue => e
-    LOGGER.error "deliver failed (#{result.type}): #{e.message}"
+    LOGGER.error "deliver failed (#{result.type}): #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
   end
 
   def save_message

@@ -38,7 +38,7 @@ begin
       end
     end
   rescue => e
-    logger.debug e.message + "\n\t" + e.backtrace.first(20).join("\n\t")
+    logger.error "Bot crash (retrying in 5s): #{e.class}: #{e.message}\n\t#{e.backtrace.first(20).join("\n\t")}"
     sleep 5
     retry
   end

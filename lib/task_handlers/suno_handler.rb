@@ -125,7 +125,11 @@ class SunoTaskHandler
     when :failed
       LOGGER.error "SunoTaskHandler[#{task.id}]: Suno generation failed for #{task.external_id}"
       ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!('suno_failed') }
-      api.sendMessage(chat_id: task.chat_id, text: "Не удалось сгенерировать песню") rescue nil
+      begin
+        api.sendMessage(chat_id: task.chat_id, text: "Не удалось сгенерировать песню")
+      rescue => e
+        LOGGER.warn "SunoTaskHandler[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
+      end
       :failed
     when Hash
       LOGGER.info "SunoTaskHandler[#{task.id}]: complete! #{result[:audio_url]} (#{result[:duration]}s)"
@@ -214,11 +218,15 @@ class SunoTaskHandler
     return unless params['lyrics']
 
     audio_message_id = audio_message&.message_id
-    api.sendMessage(
-      chat_id: chat_id,
-      text: params['lyrics'],
-      reply_to_message_id: audio_message_id
-    ) rescue nil
+    begin
+      api.sendMessage(
+        chat_id: chat_id,
+        text: params['lyrics'],
+        reply_to_message_id: audio_message_id
+      )
+    rescue => e
+      LOGGER.warn "SunoTaskHandler sendLyrics failed: #{e.class}: #{e.message}"
+    end
   end
 end
 
