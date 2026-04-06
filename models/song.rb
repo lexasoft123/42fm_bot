@@ -11,7 +11,7 @@ class Song < ActiveRecord::Base
     results = fts_search(query, limit: limit)
 
     if results.empty? && query.match?(/\p{Cyrillic}/)
-      latin = Translit.convert(query, :russian)
+      latin = Translit.convert(query)
       unless latin == query
         # Stage 1: k/c, ts/c, kh/h spelling variants (handles "металлика"→"metallica")
         latin_variants(latin).each do |variant|
@@ -19,8 +19,14 @@ class Song < ActiveRecord::Base
           break unless results.empty?
         end
 
-        # Stage 2: prefix truncation ("metallik"→"metall*" matches "Metallica" or "Metallika")
-        results = fts_search_truncated(latin, limit: limit) if results.empty?
+        # Stage 2: prefix truncation on original + variants
+        # e.g. "metalliku" → k→c → "metallicu" → truncate → "metallic*" → matches "Metallica"
+        if results.empty?
+          ([latin] + latin_variants(latin)).each do |v|
+            results = fts_search_truncated(v, limit: limit)
+            break unless results.empty?
+          end
+        end
 
         # Stage 3: LIKE fallback on original + variants
         if results.empty?
