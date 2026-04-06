@@ -82,7 +82,7 @@ class Song < ActiveRecord::Base
 
     scope = all
     words.each do |w|
-      threshold = [(w.length / 3.0).ceil, EDITDIST_MAX].min
+      threshold = [(w.length / 2.5).ceil, EDITDIST_MAX].min
       scope = scope.where(
         "editdist(LOWER(artist), ?) <= ? OR editdist(LOWER(title), ?) <= ? OR editdist(LOWER(album), ?) <= ?",
         w, threshold, w, threshold, w, threshold

@@ -183,9 +183,16 @@ class SongSearchTest < BotTest
   end
 
   def test_cyrillic_rammstein
-    # "раммштайн" → translit "rammshtajn" — editdist("rammstein", "rammshtajn") = 3 → match via Stage 4
+    # "раммштайн" → translit "rammshtajn" (10 chars) — editdist("rammstein","rammshtajn")=3 ≤ threshold 4
     rammstein = Song.create!(artist: "Rammstein", title: "Amerika", filepath: "rammstein/amerika.mp3")
     ids = Song.search("раммштайн").map(&:id)
+    assert_includes ids, rammstein.id
+  end
+
+  def test_cyrillic_rammstein_one_m
+    # "рамштайн" (one м) → translit "ramshtajn" (9 chars) — editdist("rammstein","ramshtajn")=4 ≤ threshold 4
+    rammstein = Song.create!(artist: "Rammstein", title: "Amerika", filepath: "rammstein/amerika2.mp3")
+    ids = Song.search("рамштайн").map(&:id)
     assert_includes ids, rammstein.id
   end
 
