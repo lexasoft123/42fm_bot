@@ -12,10 +12,52 @@ class Song < ActiveRecord::Base
 
     if results.empty? && query.match?(/\p{Cyrillic}/)
       latin = Translit.convert(query, :russian)
-      results = fts_search(latin, limit: limit) unless latin == query
+      unless latin == query
+        # Stage 1: k/c, ts/c, kh/h spelling variants (handles "металлика"→"metallica")
+        latin_variants(latin).each do |variant|
+          results = fts_search(variant, limit: limit)
+          break unless results.empty?
+        end
+
+        # Stage 2: prefix truncation ("metallik"→"metall*" matches "Metallica" or "Metallika")
+        results = fts_search_truncated(latin, limit: limit) if results.empty?
+
+        # Stage 3: LIKE fallback on original + variants
+        if results.empty?
+          ([latin] + latin_variants(latin)).each do |variant|
+            results = fallback_search(variant, limit: limit)
+            break unless results.empty?
+          end
+        end
+      end
     end
 
     results
+  end
+
+  private_class_method def self.latin_variants(query)
+    variants = []
+    v = query.gsub(/k(?=[aeiou]|\b)/i, 'c')
+    variants << v unless v == query
+    v = query.gsub(/ts(?=[aeiou])/i, 'c')
+    variants << v unless v == query
+    v = query.gsub(/kh/i, 'h')
+    variants << v unless v == query
+    variants.uniq
+  end
+
+  private_class_method def self.fts_search_truncated(query, limit:, min_prefix: 6)
+    words = query.gsub(/[^\p{L}\p{N}\s]/, '').split.reject(&:empty?)
+    prefixes = words.map { |w| w.length > min_prefix ? "#{w[0, w.length - 2]}*" : "#{w}*" }
+    return [] if prefixes.empty?
+    find_by_sql([
+      "SELECT songs.* FROM songs " \
+      "JOIN songs_fts ON songs.id = songs_fts.docid " \
+      "WHERE songs_fts MATCH ? LIMIT ?",
+      prefixes.join(' '), limit
+    ])
+  rescue ActiveRecord::StatementInvalid
+    []
   end
 
   private_class_method def self.fts_search(query, limit:)
