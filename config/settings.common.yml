@@ -12,6 +12,9 @@ chat_gpt:
     grok:
       api_type: openai
       api_url: 'https://api.x.ai/v1/chat/completions'
+    ollama:
+      api_type: openai
+      api_url: 'http://localhost:11434/v1/chat/completions'
   settings:
     main:
       provider: anthropic
@@ -23,6 +26,10 @@ chat_gpt:
       model: claude-sonnet-4-6
       max_tokens: 16000
       thinking_budget: 10000
+    local_agent:
+      provider: ollama
+      model: huihui_ai/qwen3.5-abliterated:9b
+      max_tokens: 4096
     embedder:
       provider: openai
       model: text-embedding-3-small

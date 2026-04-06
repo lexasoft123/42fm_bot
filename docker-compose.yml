@@ -1,12 +1,25 @@
 version: '3.8'
 services:
+  ollama:
+    image: ollama/ollama:0.20.2
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+
   bot:
     build: .
     restart: unless-stopped
     network_mode: host
+    depends_on:
+      - ollama
     volumes:
       - ./config/settings.yml:/app/config/settings.yml:ro
       - ./db:/app/db
       - ./log:/app/log
       - ${MUSIC_PATH:-/home/radio/content/music}:/home/radio/content/music:ro
 
+volumes:
+  ollama_data:
