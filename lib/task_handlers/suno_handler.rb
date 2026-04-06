@@ -213,7 +213,7 @@ class SunoTaskHandler
 
     return unless params['lyrics']
 
-    audio_message_id = audio_message&.dig('result', 'message_id')
+    audio_message_id = audio_message&.message_id
     api.sendMessage(
       chat_id: chat_id,
       text: params['lyrics'],
