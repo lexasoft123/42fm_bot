@@ -8,7 +8,7 @@ class DatabaseConnector
 
       configuration = YAML.load(IO.read('config/database.yml'))
       ActiveRecord::Base.establish_connection(configuration)
-      ActiveRecord::Base.default_timezone = :local
+      ActiveRecord.default_timezone = :local
       register_editdist
     end
 

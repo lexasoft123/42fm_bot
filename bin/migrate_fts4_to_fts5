@@ -1,0 +1,42 @@
+#!/bin/sh
+# One-time migration: remove fts4 songs_fts entries from a SQLite DB so that
+# the sqlite3 gem 2.x (compiled without fts4 support) can open it and
+# rake db:migrate can run migration 012 to recreate the table as fts5.
+#
+# Usage: bin/migrate_fts4_to_fts5 [db/bot.db]
+#
+# Run this once on any DB that was created before the FTS4→FTS5 upgrade.
+# Safe to run multiple times — exits early if fts4 is not present.
+set -e
+
+DB="${1:-db/bot.db}"
+
+if [ ! -f "$DB" ]; then
+  echo "Error: database file not found: $DB"
+  exit 1
+fi
+
+# Capture schema and exit code separately.  A non-zero exit (e.g. "malformed
+# database schema — orphan index") also means fts4 leftovers are present and
+# we must clean up; treat it the same as finding fts4 in the output.
+SCHEMA=$(sqlite3 "$DB" "SELECT sql FROM sqlite_master WHERE name='songs_fts'" 2>/dev/null) || SCHEMA="ERROR"
+
+if echo "$SCHEMA" | grep -qi 'fts4' || [ "$SCHEMA" = "ERROR" ]; then
+  echo "fts4 / malformed schema detected in $DB — cleaning up..."
+  # Schema validation runs at connection open time — any separate sqlite3
+  # invocation will fail on a malformed DB.  Everything must go in a single
+  # connection with writable_schema = ON set first, which disables validation.
+  # We delete fts4 shadow tables (songs_fts%), the fts4 table itself, AND
+  # the three trigger rows all in one shot, then VACUUM to rebuild the file.
+  sqlite3 "$DB" "
+    PRAGMA writable_schema = ON;
+    DELETE FROM sqlite_master
+      WHERE name LIKE 'songs_fts%'
+         OR (type = 'trigger' AND name IN ('songs_ai', 'songs_ad', 'songs_au'));
+    PRAGMA writable_schema = OFF;
+    VACUUM;
+  "
+  echo "Done. Run 'bundle exec rake db:migrate' to create the fts5 table."
+else
+  echo "No fts4 schema found in $DB — nothing to do."
+fi

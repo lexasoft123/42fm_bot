@@ -17,32 +17,32 @@ class CreateSongs < ActiveRecord::Migration[6.0]
     add_index :songs, :genre
 
     execute <<-SQL
-      CREATE VIRTUAL TABLE songs_fts USING fts4(
-        content="songs",
+      CREATE VIRTUAL TABLE songs_fts USING fts5(
         title, artist, album, genre, category,
-        tokenize=unicode61 "remove_diacritics=1"
+        content='songs', content_rowid='id',
+        tokenize='unicode61 remove_diacritics 1'
       );
     SQL
 
     execute <<-SQL
       CREATE TRIGGER songs_ai AFTER INSERT ON songs BEGIN
-        INSERT INTO songs_fts(docid, title, artist, album, genre, category)
+        INSERT INTO songs_fts(rowid, title, artist, album, genre, category)
         VALUES (new.id, new.title, new.artist, new.album, new.genre, new.category);
       END;
     SQL
 
     execute <<-SQL
       CREATE TRIGGER songs_ad AFTER DELETE ON songs BEGIN
-        INSERT INTO songs_fts(songs_fts, docid, title, artist, album, genre, category)
+        INSERT INTO songs_fts(songs_fts, rowid, title, artist, album, genre, category)
         VALUES ('delete', old.id, old.title, old.artist, old.album, old.genre, old.category);
       END;
     SQL
 
     execute <<-SQL
       CREATE TRIGGER songs_au AFTER UPDATE ON songs BEGIN
-        INSERT INTO songs_fts(songs_fts, docid, title, artist, album, genre, category)
+        INSERT INTO songs_fts(songs_fts, rowid, title, artist, album, genre, category)
         VALUES ('delete', old.id, old.title, old.artist, old.album, old.genre, old.category);
-        INSERT INTO songs_fts(docid, title, artist, album, genre, category)
+        INSERT INTO songs_fts(rowid, title, artist, album, genre, category)
         VALUES (new.id, new.title, new.artist, new.album, new.genre, new.category);
       END;
     SQL

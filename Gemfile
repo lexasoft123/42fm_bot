@@ -1,10 +1,10 @@
 source 'https://rubygems.org'
 
 gem 'telegram-bot-ruby', '~> 2'
-gem 'activerecord', '~> 6.0'
-gem 'activesupport', '~> 6.0'
+gem 'activerecord', '~> 7.2'
+gem 'activesupport', '~> 7.2'
 gem 'i18n'
-gem 'sqlite3', '~> 1.4'
+gem 'sqlite3', '~> 2.9'
 gem 'unicode_utils'
 gem 'translit'
 gem 'google-search'

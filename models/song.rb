@@ -61,7 +61,7 @@ class Song < ActiveRecord::Base
     return [] if prefixes.empty?
     find_by_sql([
       "SELECT songs.* FROM songs " \
-      "JOIN songs_fts ON songs.id = songs_fts.docid " \
+      "JOIN songs_fts ON songs.id = songs_fts.rowid " \
       "WHERE songs_fts MATCH ? LIMIT ?",
       prefixes.join(' '), limit
     ])
@@ -95,7 +95,7 @@ class Song < ActiveRecord::Base
 
     find_by_sql([
       "SELECT songs.* FROM songs " \
-      "JOIN songs_fts ON songs.id = songs_fts.docid " \
+      "JOIN songs_fts ON songs.id = songs_fts.rowid " \
       "WHERE songs_fts MATCH ? " \
       "LIMIT ?",
       sanitized, limit

@@ -14,10 +14,7 @@ module Settings
   def self.radio=(v); @radio = v; end
 end
 
-ActiveRecord::MigrationContext.new(
-  File.expand_path('../db/migrate', __dir__),
-  ActiveRecord::SchemaMigration
-).migrate
+ActiveRecord::MigrationContext.new(File.expand_path('../db/migrate', __dir__)).migrate
 
 # Register Levenshtein edit distance as a custom SQLite function (same as production)
 require_relative '../lib/database_connector'

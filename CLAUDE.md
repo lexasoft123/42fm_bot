@@ -124,7 +124,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 
 ## Services
 
-`Radio` (Liquidsoap TCP socket, lazy connect), `Song` (music library with FTS4 search, populated by `MusicScanner`), `MusicScanner` (reads audio file tags via wahwah, populates songs DB), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`/`.call_raw`), `Agent::Runner` (agentic tool-use loop over GptMaster), `Agent::ToolRegistry` (tool definitions for agent mode), `TaskRunner` (generic DB-backed background task poller + handler registry), `SunoClient` (Suno AI song generation API, V5 model), `FluxClient` (FLUX 2 image generation API via api.bfl.ai), `ChatContext` (shared module providing chat context + knowledge lookup for task handlers), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract/compact facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
+`Radio` (Liquidsoap TCP socket, lazy connect), `Song` (music library with FTS5 search + Levenshtein fuzzy matching, populated by `MusicScanner`), `MusicScanner` (reads audio file tags via wahwah, populates songs DB), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`/`.call_raw`), `Agent::Runner` (agentic tool-use loop over GptMaster), `Agent::ToolRegistry` (tool definitions for agent mode), `TaskRunner` (generic DB-backed background task poller + handler registry), `SunoClient` (Suno AI song generation API, V5 model), `FluxClient` (FLUX 2 image generation API via api.bfl.ai), `ChatContext` (shared module providing chat context + knowledge lookup for task handlers), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract/compact facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope` (scraper), `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice` (game)
 
 ## DB Tables
 
@@ -137,7 +137,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | `knowledge_compact_log` | `chat_id`, `merged`, `removed`, `kept`, `threshold`, `created_at` — one row per compaction run |
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 | `songs` | `title`, `artist`, `album`, `genre`, `year`, `filepath` (unique, relative to music root), `duration`, `category` |
-| `songs_fts` | FTS4 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — auto-synced via triggers |
+| `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — `content='songs'`, `content_rowid='id'`, `unicode61 remove_diacritics 1` tokenizer; auto-synced via triggers |
 
 ## Gotchas
 
@@ -172,8 +172,8 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - FLUX API settings in `config/settings.yml` under `flux` group: `api_key`; non-secret config (`api_url`, `model`) in `settings.common.yml`
 - Suno API settings in `config/settings.yml` under `suno` group: `api_key`; non-secret config (`api_url`, `model`) in `settings.common.yml`
 - `ChatContext` module (`lib/chat_context.rb`) provides `get_chat_context` and `get_relevant_knowledge` — included by both `SunoTaskHandler` and `ImageGenTaskHandler`
-- Radio search uses `Song.search` (FTS4 + Cyrillic→Latin transliteration fallback via `translit` gem); `radio.request` flow is unchanged
-- `Song.search` uses FTS4 prefix matching (`word*`) with `unicode61` tokenizer for Cyrillic+Latin; falls back to LIKE queries on FTS4 syntax errors
+- Radio search uses `Song.search` (multi-stage: FTS5 → Cyrillic→Latin transliteration with k/c variants → prefix truncation → LIKE → Levenshtein editdist); `radio.request` flow is unchanged
+- `Song.search` uses FTS5 prefix matching (`word*`) with `unicode61 remove_diacritics 1` tokenizer; Cyrillic input triggers transliteration chain (Stages 1–4); Stage 4 uses a custom `editdist` SQLite function registered by `DatabaseConnector.register_editdist` — catches e.g. "раммштайн"→Rammstein (distance 3) and "нирвана"→Nirvana (distance 1)
 - `MusicScanner` reads tags via `wahwah` (pure Ruby), falls back to parsing artist/title from filepath; run `bundle exec rake music:scan` to populate/refresh
 - `Settings.radio['path']` (music directory root, used by MusicScanner inside the container) and `Settings.radio['source']` (Liquidsoap source name, e.g. `42fm_radio_station`) are in `settings.common.yml`; `Song#absolute_path` joins `host_path` (if set) or `path` + relative `filepath` — set `radio.host_path` in `settings.yml` when Liquidsoap sees a different path than the container (e.g. `/content/music` vs `/home/radio/content/music`)
 - `wahwah` gem is pure Ruby — no native dependencies needed for audio tag reading
