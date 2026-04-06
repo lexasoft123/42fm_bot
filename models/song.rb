@@ -52,6 +52,10 @@ class Song < ActiveRecord::Base
     variants << v unless v == query
     v = query.gsub(/kh/i, 'h')
     variants << v unless v == query
+    # Cyrillic "в" transliterates to "w" but English proper nouns use "v"
+    # e.g. "нирвана" → "nirwana" → "nirvana"
+    v = query.gsub(/w/i, 'v')
+    variants << v unless v == query
     variants.uniq
   end
 

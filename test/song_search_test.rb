@@ -177,7 +177,7 @@ class SongSearchTest < BotTest
   end
 
   def test_cyrillic_nirvana
-    # "нирвана" → translit "nirwana" — editdist("nirvana", "nirwana") = 1 → match via Stage 4
+    # "нирвана" → translit "nirwana" → w→v variant "nirvana" → FTS5 match via Stage 1
     ids = Song.search("нирвана").map(&:id)
     assert_includes ids, @nirvana.id
   end
