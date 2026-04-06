@@ -1,42 +1,73 @@
-#!/bin/sh
-# One-time migration: remove fts4 songs_fts entries from a SQLite DB so that
-# the sqlite3 gem 2.x (compiled without fts4 support) can open it and
-# rake db:migrate can run migration 012 to recreate the table as fts5.
-#
-# Usage: bin/migrate_fts4_to_fts5 [db/bot.db]
-#
-# Run this once on any DB that was created before the FTS4→FTS5 upgrade.
-# Safe to run multiple times — exits early if fts4 is not present.
-set -e
+#!/usr/bin/env python3
+"""
+One-time migration: remove fts4 songs_fts entries from a SQLite DB so that
+the sqlite3 gem 2.x (compiled without fts4 support) can open it and
+rake db:migrate can run migration 012 to recreate the table as fts5.
 
-DB="${1:-db/bot.db}"
+Usage:  bin/migrate_fts4_to_fts5 [db/bot.db]
 
-if [ ! -f "$DB" ]; then
-  echo "Error: database file not found: $DB"
-  exit 1
-fi
+Run this once on any DB created before the FTS4→FTS5 upgrade, then run:
+  bundle exec rake db:migrate
 
-# Capture schema and exit code separately.  A non-zero exit (e.g. "malformed
-# database schema — orphan index") also means fts4 leftovers are present and
-# we must clean up; treat it the same as finding fts4 in the output.
-SCHEMA=$(sqlite3 "$DB" "SELECT sql FROM sqlite_master WHERE name='songs_fts'" 2>/dev/null) || SCHEMA="ERROR"
+Safe to run multiple times — exits early if fts4 is not present.
 
-if echo "$SCHEMA" | grep -qi 'fts4' || [ "$SCHEMA" = "ERROR" ]; then
-  echo "fts4 / malformed schema detected in $DB — cleaning up..."
-  # Schema validation runs at connection open time — any separate sqlite3
-  # invocation will fail on a malformed DB.  Everything must go in a single
-  # connection with writable_schema = ON set first, which disables validation.
-  # We delete fts4 shadow tables (songs_fts%), the fts4 table itself, AND
-  # the three trigger rows all in one shot, then VACUUM to rebuild the file.
-  sqlite3 "$DB" "
-    PRAGMA writable_schema = ON;
+Notes:
+- Uses Python's sqlite3 (not the system sqlite3 CLI which may have writable_schema
+  disabled via defensive mode on Debian/Ubuntu).
+- Removes fts4 shadow tables (songs_fts%), their auto-indexes
+  (sqlite_autoindex_songs_fts_%), and the three trigger rows via PRAGMA
+  writable_schema, then rebuilds the file via dump+restore to purge orphaned pages.
+"""
+import sqlite3
+import os
+import sys
+
+db_path = sys.argv[1] if len(sys.argv) > 1 else "db/bot.db"
+
+if not os.path.exists(db_path):
+    print(f"Error: database file not found: {db_path}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE name='songs_fts'").fetchone()
+    schema = row[0] if row else ""
+    conn.close()
+except Exception:
+    schema = "ERROR"
+
+if "fts4" not in schema and schema != "ERROR":
+    print(f"No fts4 schema found in {db_path} — nothing to do.")
+    sys.exit(0)
+
+print(f"fts4 / malformed schema detected in {db_path} — cleaning up...")
+
+# Step 1: remove fts4 entries from sqlite_master via writable_schema.
+# Removes the fts4 virtual table, all shadow tables (songs_fts%), their
+# auto-generated UNIQUE indexes (sqlite_autoindex_songs_fts_%), and triggers.
+conn = sqlite3.connect(db_path)
+conn.execute("PRAGMA writable_schema = ON")
+conn.execute("""
     DELETE FROM sqlite_master
-      WHERE name LIKE 'songs_fts%'
-         OR (type = 'trigger' AND name IN ('songs_ai', 'songs_ad', 'songs_au'));
-    PRAGMA writable_schema = OFF;
-    VACUUM;
-  "
-  echo "Done. Run 'bundle exec rake db:migrate' to create the fts5 table."
-else
-  echo "No fts4 schema found in $DB — nothing to do."
-fi
+    WHERE name LIKE 'songs_fts%'
+       OR name LIKE 'sqlite_autoindex_songs_fts_%'
+       OR (type = 'trigger' AND name IN ('songs_ai', 'songs_ad', 'songs_au'))
+""")
+conn.execute("PRAGMA writable_schema = OFF")
+conn.commit()
+conn.close()
+
+# Step 2: dump+restore to eliminate orphaned pages left by the deleted fts4
+# shadow tables. iterdump() reads only sqlite_master (now clean), so it skips
+# the orphaned pages entirely.
+tmp_path = db_path + ".fts5_migration_tmp"
+src = sqlite3.connect(db_path)
+dst = sqlite3.connect(tmp_path)
+for line in src.iterdump():
+    dst.execute(line)
+dst.commit()
+dst.close()
+src.close()
+
+os.replace(tmp_path, db_path)
+print(f"Done. Run 'bundle exec rake db:migrate' to create the fts5 table.")
