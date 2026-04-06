@@ -33,7 +33,7 @@ begin
         if Settings.auth['chats'].any? { |c| c['id'] == message.chat.id }
           MessageResponder.new(options).respond
         else
-          logger.error "unauthorized chat id: #{message.chat.id}"
+          logger.warn "unauthorized chat id: #{message.chat.id}"
         end
       end
     end
