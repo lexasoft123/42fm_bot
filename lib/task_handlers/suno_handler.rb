@@ -131,11 +131,11 @@ class SunoTaskHandler
         LOGGER.warn "SunoTaskHandler[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
       end
       :failed
-    when Hash
-      LOGGER.info "SunoTaskHandler[#{task.id}]: complete! #{result[:audio_url]} (#{result[:duration]}s)"
+    when Array
+      LOGGER.info "SunoTaskHandler[#{task.id}]: complete! #{result.size} clips"
       ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
       title = task.params_hash['title'] || 'Песня от 42FM'
-      send_audio(api, task.chat_id, result[:audio_url], title, task.params_hash)
+      send_audio(api, task.chat_id, result, title, task.params_hash)
       :done
     end
   end
@@ -197,36 +197,73 @@ class SunoTaskHandler
     PROMPT
   end
 
-  def send_audio(api, chat_id, url, title, params)
+  def send_audio(api, chat_id, clips, title, params)
+    artist = params['artist'].to_s.strip
+    performer = artist.empty? ? '42FM Bot' : artist
+
     caption = "🎵 *#{title}*"
     caption += "\n🎸 #{params['genre']}" if params['genre']
-    caption += " (#{params['artist']})" if params['artist'].to_s != ''
+    caption += " (#{artist})" if artist != ''
+
+    temp_files = []
+    media = []
+
+    clips.each_with_index do |clip, i|
+      filename = build_filename(performer, clip[:title] || title, i + 1, clips.size)
+      tmp = download_to_tempfile(clip[:audio_url], filename)
+      next unless tmp
+
+      temp_files << { file: tmp, name: filename }
+      attach_key = "audio#{i}"
+      entry = { type: 'audio', media: "attach://#{attach_key}",
+                title: clip[:title] || title, performer: performer }
+      entry[:caption] = caption if i == 0
+      entry[:parse_mode] = 'Markdown' if i == 0
+      media << entry
+    end
+
+    return if media.empty?
 
     retries = 0
-    audio_message = begin
-      api.sendAudio(
-        chat_id: chat_id, audio: url,
-        title: title, performer: '42FM Bot',
-        caption: caption, parse_mode: 'Markdown'
-      )
+    result = begin
+      send_params = { chat_id: chat_id, media: media.to_json }
+      temp_files.each_with_index { |tf, i| send_params[:"audio#{i}"] = Faraday::UploadIO.new(tf[:file].path, 'audio/mpeg', tf[:name]) }
+      api.sendMediaGroup(**send_params)
     rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed => e
       retries += 1
-      LOGGER.warn "SunoTaskHandler sendAudio retry #{retries}: #{e.class}"
+      LOGGER.warn "SunoTaskHandler sendMediaGroup retry #{retries}: #{e.class}"
       sleep 3 and retry if retries <= 3
+    ensure
+      temp_files.each { |tf| tf[:file].close; tf[:file].unlink rescue nil }
     end
 
     return unless params['lyrics']
 
-    audio_message_id = audio_message&.message_id
-    begin
-      api.sendMessage(
-        chat_id: chat_id,
-        text: params['lyrics'],
-        reply_to_message_id: audio_message_id
-      )
-    rescue => e
-      LOGGER.warn "SunoTaskHandler sendLyrics failed: #{e.class}: #{e.message}"
-    end
+    msg_id = result&.dig('result')&.first&.dig('message_id')
+    api.sendMessage(chat_id: chat_id, text: params['lyrics'], reply_to_message_id: msg_id)
+  rescue => e
+    LOGGER.warn "SunoTaskHandler send_audio failed: #{e.class}: #{e.message}"
+  end
+
+  def build_filename(performer, title, index, total)
+    name = [performer, title].reject { |s| s.to_s.empty? }.join('_-_')
+    name = name.gsub(/[\/\\:*?"<>|]/, '').gsub(/\s+/, '_')
+    name += "_(#{index})" if total > 1
+    "#{name}.mp3"
+  end
+
+  def download_to_tempfile(url, filename)
+    response = HTTParty.get(url, timeout: 60)
+    return nil unless response.code == 200
+
+    tmp = Tempfile.new(['suno_', '.mp3'], '/tmp')
+    tmp.binmode
+    tmp.write(response.body)
+    tmp.rewind
+    tmp
+  rescue => e
+    LOGGER.warn "SunoTaskHandler download failed: #{e.class}: #{e.message}"
+    nil
   end
 end
 

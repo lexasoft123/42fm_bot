@@ -32,7 +32,6 @@ module Commands
     PhraseTop,
     ImageGen,
     TaskQueue,
-    SunoSing,
     GptQuestion,
     GptChat,
     FallbackReply,

@@ -107,7 +107,6 @@ bin/bot
 │   │   ├── knowledge_delete.rb
 │   │   ├── image_gen.rb      # "бот нарисуй" — FLUX 2 image generation
 │   │   ├── task_queue.rb     # "бот задачи" — background task status
-│   │   ├── suno_sing.rb      # "бот спой" — Suno AI song generation
 │   │   └── fallback_reply.rb
 │   ├── agent/
 │   │   ├── tool_registry.rb   # Tool definitions registry for agent mode
@@ -304,7 +303,7 @@ Generic DB-backed persistent task system for long-running operations. A poller t
 3. Enqueue: `BackgroundTask.create!(task_type: 'my_type', chat_id: ..., params: {}.to_json)`
 
 **Current handlers:**
-- `SunoTaskHandler` (`suno_generate`) — LLM request parsing → GPT lyrics composition → LLM tag enrichment → Suno V5 API submit → poll → send audio with lyrics caption. Uses `ChatContext` for context-aware lyrics.
+- `SunoTaskHandler` (`suno_generate`) — LLM request parsing → GPT lyrics composition → LLM tag enrichment → Suno V5 API submit → poll → download both clip variants → send as media group with `Performer_-_Song_Name.mp3` filenames → send lyrics as reply. Uses `ChatContext` for context-aware lyrics. Triggered exclusively via the `compose_song` agent tool (no direct command).
 - `ImageGenTaskHandler` (`image_generate`) — LLM English prompt generation (with chat context + knowledge) → FLUX 2 API submit → poll → send photo. Uses `ChatContext` for context-aware prompts.
 - `KnowledgeCompactHandler` (`knowledge_compact`) — calls `KnowledgeBase.compact!` for the task's chat; logs to `log/knowledge_compact.log`; enqueued automatically by `maybe_trigger_compact` when entry count crosses the adaptive threshold.
 
@@ -316,7 +315,7 @@ Shared module included by task handlers. Provides:
 ### SunoClient — `lib/suno_client.rb`
 HTTP client for the Suno AI song generation API (`sunoapi.org`), using V5 model. Key methods:
 - `submit(title:, lyrics:, tags:)` — POST to `/api/v1/generate`, returns `task_id`
-- `poll_once(task_id)` — GET status, returns `:pending`, `:failed`, or `{ audio_url:, title:, duration: }`
+- `poll_once(task_id)` — GET status, returns `:pending`, `:failed`, or `Array<{ audio_url:, title:, duration: }>` (all clip variants)
 - `compose(...)` — blocking convenience (submit + poll loop)
 - `SunoClient.resolve_genre(text)` — maps Russian genre names to English style tags (~50 genres)
 - **Important:** Suno blocks artist names in tags — describe sound characteristics instead
@@ -388,11 +387,6 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 | `!новости / !news` | News from Lenta RSS |
 | `!кости / !bones` | Dice game |
 | `!погода city[,country]` | Weather |
-
-### Suno Song Generation
-| Command | Description |
-|---------|-------------|
-| `бот спой/сочини/запиши/сыграй [request]` | Generate a song via Suno AI V5 — freeform requests parsed by LLM (genre, artist style, topic) |
 
 ### FLUX Image Generation
 | Command | Description |

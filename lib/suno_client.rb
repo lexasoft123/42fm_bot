@@ -87,10 +87,12 @@ class SunoClient
     return :pending unless data
     case data['status']
     when 'SUCCESS'
-      song = data.dig('response', 'sunoData')&.first
-      return :failed unless song
-      { audio_url: song['audioUrl'] || song['audio_url'],
-        title: song['title'], duration: song['duration'] }
+      songs = data.dig('response', 'sunoData')
+      return :failed if songs.nil? || songs.empty?
+      songs.map do |song|
+        { audio_url: song['audioUrl'] || song['audio_url'],
+          title: song['title'], duration: song['duration'] }
+      end
     when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED', 'SENSITIVE_WORD_ERROR'
       :failed
     else
@@ -111,7 +113,7 @@ class SunoClient
       sleep POLL_INTERVAL
       result = poll_once(task_id)
       case result
-      when Hash    then return result
+      when Array   then return result
       when :failed then raise "Suno failed"
       end
     end

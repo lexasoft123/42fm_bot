@@ -235,7 +235,7 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 | Add a service/API integration | `lib/new_service.rb` + `config/boot.rb` (or `message_responder.rb`) |
 | Add a background task handler | `lib/task_handlers/my_handler.rb` + `TaskRunner.register(...)` |
 | FLUX image generation | `lib/flux_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/commands/image_gen.rb` |
-| Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/commands/suno_sing.rb` |
+| Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/agent/tools/suno.rb` (agent-only, no direct command) |
 | Change reply/response text | `config/replies/*.yml` |
 | Change TTS behavior | `lib/polly.rb` + `lib/tts_service.rb` |
 | Change GPT prompt/model | `config/settings.yml` (`chat_gpt` group) |

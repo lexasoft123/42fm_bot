@@ -115,7 +115,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | Music search / song DB | `models/song.rb` + `lib/music_scanner.rb` + `rake music:scan` |
 | Agent mode tools | `lib/agent/tools/*.rb` + `lib/agent/tool_registry.rb` + `lib/agent/runner.rb` |
 | Background tasks | `lib/task_runner.rb` + `lib/task_handlers/*.rb` + `models/background_task.rb` |
-| Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/commands/suno_sing.rb` |
+| Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/agent/tools/suno.rb` (agent-only, no direct command) |
 | FLUX image generation | `lib/flux_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/commands/image_gen.rb` |
 | Shared handler context | `lib/chat_context.rb` — `ChatContext` module (chat messages + knowledge for task handlers) |
 | DB schema | `db/migrate/` + `models/` — run with `bundle exec rake db:migrate` |
@@ -165,7 +165,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - `GptMaster.new(messages, setting: 'main')` resolves provider + model from settings; class methods `.chat`/`.ask` default to `setting: 'main'`
 - `TaskRunner` poller thread starts inside `Telegram::Bot::Client.run` block, reuses `bot.api` — no second bot instance
 - Background tasks are generic: `TaskRunner.register('type', HandlerClass)` + `BackgroundTask.create!(task_type: 'type', ...)` — add new task types via handler files in `lib/task_handlers/`
-- `бот спой/сочини/запиши/сыграй <request>` creates a background task for Suno song generation; freeform requests are parsed by LLM to extract genre, artist, topic, and tags; the `compose_song` agent tool does the same
+- Suno song generation is agent-only — the `compose_song` agent tool creates a `suno_generate` background task (no direct `бот спой` command). Suno returns 2 clip variants; both are downloaded, named as `Performer_-_Song_Name.mp3`, and sent as a media group. Lyrics follow as a reply.
 - Suno uses V5 model; tags are enriched via LLM — artist names are **never** included in tags (Suno blocks them), instead describe the sound characteristics
 - `бот нарисуй/рисуй/картинку <request>` creates a background task for FLUX image generation; LLM generates English prompt with chat context and knowledge; the `generate_image` agent tool does the same
 - `бот задачи` shows last 10 background tasks for the current chat
