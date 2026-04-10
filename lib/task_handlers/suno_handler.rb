@@ -190,10 +190,11 @@ class SunoTaskHandler
 
   def lyrics_prompt
     Settings.suno['lyrics_prompt'] || <<~PROMPT
-      Сочини короткую песню (2 куплета + припев) на тему: "{REQUEST}"
+      Сочини песню на тему: "{REQUEST}"
       Жанр: {GENRE}
       {ARTIST}
-      Верни ТОЛЬКО текст с тегами [Verse], [Chorus], [Outro]. Без пояснений.
+      Выбери структуру, подходящую жанру (verse/chorus для рока, verse/hook для рэпа, AAB для блюза, четверостишия для частушек и т.д.).
+      Верни ТОЛЬКО текст с тегами секций. Без пояснений.
     PROMPT
   end
 
