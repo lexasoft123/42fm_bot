@@ -239,7 +239,8 @@ class SunoTaskHandler
 
     return unless params['lyrics']
 
-    msg_id = result&.dig('result')&.first&.dig('message_id')
+    messages = result.is_a?(Hash) ? result['result'] : result
+    msg_id = messages&.first&.respond_to?(:message_id) ? messages.first.message_id : messages&.first&.dig('message_id')
     api.sendMessage(chat_id: chat_id, text: params['lyrics'], reply_to_message_id: msg_id)
   rescue => e
     LOGGER.warn "SunoTaskHandler send_audio failed: #{e.class}: #{e.message}"
