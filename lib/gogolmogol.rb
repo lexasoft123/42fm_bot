@@ -41,7 +41,7 @@ class Gogolmogol
       search = search_attempt(attempt)
       next if search["error"] && (search["error"]["errors"][0]["reason"] == "dailyLimitExceeded")
       items = search.items
-      return items.first(limit).map { |item| { title: item.title, link: item.link, snippet: item.snippet } }
+      return items.first(limit).map { |item| { title: item.title, link: item.link, snippet: item.respond_to?(:snippet) ? item.snippet : '' } }
     end
     []
   rescue Exception => e

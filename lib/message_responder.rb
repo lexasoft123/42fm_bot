@@ -83,8 +83,9 @@ class MessageResponder
 
     return if message.date + 30 < Time.now.to_i
     process_voice_message if message.voice
+    return unless message.text
 
-    cmd = UnicodeUtils.downcase(message.text) if message.text
+    cmd = UnicodeUtils.downcase(message.text)
 
     ctx = CommandContext.new(
       bot: @bot,
@@ -99,6 +100,13 @@ class MessageResponder
     result = dispatch(ctx)
     LOGGER.debug "respond: delivering #{result&.type}"
     deliver(result)
+  rescue => e
+    LOGGER.error "respond failed: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
+    begin
+      MessageSender.new(bot: @bot, chat: message.chat, text: "Мозги перегрелись, попробуй позже 🤖").send
+    rescue => notify_err
+      LOGGER.warn "respond: failed to send error notification: #{notify_err.class}: #{notify_err.message}"
+    end
   end
 
   private

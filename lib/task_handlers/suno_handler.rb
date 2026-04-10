@@ -105,7 +105,18 @@ class SunoTaskHandler
 
     tags = SunoClient.resolve_genre(genre) || 'rock' if tags.empty?
 
-    suno_task_id = SunoClient.new.submit(title: title, lyrics: p['lyrics'], tags: tags)
+    begin
+      suno_task_id = SunoClient.new.submit(title: title, lyrics: p['lyrics'], tags: tags)
+    rescue => e
+      p['submit_failures'] = (p['submit_failures'] || 0) + 1
+      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
+      if p['submit_failures'] >= 3
+        LOGGER.error "SunoTaskHandler[#{task.id}]: submit failed #{p['submit_failures']} times, giving up: #{e.message}"
+        ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!("submit_failed: #{e.message}") }
+        return :failed
+      end
+      raise
+    end
     LOGGER.debug "SunoTaskHandler[#{task.id}]: submitted #{suno_task_id} with tags '#{tags}'"
 
     ActiveRecord::Base.connection_pool.with_connection do
