@@ -5,12 +5,13 @@ module Agent
     MAX_ITERATIONS = 5
     MAX_TOOL_RESULT_LENGTH = 2000
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, replied_to: nil, image: nil)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, replied_to: nil, image: nil, phrase: nil)
       @text      = text
       @context   = context
       @knowledge = knowledge
       @replied_to = replied_to
       @image     = image
+      @phrase    = phrase
       @radio     = radio
       @chat_id   = chat_id
       @user      = user
@@ -62,6 +63,7 @@ module Agent
       # gsub main placeholders first, then ERB for conditional blocks
       replied_to = @replied_to
       image = @image
+      phrase = @phrase
       content = prompt_template
         .gsub('{REQUEST}', @text)
         .gsub('{CONTEXT}', @context)

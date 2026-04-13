@@ -20,6 +20,7 @@ module Commands
       quick = reply_master.reply_pattern_only(text)
       return CommandResult.text(quick) if quick
 
+      phrase = maybe_save_phrase(text)
       replied_to = extract_replied_text
       replied_image = extract_replied_image
 
@@ -28,7 +29,8 @@ module Commands
           text: text, context: get_chat_context,
           knowledge: get_relevant_knowledge(text),
           radio: radio, chat_id: chat_id, user: user, bot: bot,
-          replied_to: replied_to, image: replied_image
+          replied_to: replied_to, image: replied_image,
+          phrase: phrase
         ).run
       else
         GptMaster.chat(text, context: get_chat_context, knowledge: get_relevant_knowledge(text))
@@ -43,6 +45,14 @@ module Commands
       return false unless cmd && message.reply_to_message
       bot_id = Settings.telegram['token'].split(':').first.to_i
       message.reply_to_message.from&.id == bot_id
+    end
+
+    def maybe_save_phrase(text)
+      return nil unless text =~ /^(а\s+)?(т|в)ы\s+(?<phrase>.+)/i
+      content = Regexp.last_match(:phrase)
+      Phrase.create(user: user, content: content)
+      random = Phrase.order("random()").first
+      random&.content
     end
 
     def extract_replied_text

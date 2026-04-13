@@ -3,6 +3,7 @@ module Commands
     PATTERN = /^(бот|жзяцля|тугосеря|уважаемый\sбот)[,]?\s(((т|в)ы\s)|(гей|пидор|мудак)).*/i
 
     def match?
+      return false if Settings.chat_gpt['agent_mode']
       cmd =~ PATTERN
     end
 
