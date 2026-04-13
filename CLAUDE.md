@@ -7,6 +7,7 @@ Full docs: `docs/architecture.md` | Agent guide: `docs/agents.md`
 ## Rules
 
 - **Never commit automatically.** Always ask the user before creating a git commit.
+- **Always run `make test` before committing.** All tests must pass before creating a commit.
 - **Never run `ruby lib/bot.rb` directly.** Use Docker in production; use `./bin/bot start/stop/restart` only for local non-Docker development.
 - Always update all documents on changes.
 
