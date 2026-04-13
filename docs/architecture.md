@@ -105,7 +105,6 @@ bin/bot
 │   │   ├── knowledge_add.rb
 │   │   ├── knowledge_list.rb
 │   │   ├── knowledge_delete.rb
-│   │   ├── image_gen.rb      # "бот нарисуй" — FLUX 2 image generation
 │   │   ├── task_queue.rb     # "бот задачи" — background task status
 │   │   └── fallback_reply.rb
 │   ├── agent/
@@ -304,7 +303,7 @@ Generic DB-backed persistent task system for long-running operations. A poller t
 
 **Current handlers:**
 - `SunoTaskHandler` (`suno_generate`) — LLM request parsing → GPT lyrics composition → LLM tag enrichment → Suno V5 API submit → poll → download both clip variants → send as media group with `Performer_-_Song_Name.mp3` filenames → send lyrics as reply. Uses `ChatContext` for context-aware lyrics. Triggered exclusively via the `compose_song` agent tool (no direct command).
-- `ImageGenTaskHandler` (`image_generate`) — LLM English prompt generation (with chat context + knowledge) → FLUX 2 API submit → poll → send photo. Uses `ChatContext` for context-aware prompts.
+- `ImageGenTaskHandler` (`image_generate`) — LLM English prompt generation (with chat context + knowledge) → FLUX 2 API submit → poll → send photo. Uses `ChatContext` for context-aware prompts. Triggered exclusively via the `generate_image` agent tool (no direct command).
 - `KnowledgeCompactHandler` (`knowledge_compact`) — calls `KnowledgeBase.compact!` for the task's chat; logs to `log/knowledge_compact.log`; enqueued automatically by `maybe_trigger_compact` when entry count crosses the adaptive threshold.
 
 ### ChatContext — `lib/chat_context.rb`
@@ -387,11 +386,6 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 | `!новости / !news` | News from Lenta RSS |
 | `!кости / !bones` | Dice game |
 | `!погода city[,country]` | Weather |
-
-### FLUX Image Generation
-| Command | Description |
-|---------|-------------|
-| `бот нарисуй/рисуй/картинку [request]` | Generate an image via FLUX 2 — LLM generates English prompt with chat context |
 
 ### Task Queue
 | Command | Description |

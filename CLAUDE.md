@@ -116,7 +116,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | Agent mode tools | `lib/agent/tools/*.rb` + `lib/agent/tool_registry.rb` + `lib/agent/runner.rb` |
 | Background tasks | `lib/task_runner.rb` + `lib/task_handlers/*.rb` + `models/background_task.rb` |
 | Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/agent/tools/suno.rb` (agent-only, no direct command) |
-| FLUX image generation | `lib/flux_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/commands/image_gen.rb` |
+| FLUX image generation | `lib/flux_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/agent/tools/image_gen.rb` (agent-only, no direct command) |
 | Shared handler context | `lib/chat_context.rb` — `ChatContext` module (chat messages + knowledge for task handlers) |
 | DB schema | `db/migrate/` + `models/` — run with `bundle exec rake db:migrate` |
 | Sticker IDs | `config/initializers/telegram_stickers.rb` |
@@ -167,7 +167,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - Background tasks are generic: `TaskRunner.register('type', HandlerClass)` + `BackgroundTask.create!(task_type: 'type', ...)` — add new task types via handler files in `lib/task_handlers/`
 - Suno song generation is agent-only — the `compose_song` agent tool creates a `suno_generate` background task (no direct `бот спой` command). Suno returns 2 clip variants; both are downloaded, named as `Performer_-_Song_Name.mp3`, and sent as a media group. Lyrics follow as a reply.
 - Suno uses V5 model; tags are enriched via LLM — artist names are **never** included in tags (Suno blocks them), instead describe the sound characteristics
-- `бот нарисуй/рисуй/картинку <request>` creates a background task for FLUX image generation; LLM generates English prompt with chat context and knowledge; the `generate_image` agent tool does the same
+- FLUX image generation is agent-only — the `generate_image` agent tool creates an `image_generate` background task (no direct `бот нарисуй` command). LLM generates English prompt with chat context and knowledge.
 - `бот задачи` shows last 10 background tasks for the current chat
 - FLUX API settings in `config/settings.yml` under `flux` group: `api_key`; non-secret config (`api_url`, `model`) in `settings.common.yml`
 - Suno API settings in `config/settings.yml` under `suno` group: `api_key`; non-secret config (`api_url`, `model`) in `settings.common.yml`

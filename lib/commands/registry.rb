@@ -30,7 +30,6 @@ module Commands
     Dice,
     ReplyYou,
     PhraseTop,
-    ImageGen,
     TaskQueue,
     GptQuestion,
     GptChat,
