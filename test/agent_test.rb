@@ -535,6 +535,109 @@ class GptChatTest < BotTest
 end
 
 # ==========================================================================
+# GptChatExecuteTest — tests that require FakeGptMaster for execute flow
+# ==========================================================================
+class GptChatExecuteTest < BotTest
+  include AgentTestHelpers
+  include Fixtures::Users
+
+  def setup
+    super
+    @saved_tools = Agent::ToolRegistry.instance_variable_get(:@tools)&.dup || []
+    Agent::ToolRegistry.instance_variable_set(:@tools, [])
+    @original_gpt_master = ::GptMaster
+    Object.send(:remove_const, :GptMaster)
+    Object.const_set(:GptMaster, FakeGptMaster)
+    FakeGptMaster.reset!
+    stub_settings!
+    @user = member_user
+  end
+
+  def teardown
+    Agent::ToolRegistry.instance_variable_set(:@tools, @saved_tools)
+    Object.send(:remove_const, :GptMaster)
+    Object.const_set(:GptMaster, @original_gpt_master)
+    super
+  end
+
+  # In agent mode, reply_pattern_only is skipped — agent handles all messages
+  # (production bug: "бот ты причинно-следственная язь" returned canned "язь" reply
+  #  because reply_pattern_only regex matched "язь" before agent could run)
+  def test_agent_mode_skips_reply_pattern
+    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => true))
+
+    reply_master = OpenStruct.new
+    reply_master.define_singleton_method(:reply_pattern_only) { |_| 'canned язь reply' }
+
+    FakeGptMaster.enqueue(anthropic_text('agent reply about язь'))
+
+    msg = OpenStruct.new(text: "бот ты причинно-следственная язь", message_id: 1, reply_to_message: nil)
+    ctx = CommandContext.new(
+      bot: nil, message: msg, user: @user,
+      chat_id: 100, radio: nil,
+      reply_master: reply_master,
+      cmd: "бот ты причинно-следственная язь"
+    )
+    result = Commands::GptChat.new(ctx).execute
+    assert_equal :text, result.type
+    assert_equal 'agent reply about язь', result.payload
+  end
+
+  # In agent mode, keyword-matching messages also go to agent (not just "бот ты ..." phrases)
+  def test_agent_mode_skips_reply_pattern_for_keyword
+    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => true))
+
+    reply_master = OpenStruct.new
+    reply_master.define_singleton_method(:reply_pattern_only) { |_| 'canned keyword reply' }
+
+    FakeGptMaster.enqueue(anthropic_text('agent reply'))
+
+    msg = OpenStruct.new(text: "бот расскажи про язь", message_id: 1, reply_to_message: nil)
+    ctx = CommandContext.new(
+      bot: nil, message: msg, user: @user,
+      chat_id: 100, radio: nil,
+      reply_master: reply_master,
+      cmd: "бот расскажи про язь"
+    )
+    result = Commands::GptChat.new(ctx).execute
+    assert_equal :text, result.type
+    assert_equal 'agent reply', result.payload
+  end
+
+  # Without agent mode, reply_pattern_only still works as before
+  def test_non_agent_mode_uses_reply_pattern
+    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => false))
+
+    reply_master = OpenStruct.new
+    reply_master.define_singleton_method(:reply_pattern_only) { |_| 'canned reply' }
+
+    msg = OpenStruct.new(text: "бот язь", message_id: 1, reply_to_message: nil)
+    ctx = CommandContext.new(
+      bot: nil, message: msg, user: @user,
+      chat_id: 100, radio: nil,
+      reply_master: reply_master,
+      cmd: "бот язь"
+    )
+    result = Commands::GptChat.new(ctx).execute
+    assert_equal :text, result.type
+    assert_equal 'canned reply', result.payload
+  end
+
+  private
+
+  def default_chat_gpt
+    {
+      'agent_mode' => true,
+      'agent_prompt' => "<%- if replied_to -%>RE: <%= replied_to %>\n<%- end -%><%- if image -%>[IMAGE]\n<%- end -%><%- if phrase -%>PHRASE: <%= phrase %>\n<%- end -%>{REQUEST} | {CONTEXT} | {KNOWLEDGE}",
+      'prompt' => '{REQUEST}',
+      'context_messages_size' => 10,
+      'providers' => { 'anthropic' => { 'api_key' => 'fake', 'api_type' => 'anthropic' } },
+      'settings' => { 'agent' => { 'provider' => 'anthropic', 'model' => 'fake', 'max_tokens' => 100 } }
+    }
+  end
+end
+
+# ==========================================================================
 # ReplyYouTest
 # ==========================================================================
 class ReplyYouTest < BotTest
