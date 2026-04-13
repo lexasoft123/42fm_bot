@@ -160,7 +160,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - `бот сожми знания` (admin only) triggers compaction immediately for the current chat
 - `бот найди/ищи/пошукай` → Google search; bare `бот <text>` → GPT chat
 - Agent mode (`chat_gpt.agent_mode: true`) lets GPT call bot tools (radio, weather, search, etc.) autonomously; toggle off to revert to simple GPT. Agent supports vision — replying to a photo with "бот ..." sends the image to Claude for recognition.
-- `GptQuestion`/`GptChat` must be last `бот`-prefixed commands in registry — they match `бот <anything>`
+- `GptChat` must be last `бот`-prefixed command in registry — it matches `бот <anything>`
 - `chat_gpt.providers` holds API credentials; `chat_gpt.settings` holds named configs (`main`, `agent`, `embedder`) referencing providers
 - `GptMaster.new(messages, setting: 'main')` resolves provider + model from settings; class methods `.chat`/`.ask` default to `setting: 'main'`
 - `TaskRunner` poller thread starts inside `Telegram::Bot::Client.run` block, reuses `bot.api` — no second bot instance

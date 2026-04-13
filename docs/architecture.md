@@ -91,7 +91,6 @@ bin/bot
 │   │   ├── radio_top.rb
 │   │   ├── meta.rb
 │   │   ├── help.rb
-│   │   ├── gpt_question.rb
 │   │   ├── gpt_chat.rb
 │   │   ├── horoscope_sign.rb
 │   │   ├── horoscope_general.rb
@@ -268,7 +267,7 @@ Auto-extraction is triggered by `MessageResponder#maybe_extract_knowledge` every
 Auto-compaction is triggered by `maybe_trigger_compact` after each extraction batch. Uses an adaptive threshold: if the last compaction found only small clusters (avg ≤ 2 entries), the effective threshold scales up to 3× `compact_at` before the next run. Threshold settings: `knowledge.compact_at` (entry count trigger, default 100), `knowledge.compact_threshold` (cosine similarity, default 0.85). Logs to `log/knowledge_compact.log`.
 
 ### Agent Mode — `lib/agent/`
-When `chat_gpt.agent_mode: true`, GPT commands (`GptChat`, `GptQuestion`) use `Agent::Runner` instead of `GptMaster.chat`. The runner implements an agentic tool-use loop:
+When `chat_gpt.agent_mode: true`, `GptChat` uses `Agent::Runner` instead of `GptMaster.chat`. The runner implements an agentic tool-use loop:
 
 1. Send user message + tools definitions to LLM
 2. If LLM returns tool calls → execute them, append results, repeat
