@@ -76,14 +76,37 @@ class ImageGenTaskHandler
 
   def send_photo(api, chat_id, url, caption)
     caption = caption[0..1020] + "..." if caption.length > 1024
+    tmp = download_to_tempfile(url)
+    unless tmp
+      LOGGER.warn "ImageGenTaskHandler: download failed, falling back to URL"
+      api.sendPhoto(chat_id: chat_id, photo: url, caption: caption)
+      return
+    end
+
     retries = 0
     begin
-      api.sendPhoto(chat_id: chat_id, photo: url, caption: caption)
+      api.sendPhoto(chat_id: chat_id, photo: Faraday::UploadIO.new(tmp.path, 'image/jpeg', 'image.jpg'), caption: caption)
     rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed => e
       retries += 1
       LOGGER.warn "ImageGenTaskHandler sendPhoto retry #{retries}: #{e.class}"
       sleep 3 and retry if retries <= 3
+    ensure
+      tmp.close
+      tmp.unlink rescue nil
     end
+  end
+
+  def download_to_tempfile(url)
+    response = HTTParty.get(url, timeout: 60)
+    return nil unless response.code == 200
+    tmp = Tempfile.new(['flux_', '.jpg'], '/tmp')
+    tmp.binmode
+    tmp.write(response.body)
+    tmp.rewind
+    tmp
+  rescue => e
+    LOGGER.warn "ImageGenTaskHandler download failed: #{e.class}: #{e.message}"
+    nil
   end
 end
 

@@ -2,6 +2,8 @@ class TaskRunner
   POLL_INTERVAL = 30
 
   @handlers = {}
+  @thread = nil
+  @mutex = Mutex.new
 
   class << self
     def register(task_type, handler_class)
@@ -13,20 +15,31 @@ class TaskRunner
     end
 
     def start(bot_api)
-      Thread.new do
-        runner = new(bot_api)
-        loop do
-          runner.process_pending
-          sleep POLL_INTERVAL
-        rescue => e
-          LOGGER.error "TaskRunner: #{e.class}: #{e.message}"
-          sleep POLL_INTERVAL
+      @mutex.synchronize do
+        if @thread&.alive?
+          LOGGER.info "TaskRunner: already running, updating bot_api"
+          @runner&.update_api(bot_api)
+          return @thread
+        end
+        @runner = new(bot_api)
+        @thread = Thread.new do
+          loop do
+            @runner.process_pending
+            sleep POLL_INTERVAL
+          rescue => e
+            LOGGER.error "TaskRunner: #{e.class}: #{e.message}"
+            sleep POLL_INTERVAL
+          end
         end
       end
     end
   end
 
   def initialize(bot_api)
+    @api = bot_api
+  end
+
+  def update_api(bot_api)
     @api = bot_api
   end
 
