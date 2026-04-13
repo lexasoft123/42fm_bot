@@ -277,7 +277,7 @@ When `chat_gpt.agent_mode: true`, GPT commands (`GptChat`, `GptQuestion`) use `A
 
 **Components:**
 - `Agent::ToolRegistry` — central registry; tools register via `ToolRegistry.register(name:, description:, parameters:, handler:, admin_only:)`
-- `Agent::Runner` — orchestrates the loop, handles provider differences (Anthropic vs OpenAI tool-calling formats)
+- `Agent::Runner` — orchestrates the loop, handles provider differences (Anthropic vs OpenAI tool-calling formats), supports vision (multi-modal messages with images)
 - `lib/agent/tools/*.rb` — tool definitions (radio×8, weather, google_search, knowledge×3, horoscope, compose_song, generate_image)
 
 **Tool-calling formats:**
@@ -287,6 +287,8 @@ When `chat_gpt.agent_mode: true`, GPT commands (`GptChat`, `GptQuestion`) use `A
 Admin-only tools are filtered from definitions AND checked at execution time. Tool results are truncated to 2000 chars.
 
 Toggle off with `chat_gpt.agent_mode: false` to revert to simple `GptMaster.chat` path.
+
+**Vision support:** When a user replies to a photo with a bot-addressed message (e.g. "бот что тут?"), `GptChat` downloads the photo via Telegram API, base64-encodes it, and passes it to `Agent::Runner`. The runner builds a multi-modal message with an `image` content block for the Anthropic API. Falls back to text-only if the download fails or there's no photo.
 
 ### Background Task Queue — `lib/task_runner.rb` + `lib/task_handlers/`
 Generic DB-backed persistent task system for long-running operations. A poller thread runs inside the bot process (started in `Telegram::Bot::Client.run`, reusing `bot.api`).

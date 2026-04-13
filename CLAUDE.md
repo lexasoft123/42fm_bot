@@ -159,7 +159,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - Knowledge auto-compaction (`KnowledgeBase.compact!`) clusters near-dupes via stored embeddings (no API calls) and LLM-merges each cluster; triggered as a `knowledge_compact` background task when count >= adaptive threshold (`compact_at` × factor based on last run's avg cluster size); logs to `log/knowledge_compact.log`; history in `knowledge_compact_log` table
 - `бот сожми знания` (admin only) triggers compaction immediately for the current chat
 - `бот найди/ищи/пошукай` → Google search; bare `бот <text>` → GPT chat
-- Agent mode (`chat_gpt.agent_mode: true`) lets GPT call bot tools (radio, weather, search, etc.) autonomously; toggle off to revert to simple GPT
+- Agent mode (`chat_gpt.agent_mode: true`) lets GPT call bot tools (radio, weather, search, etc.) autonomously; toggle off to revert to simple GPT. Agent supports vision — replying to a photo with "бот ..." sends the image to Claude for recognition.
 - `GptQuestion`/`GptChat` must be last `бот`-prefixed commands in registry — they match `бот <anything>`
 - `chat_gpt.providers` holds API credentials; `chat_gpt.settings` holds named configs (`main`, `agent`, `embedder`) referencing providers
 - `GptMaster.new(messages, setting: 'main')` resolves provider + model from settings; class methods `.chat`/`.ask` default to `setting: 'main'`

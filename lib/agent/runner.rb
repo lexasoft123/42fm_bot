@@ -5,11 +5,12 @@ module Agent
     MAX_ITERATIONS = 5
     MAX_TOOL_RESULT_LENGTH = 2000
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, replied_to: nil)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, replied_to: nil, image: nil)
       @text      = text
       @context   = context
       @knowledge = knowledge
       @replied_to = replied_to
+      @image     = image
       @radio     = radio
       @chat_id   = chat_id
       @user      = user
@@ -60,12 +61,21 @@ module Agent
       prompt_template = Settings.chat_gpt['agent_prompt'] || Settings.chat_gpt['prompt']
       # gsub main placeholders first, then ERB for conditional blocks
       replied_to = @replied_to
+      image = @image
       content = prompt_template
         .gsub('{REQUEST}', @text)
         .gsub('{CONTEXT}', @context)
         .gsub('{KNOWLEDGE}', @knowledge)
       content = ERB.new(content, trim_mode: '-').result(binding)
-      [{ role: 'user', content: content }]
+
+      if @image
+        [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: @image[:media_type], data: @image[:data] } },
+          { type: 'text', text: content }
+        ] }]
+      else
+        [{ role: 'user', content: content }]
+      end
     end
 
     def execute_tool(name, input)

@@ -219,6 +219,7 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 - **Bot replies in context:** GPT chat commands store bot replies in `messages` with `role: 'bot'`, `user_uid: nil`. `get_chat_context` includes them formatted as `"Жзяцля: ..."`.
 - **Command order:** `FallbackReply` must always be last in `REGISTRY` — it matches almost anything.
 - **GptChat pattern is broad:** It can match most text — keep more specific commands above it in REGISTRY.
+- **Vision/Image recognition:** When a user replies to a photo with "бот ...", `GptChat` downloads the photo, base64-encodes it, and passes it to the agent as a multi-modal message. The agent can describe, analyze, and answer questions about images. Falls back to text-only if download fails.
 - **Background tasks:** The `compose_song` and `generate_image` agent tools create `BackgroundTask` records instead of blocking — songs/images are generated asynchronously and delivered to the chat when ready. The agent receives a confirmation message immediately.
 - **Suno tags:** Never include artist names in Suno tags — Suno blocks them. Describe the sound characteristics instead.
 - **ChatContext module:** `lib/chat_context.rb` provides `get_chat_context` and `get_relevant_knowledge` — shared by task handlers for context-aware generation.
