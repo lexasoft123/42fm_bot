@@ -57,7 +57,7 @@ module Commands
 
       file_id = photos.last.file_id
       file = bot.api.getFile(file_id: file_id)
-      file_path = file['result']['file_path']
+      file_path = file.file_path
       return nil unless file_path
 
       token = Settings.telegram['token']
