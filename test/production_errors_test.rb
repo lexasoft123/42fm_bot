@@ -353,6 +353,31 @@ class MessageSenderTest < BotTest
     refute_includes result, 'foo\\_bar'
   end
 
+  # Markdown tables are wrapped in code blocks (Telegram doesn't render tables)
+  def test_sanitize_wraps_tables_in_code_block
+    table = "| Name | Value |\n| --- | --- |\n| foo | 123 |\n| bar | 456 |\n"
+    sender = build_sender("Here:\n#{table}Done")
+    result = sender.__send__(:sanitize_markdown, sender.text)
+    assert_includes result, "```\n| Name | Value |"
+    assert_includes result, "| bar | 456 |\n```"
+  end
+
+  # Table formatting strips markdown chars inside the code block
+  def test_sanitize_table_strips_markdown_inside
+    table = "| *bold* | _italic_ |\n| `code` | normal |\n"
+    sender = build_sender(table)
+    result = sender.__send__(:sanitize_markdown, sender.text)
+    assert_includes result, '| bold | italic |'
+    assert_includes result, '| code | normal |'
+  end
+
+  # Single pipe line is not treated as a table
+  def test_sanitize_single_pipe_line_not_wrapped
+    sender = build_sender("use | for OR")
+    result = sender.__send__(:sanitize_markdown, sender.text)
+    refute_includes result, '```'
+  end
+
   # **bold** is converted to *bold* for Telegram Markdown
   def test_sanitize_double_asterisks_to_single
     sender = build_sender("**bold text**")
