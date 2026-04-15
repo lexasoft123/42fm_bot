@@ -28,7 +28,8 @@ begin
         next unless message.is_a? Telegram::Bot::Types::Message
         next unless message.from
         options = { bot: bot, message: message, radio: @radio }
-        logger.debug "@#{message.from.username}: #{message.text if message.respond_to?(:text)} chat: #{message.chat.id}"
+        msg_text = message.text || message.caption
+        logger.debug "@#{message.from.username}: #{msg_text} chat: #{message.chat.id}"
         logger.info "chat_seen: id=#{message.chat.id} title=#{message.chat.title.inspect} type=#{message.chat.type}"
         if Settings.auth['chats'].any? { |c| c['id'] == message.chat.id }
           MessageResponder.new(options).respond
