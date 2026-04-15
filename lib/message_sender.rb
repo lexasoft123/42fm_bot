@@ -53,11 +53,11 @@ class MessageSender
   def sanitize_markdown(text)
     # Replace **bold** with *bold* (Telegram Markdown uses single *)
     result = text.gsub(/\*\*(.+?)\*\*/, '*\1*')
-    # Escape underscores inside words to prevent broken italic
-    # But preserve _italic_ (underscore at word boundaries)
+    # Escape underscores inside words to prevent broken italic,
+    # but skip code blocks (```...```) and inline code (`...`)
+    result = result.gsub(/```.*?```|`[^`]+`/m) { |m| m.gsub('_', "\x00") }
     result = result.gsub(/(?<=\w)_(?=\w)/, '\\_')
-    # Strip unbalanced backticks (odd count outside code blocks)
-    # Remove triple backtick blocks and replace with content only if unbalanced
+    result = result.gsub("\x00", '_')
     result
   end
 

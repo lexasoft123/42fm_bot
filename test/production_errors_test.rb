@@ -255,9 +255,21 @@ class TaskRunnerTest < BotTest
 end
 
 # ==========================================================================
-# MessageSenderTest — covers Markdown parse failure retry (Apr 13)
+# MessageSenderTest — covers Markdown parse failure retry and sanitization
 # ==========================================================================
 class MessageSenderTest < BotTest
+  private
+
+  def build_sender(text)
+    api = Object.new
+    api.define_singleton_method(:sendChatAction) { |**_| nil }
+    api.define_singleton_method(:sendMessage) { |params| nil }
+    bot = OpenStruct.new(api: api)
+    chat = OpenStruct.new(id: 1, title: 'test')
+    MessageSender.new(bot: bot, chat: chat, text: text)
+  end
+
+  public
   # Markdown parse failure triggers retry as plain text
   # (production: Apr 13 "can't parse entities: Can't find end of the entity starting at byte offset 903")
   def test_markdown_failure_retries_as_plain_text
@@ -303,6 +315,49 @@ class MessageSenderTest < BotTest
 
     assert_equal 1, calls.size
     assert_equal 'Markdown', calls[0][:parse_mode]
+  end
+
+  # --- sanitize_markdown ---
+
+  # Underscores inside code blocks are not escaped
+  # (production: `char16_t` in code blocks rendered as `char16\_t`)
+  def test_sanitize_preserves_underscores_in_code_blocks
+    sender = build_sender("text ```c\nchar16_t* p = data;\nint foo_bar = 1;\n``` end")
+    result = sender.__send__(:sanitize_markdown, sender.text)
+    assert_includes result, 'char16_t'
+    assert_includes result, 'foo_bar'
+    refute_includes result, 'char16\\_t'
+  end
+
+  # Underscores inside inline code are not escaped
+  def test_sanitize_preserves_underscores_in_inline_code
+    sender = build_sender("use `my_variable` here")
+    result = sender.__send__(:sanitize_markdown, sender.text)
+    assert_includes result, '`my_variable`'
+    refute_includes result, '`my\\_variable`'
+  end
+
+  # Underscores in regular text between words are still escaped
+  def test_sanitize_escapes_underscores_in_regular_text
+    sender = build_sender("some_variable is cool")
+    result = sender.__send__(:sanitize_markdown, sender.text)
+    assert_includes result, 'some\\_variable'
+  end
+
+  # Mixed: code block underscores preserved, text underscores escaped
+  def test_sanitize_mixed_code_and_text
+    sender = build_sender("my_var and ```\nfoo_bar\n``` done")
+    result = sender.__send__(:sanitize_markdown, sender.text)
+    assert_includes result, 'my\\_var'
+    assert_includes result, 'foo_bar'
+    refute_includes result, 'foo\\_bar'
+  end
+
+  # **bold** is converted to *bold* for Telegram Markdown
+  def test_sanitize_double_asterisks_to_single
+    sender = build_sender("**bold text**")
+    result = sender.__send__(:sanitize_markdown, sender.text)
+    assert_equal "*bold text*", result
   end
 
   # Long message is split into chunks under MAX_MESSAGE_LENGTH
