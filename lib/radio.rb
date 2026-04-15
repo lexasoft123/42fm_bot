@@ -58,7 +58,7 @@ class Radio
   end
 
   def listeners
-    rd = RestClient.get("http://listen.42fm.ru:8000/status-json.xsl")
+    rd = RestClient::Request.execute(method: :get, url: "http://listen.42fm.ru:8000/status-json.xsl", timeout: 10)
     h  = JSON.parse(rd)
     h['icestats']['source'].sum { |s| s['listeners'] }
   end

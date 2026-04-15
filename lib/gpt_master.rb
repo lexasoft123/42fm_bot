@@ -23,22 +23,22 @@ class GptMaster
 
   def call
     body = build_body
-    LOGGER.debug("GptMaster [#{@model}] request: #{@messages.map { |m| m[:content].to_s.length }.sum} chars")
+    LOGGER.debug("GptMaster#call [#{@model}]: request #{@messages.map { |m| m[:content].to_s.length }.sum} chars")
 
     retries = 0
     loop do
       response = HTTParty.post(@api_url, body: body.to_json, headers: headers, timeout: 300)
       if response.code == 200
         result = extract_content(response)
-        LOGGER.debug("GptMaster reply: #{result.to_s.length} chars")
+        LOGGER.debug("GptMaster#call: reply #{result.to_s.length} chars")
         return result
       elsif response.code == 529 && retries < MAX_RETRIES
         retries += 1
         delay = RETRY_DELAYS[retries - 1]
-        LOGGER.warn "GptMaster overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
+        LOGGER.warn "GptMaster#call: overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
         sleep delay
       else
-        LOGGER.error "GptMaster bad response: #{response.code} #{response.parsed_response&.dig('error', 'message') || response.body}"
+        LOGGER.error "GptMaster#call: #{response.code} #{response.parsed_response&.dig('error', 'message') || response.body}"
         return 'жпт не жпт'
       end
     end
@@ -47,21 +47,21 @@ class GptMaster
   def call_raw(tools: [])
     body = build_body
     body[:tools] = tools
-    LOGGER.debug("GptMaster call_raw [#{@model}]: #{tools.size} tools")
+    LOGGER.debug("GptMaster#call_raw [#{@model}]: #{tools.size} tools")
 
     retries = 0
     loop do
       response = HTTParty.post(@api_url, body: body.to_json, headers: headers, timeout: 300)
       if response.code == 200
-        LOGGER.debug("GptMaster raw reply: stop_reason=#{response['stop_reason'] || response.dig('choices', 0, 'finish_reason')}")
+        LOGGER.debug("GptMaster#call_raw: stop_reason=#{response['stop_reason'] || response.dig('choices', 0, 'finish_reason')}")
         return response.parsed_response
       elsif response.code == 529 && retries < MAX_RETRIES
         retries += 1
         delay = RETRY_DELAYS[retries - 1]
-        LOGGER.warn "GptMaster overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
+        LOGGER.warn "GptMaster#call_raw: overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
         sleep delay
       else
-        LOGGER.error "GptMaster call_raw bad response: #{response.code} #{response.parsed_response&.dig('error', 'message') || response.body}"
+        LOGGER.error "GptMaster#call_raw: #{response.code} #{response.parsed_response&.dig('error', 'message') || response.body}"
         return nil
       end
     end

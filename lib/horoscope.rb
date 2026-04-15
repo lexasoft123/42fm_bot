@@ -14,7 +14,7 @@ class Horoscope
   end
 
   def predict!
-    response = RestClient.get @@url
+    response = RestClient::Request.execute(method: :get, url: @@url, timeout: 10)
     xml = Nokogiri::XML(response.body)
     horos = xml.xpath('//yesterday | //today | //tomorrow | //tomorrow02').collect{|s| s.content}
 
@@ -22,8 +22,8 @@ class Horoscope
 
     @username + horos[ind]
 
-  rescue Exception => e
-    puts e
+  rescue => e
+    LOGGER.error "Horoscope#predict!: #{e.message}"
     @@fails.sample
   end
 
@@ -32,7 +32,7 @@ class Horoscope
   end
 
   def get_sexy sign
-    response = RestClient.get 'https://www.newsler.ru/horoscope/erotic'
+    response = RestClient::Request.execute(method: :get, url: 'https://www.newsler.ru/horoscope/erotic', timeout: 10)
     doc = Nokogiri::HTML(response.body)
     content = doc.css('.horoscope-row .horoscope-block')
     all = content.map do |e|

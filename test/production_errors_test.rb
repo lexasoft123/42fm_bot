@@ -11,8 +11,14 @@ require_relative '../lib/command_context'
 require_relative '../lib/agent/tool_registry'
 require_relative '../lib/agent/runner'
 require_relative '../lib/commands/base'
+require_relative '../lib/chat_context'
 require_relative '../lib/commands/gpt_helpers'
 require_relative '../lib/commands/gpt_chat'
+require_relative '../lib/embedding_service'
+require_relative '../lib/knowledge_base'
+require_relative '../lib/commands/knowledge_add'
+require_relative '../lib/commands/knowledge_delete'
+require_relative '../lib/commands/knowledge_compact'
 require_relative '../lib/task_runner'
 require_relative '../lib/reply_markup_formatter'
 require_relative '../lib/message_sender'
@@ -714,5 +720,256 @@ class MessageResponderCaptionTest < BotTest
     body = msg.text || msg.caption
     Message.create(user_uid: @user.uid, chat_id: 100, body: body)
     assert_equal "фото с подписью", Message.last.body
+  end
+end
+
+# ==========================================================================
+# ChatContextTest — covers consolidated ChatContext module (Apr 16 refactoring)
+# ==========================================================================
+class ChatContextTest < BotTest
+  include ProdTestHelpers
+  include Fixtures::Users
+  include Fixtures::Messages
+
+  def setup
+    super
+    stub_settings!
+    @user = member_user(first_name: 'Ivan', last_name: 'Petrov')
+  end
+
+  # get_chat_context includes last_name in user name formatting
+  def test_context_includes_full_name
+    user_message(chat_id: 100, body: 'привет', user: @user)
+    obj = Object.new
+    obj.extend(ChatContext)
+    result = obj.get_chat_context(100)
+    parsed = JSON.parse(result)
+    assert_equal 1, parsed.size
+    assert_includes parsed.first['who'], 'Ivan'
+    assert_includes parsed.first['who'], 'Petrov'
+  end
+
+  # get_chat_context formats bot messages with "Жзяцля" name
+  def test_context_bot_messages_use_bot_name
+    bot_message(chat_id: 100, body: 'bot reply')
+    obj = Object.new
+    obj.extend(ChatContext)
+    result = obj.get_chat_context(100)
+    parsed = JSON.parse(result)
+    assert_equal 'Жзяцля', parsed.first['who']
+  end
+
+  # get_chat_context falls back to username when first/last name are nil
+  def test_context_falls_back_to_username
+    user_no_name = member_user(uid: 2000, name: 'cooluser', first_name: nil, last_name: nil)
+    user_message(chat_id: 100, body: 'hi', user: user_no_name)
+    obj = Object.new
+    obj.extend(ChatContext)
+    result = obj.get_chat_context(100)
+    parsed = JSON.parse(result)
+    assert_equal 'cooluser', parsed.first['who']
+  end
+
+  # get_chat_context returns empty string on error (rescue wrapper)
+  def test_context_returns_empty_on_error
+    obj = Object.new
+    obj.extend(ChatContext)
+    # Force error by passing settings without chat_gpt key
+    Settings.instance_variable_set(:@_settings, OpenStruct.new)
+    result = obj.get_chat_context(100)
+    assert_equal '', result
+  end
+
+  # get_relevant_knowledge returns empty string when knowledge is not configured
+  def test_knowledge_returns_empty_without_settings
+    Settings.instance_variable_set(:@_settings, OpenStruct.new(
+      chat_gpt: { 'context_messages_size' => 10 }
+    ))
+    obj = Object.new
+    obj.extend(ChatContext)
+    result = obj.get_relevant_knowledge('test', 100)
+    assert_equal '', result
+  end
+end
+
+# ==========================================================================
+# GptHelpersWrapperTest — covers GptHelpers delegation to ChatContext via super
+# ==========================================================================
+class GptHelpersWrapperTest < BotTest
+  include ProdTestHelpers
+  include Fixtures::Users
+  include Fixtures::Messages
+
+  def setup
+    super
+    stub_settings!
+    @user = member_user(first_name: 'Test', last_name: 'User')
+  end
+
+  # GptHelpers#get_chat_context passes chat_id from command context automatically
+  def test_get_chat_context_auto_passes_chat_id
+    user_message(chat_id: 100, body: 'hello', user: @user)
+    user_message(chat_id: 200, body: 'other chat', user: @user)
+
+    msg = OpenStruct.new(text: 'бот привет', message_id: 1, reply_to_message: nil)
+    ctx = CommandContext.new(
+      bot: nil, message: msg, user: @user,
+      chat_id: 100, radio: nil,
+      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      cmd: "бот привет"
+    )
+    command = Commands::GptChat.new(ctx)
+    result = command.send(:get_chat_context)
+    parsed = JSON.parse(result)
+
+    # Should only contain messages from chat 100, not 200
+    bodies = parsed.map { |m| m['msg'] }
+    assert_includes bodies, 'hello'
+    refute_includes bodies, 'other chat'
+  end
+
+  # GptHelpers#save_bot_reply creates message with correct chat_id
+  def test_save_bot_reply_uses_chat_id
+    msg = OpenStruct.new(text: 'бот привет', message_id: 1, reply_to_message: nil)
+    ctx = CommandContext.new(
+      bot: nil, message: msg, user: @user,
+      chat_id: 100, radio: nil,
+      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      cmd: "бот привет"
+    )
+    command = Commands::GptChat.new(ctx)
+    command.send(:save_bot_reply, 'test reply')
+
+    saved = Message.last
+    assert_equal 'bot', saved.role
+    assert_equal 100, saved.chat_id
+    assert_equal 'test reply', saved.body
+  end
+end
+
+# ==========================================================================
+# RequireAdminTest — covers require_admin! helper in Commands::Base
+# ==========================================================================
+class RequireAdminTest < BotTest
+  include ProdTestHelpers
+  include Fixtures::Users
+
+  def setup
+    super
+    stub_settings!
+    # Stub knowledge settings for KnowledgeCompact
+    settings = Settings.instance_variable_get(:@_settings)
+    settings.define_singleton_method(:knowledge) { { 'compact_threshold' => 0.85 } }
+    settings.define_singleton_method(:respond_to?) { |m, *| m == :knowledge ? true : super(m) }
+  end
+
+  # Admin can add knowledge
+  def test_knowledge_add_allowed_for_admin
+    admin = admin_user
+    ctx = CommandContext.new(
+      bot: nil, message: OpenStruct.new(text: 'бот запомни тест факт', message_id: 1, reply_to_message: nil),
+      user: admin, chat_id: 100, radio: nil,
+      reply_master: nil, cmd: "бот запомни тест факт"
+    )
+    result = Commands::KnowledgeAdd.new(ctx).execute
+    assert_equal :text, result.type
+    assert_match(/Запомнил/, result.payload)
+  end
+
+  # Non-admin is blocked from adding knowledge
+  def test_knowledge_add_blocked_for_member
+    user = member_user
+    ctx = CommandContext.new(
+      bot: nil, message: OpenStruct.new(text: 'бот запомни секрет', message_id: 1, reply_to_message: nil),
+      user: user, chat_id: 100, radio: nil,
+      reply_master: nil, cmd: "бот запомни секрет"
+    )
+    result = Commands::KnowledgeAdd.new(ctx).execute
+    assert_equal :text, result.type
+    assert_match(/администратор/, result.payload)
+  end
+
+  # Non-admin is blocked from deleting knowledge
+  def test_knowledge_delete_blocked_for_member
+    user = member_user
+    ctx = CommandContext.new(
+      bot: nil, message: OpenStruct.new(text: 'бот забудь 1', message_id: 1, reply_to_message: nil),
+      user: user, chat_id: 100, radio: nil,
+      reply_master: nil, cmd: "бот забудь 1"
+    )
+    result = Commands::KnowledgeDelete.new(ctx).execute
+    assert_equal :text, result.type
+    assert_match(/администратор/, result.payload)
+  end
+
+  # Admin can delete knowledge
+  def test_knowledge_delete_allowed_for_admin
+    admin = admin_user
+    Knowledge.create!(topic: 'test', content: 'fact', chat_id: 100, source: 'manual')
+    kid = Knowledge.last.id
+    ctx = CommandContext.new(
+      bot: nil, message: OpenStruct.new(text: "бот забудь #{kid}", message_id: 1, reply_to_message: nil),
+      user: admin, chat_id: 100, radio: nil,
+      reply_master: nil, cmd: "бот забудь #{kid}"
+    )
+    result = Commands::KnowledgeDelete.new(ctx).execute
+    assert_equal :text, result.type
+    assert_match(/Забыл/, result.payload)
+    assert_nil Knowledge.find_by(id: kid)
+  end
+end
+
+# ==========================================================================
+# SendImageErrorTest — covers send_image error handling (rescue => e)
+# ==========================================================================
+class SendImageErrorTest < BotTest
+  # send_image catches errors and sends fallback message
+  def test_send_image_error_sends_fallback
+    fallback_sent = nil
+    api = Object.new
+    api.define_singleton_method(:sendChatAction) { |**_| nil }
+    api.define_singleton_method(:sendPhoto) { |**_| raise "upload failed" }
+    api.define_singleton_method(:sendMessage) { |**kwargs| fallback_sent = kwargs }
+    bot = OpenStruct.new(api: api)
+    chat = OpenStruct.new(id: 1, title: 'test')
+
+    sender = MessageSender.new(bot: bot, chat: chat, text: "http://example.com/photo.jpg")
+    sender.send_image
+
+    assert fallback_sent, "fallback message should be sent on error"
+    assert_equal 1, fallback_sent[:chat_id]
+    assert_match(/гугл/, fallback_sent[:text])
+  end
+
+  # send_image sends document for gif URLs
+  def test_send_image_gif_sends_document
+    doc_sent = nil
+    api = Object.new
+    api.define_singleton_method(:sendChatAction) { |**_| nil }
+    api.define_singleton_method(:sendDocument) { |**kwargs| doc_sent = kwargs }
+    bot = OpenStruct.new(api: api)
+    chat = OpenStruct.new(id: 1, title: 'test')
+
+    sender = MessageSender.new(bot: bot, chat: chat, text: "http://example.com/funny.gif")
+    sender.send_image
+
+    assert doc_sent, "document should be sent for gif"
+    assert_equal "http://example.com/funny.gif", doc_sent[:document]
+  end
+
+  # send_image sends photo for non-gif URLs
+  def test_send_image_jpg_sends_photo
+    photo_sent = nil
+    api = Object.new
+    api.define_singleton_method(:sendChatAction) { |**_| nil }
+    api.define_singleton_method(:sendPhoto) { |**kwargs| photo_sent = kwargs }
+    bot = OpenStruct.new(api: api)
+    chat = OpenStruct.new(id: 1, title: 'test')
+
+    sender = MessageSender.new(bot: bot, chat: chat, text: "http://example.com/photo.jpg")
+    sender.send_image
+
+    assert photo_sent, "photo should be sent for jpg"
+    assert_equal "http://example.com/photo.jpg", photo_sent[:photo]
   end
 end

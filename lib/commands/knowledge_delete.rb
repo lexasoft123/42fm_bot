@@ -7,9 +7,7 @@ module Commands
     end
 
     def execute
-      unless user.role == 'admin'
-        return CommandResult.text('Только администратор может удалять знания.')
-      end
+      return admin_denied unless admin?
 
       id = cmd.match(PATTERN)[:id].to_i
       k  = Knowledge.find_by(id: id, chat_id: chat_id)

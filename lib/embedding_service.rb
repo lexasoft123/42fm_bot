@@ -28,11 +28,11 @@ class EmbeddingService
     if response.code == 200
       response['data'][0]['embedding']
     else
-      LOGGER.error "EmbeddingService [#{cfg[:model]}] error: #{response.code} #{response.body}"
+      LOGGER.error "EmbeddingService.embed [#{cfg[:model]}]: #{response.code} #{response.body}"
       nil
     end
   rescue => e
-    LOGGER.error "EmbeddingService [#{cfg[:model] rescue '?'}] exception: #{e.message}"
+    LOGGER.error "EmbeddingService.embed [#{cfg[:model] rescue '?'}]: #{e.message}"
     nil
   end
 end

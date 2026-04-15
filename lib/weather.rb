@@ -11,10 +11,10 @@ class Weather
 
   def search!
     response = RestClient.get @api_url, {params: {q: @cmd, appid: @app_id, units: 'metric'}}
-    puts response.code
-    puts response.body
+    LOGGER.debug "Weather#search!: code=#{response.code}"
     generate_answer JSON.parse(response.body)
-  rescue Exception => e
+  rescue => e
+    LOGGER.error "Weather#search!: #{e.message}"
     "хуйня какая-то..."
   end
 

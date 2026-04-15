@@ -12,6 +12,7 @@ require_relative '../lib/command_context'
 require_relative '../lib/agent/tool_registry'
 require_relative '../lib/agent/runner'
 require_relative '../lib/commands/base'
+require_relative '../lib/chat_context'
 require_relative '../lib/commands/gpt_helpers'
 require_relative '../lib/commands/gpt_chat'
 require_relative '../lib/commands/reply_you'
@@ -686,6 +687,28 @@ class GptChatExecuteTest < BotTest
     result = Commands::GptChat.new(ctx).execute
     assert_equal :text, result.type
     assert_equal 'canned reply', result.payload
+  end
+
+  # In non-agent mode, "бот ты X" with matching reply pattern goes to GPT (not canned reply)
+  # because maybe_save_phrase saved the phrase — the !phrase guard skips the quick reply
+  def test_non_agent_mode_phrase_skips_reply_pattern
+    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => false))
+
+    reply_master = OpenStruct.new
+    reply_master.define_singleton_method(:reply_pattern_only) { |_| 'canned язь reply' }
+
+    FakeGptMaster.enqueue('gpt reply about язь')
+
+    msg = OpenStruct.new(text: "бот ты причинно-следственная язь", message_id: 1, reply_to_message: nil)
+    ctx = CommandContext.new(
+      bot: nil, message: msg, user: @user,
+      chat_id: 100, radio: nil,
+      reply_master: reply_master,
+      cmd: "бот ты причинно-следственная язь"
+    )
+    result = Commands::GptChat.new(ctx).execute
+    assert_equal :text, result.type
+    assert_equal 'gpt reply about язь', result.payload
   end
 
   # Photo with caption "бот что это" — agent receives the image from the current message

@@ -64,10 +64,10 @@ class KnowledgeBase
         add(topic: fact['topic'], content: fact['content'], chat_id: chat_id, source: 'auto')
         stored += 1
       end
-      LOGGER.debug "KnowledgeBase: extracted #{stored} new facts from #{messages.size} messages"
+      LOGGER.debug "KnowledgeBase.extract_and_store: #{stored} new facts from #{messages.size} messages"
       maybe_trigger_compact(chat_id: chat_id)
     rescue => e
-      LOGGER.error "KnowledgeBase.extract_and_store error: #{e.message}"
+      LOGGER.error "KnowledgeBase.extract_and_store: #{e.message}"
     end
 
     def compact!(chat_id:, threshold: 0.85)
@@ -147,7 +147,7 @@ class KnowledgeBase
         return if BackgroundTask.where(task_type: 'knowledge_compact', chat_id: chat_id, status: 'pending').exists?
         threshold = cfg.fetch('compact_threshold', 0.85)
         BackgroundTask.create!(task_type: 'knowledge_compact', chat_id: chat_id, params: { 'threshold' => threshold }.to_json)
-        LOGGER.info "KnowledgeBase: queued compaction for chat #{chat_id} (count=#{count}, effective_at=#{(base * factor).round}, factor=#{factor.round(2)})"
+        LOGGER.info "KnowledgeBase.maybe_trigger_compact: queued for chat #{chat_id} (count=#{count}, effective_at=#{(base * factor).round}, factor=#{factor.round(2)})"
       end
     end
 

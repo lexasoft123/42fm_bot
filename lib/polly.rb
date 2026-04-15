@@ -59,10 +59,10 @@ class Polly
   private
 
   def exec_command!(command)
-    LOGGER.debug "execute command: #{command}"
+    LOGGER.debug "Polly#exec_command!: #{command}"
     output = `#{command} 2>&1`
     raise "Command failed (exit #{$?.exitstatus}): #{command}\n#{output.strip}" unless $?.success?
-    LOGGER.debug "command result: #{output.strip}"
+    LOGGER.debug "Polly#exec_command!: result=#{output.strip}"
   end
 
   def clear_old_files(except: nil)

@@ -22,17 +22,16 @@ class Gogolmogol
 
     @@access_rights.size.times do |attempt|
       search = search_attempt(attempt)
-      LOGGER.debug "GOOGLE RESULT: " + search.to_s
-      LOGGER.debug "ACCESS KEY: " + @access_idx[attempt].to_s
+      LOGGER.debug "Gogolmogol#search!: result=#{search.to_s.slice(0, 200)}"
+      LOGGER.debug "Gogolmogol#search!: key_index=#{@access_idx[attempt]}"
       next if search["error"] && (search["error"]["errors"][0]["reason"] == "dailyLimitExceeded")
       return catch_result(search)
     end
 
     "Похоже гугле опять нас забанил..."
 
-  rescue Exception => e
-    print e.message
-    print e.backtrace.join("\n\t")
+  rescue => e
+    LOGGER.error "Gogolmogol#search!: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
     return "хуйня какая-то..."
   end
 
@@ -44,7 +43,7 @@ class Gogolmogol
       return items.first(limit).map { |item| { title: item.title, link: item.link, snippet: item.respond_to?(:snippet) ? item.snippet : '' } }
     end
     []
-  rescue Exception => e
+  rescue => e
     LOGGER.error "Gogolmogol#search_results: #{e.message}"
     []
   end

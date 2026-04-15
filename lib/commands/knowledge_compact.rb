@@ -7,7 +7,7 @@ module Commands
     end
 
     def execute
-      return CommandResult.text('Только администратор.') unless user.role == 'admin'
+      return admin_denied unless admin?
       threshold = Settings.knowledge['compact_threshold'] || 0.85
       stats = KnowledgeBase.compact!(chat_id: chat_id, threshold: threshold)
       CommandResult.text(

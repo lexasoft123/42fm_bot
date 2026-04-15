@@ -88,7 +88,8 @@ module Agent
       end
 
       if tool.admin_only && @user.role != 'admin'
-        return "Ошибка: недостаточно прав для #{name}"
+        messages = Settings.replies&.dig('admin_denied') rescue nil
+        return messages&.sample || "Ошибка: недостаточно прав для #{name}"
       end
 
       result = tool.handler.call(input, @tool_ctx)

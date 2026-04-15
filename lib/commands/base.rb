@@ -21,5 +21,14 @@ module Commands
     def radio        = @ctx.radio
     def reply_master = @ctx.reply_master
     def cmd          = @ctx.cmd
+
+    def admin?
+      user.role == 'admin'
+    end
+
+    def admin_denied
+      messages = Settings.replies&.dig('admin_denied') rescue nil
+      CommandResult.text(messages&.sample || 'Только администратор.')
+    end
   end
 end

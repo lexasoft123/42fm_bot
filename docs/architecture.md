@@ -176,7 +176,9 @@ CommandResult.none             # :none (handled but no reply)
 
 ### `Commands::Base` — `lib/commands/base.rb`
 
-Base class for all commands. Exposes `ctx` members as delegated accessors (`bot`, `message`, `user`, `chat_id`, `radio`, `reply_master`, `cmd`).
+Base class for all commands. Exposes `ctx` members as delegated accessors (`bot`, `message`, `user`, `chat_id`, `radio`, `reply_master`, `cmd`). Provides shared helpers:
+- `admin?` — checks if current user has `admin` role
+- `admin_denied` — returns a `CommandResult.text` with a random denial message from `Settings.replies['admin_denied']`
 
 ### `Commands::REGISTRY` — `lib/commands/registry.rb`
 
@@ -247,10 +249,10 @@ HTTP client (HTTParty) supporting both Anthropic and OpenAI-compatible APIs. Pro
 **OpenAI/DeepSeek specifics:** uses `Authorization: Bearer`, passes `thinking: {type: 'enabled'}` for reasoning models.
 
 ### GptHelpers — `lib/commands/gpt_helpers.rb`
-Mixed into GPT commands:
-- `get_chat_context` — fetches recent messages for current chat, including bot replies (formatted as `"Жзяцля: ..."`) and user full names
+Mixed into GPT commands. Delegates to `ChatContext` module (via `include ChatContext` + `super`), auto-passing `chat_id` from the command context:
+- `get_chat_context` — delegates to `ChatContext#get_chat_context(chat_id)`
 - `save_bot_reply(text)` — stores bot reply in `messages` with `role: 'bot'`, `user_uid: nil`
-- `get_relevant_knowledge(query)` — embeds the query, retrieves top-K similar facts from `knowledge` table, formats as bullet list
+- `get_relevant_knowledge(query)` — delegates to `ChatContext#get_relevant_knowledge(query, chat_id)`
 
 ### EmbeddingService — `lib/embedding_service.rb`
 Calls an OpenAI-compatible embeddings API (`embeddings.api_url`) to produce float vectors for text. Returns `nil` on failure. Used by `KnowledgeBase`.
@@ -283,7 +285,7 @@ When `chat_gpt.agent_mode: true`, `GptChat` uses `Agent::Runner` instead of `Gpt
 - Anthropic: `tools: [{name, description, input_schema}]`, response `content: [{type: "tool_use"}]`, results as `{type: "tool_result"}`
 - OpenAI: `tools: [{type: "function", function: {...}}]`, response `tool_calls: [...]`, results as `{role: "tool"}`
 
-Admin-only tools are filtered from definitions AND checked at execution time. Tool results are truncated to 2000 chars.
+Admin-only tools are filtered from definitions AND checked at execution time (denial messages pulled from `Settings.replies['admin_denied']`). Tool results are truncated to 2000 chars.
 
 Toggle off with `chat_gpt.agent_mode: false` to revert to simple `GptMaster.chat` path.
 
@@ -308,9 +310,9 @@ Generic DB-backed persistent task system for long-running operations. A poller t
 - `KnowledgeCompactHandler` (`knowledge_compact`) — calls `KnowledgeBase.compact!` for the task's chat; logs to `log/knowledge_compact.log`; enqueued automatically by `maybe_trigger_compact` when entry count crosses the adaptive threshold.
 
 ### ChatContext — `lib/chat_context.rb`
-Shared module included by task handlers. Provides:
-- `get_chat_context(chat_id)` — fetches recent messages (user names + bot replies) as JSON
-- `get_relevant_knowledge(query, chat_id)` — embeds query, retrieves top-K knowledge facts as JSON
+Single source of truth for chat context and knowledge lookup. Included by task handlers (directly) and by `GptHelpers` (which delegates with auto-passed `chat_id`). Provides:
+- `get_chat_context(chat_id)` — fetches recent messages (user names + bot replies) as JSON; rescues to `''` on error
+- `get_relevant_knowledge(query, chat_id)` — embeds query, retrieves top-K knowledge facts as JSON; rescues to `''` on error
 
 ### SunoClient — `lib/suno_client.rb`
 HTTP client for the Suno AI song generation API (`sunoapi.org`), using V5 model. Key methods:
@@ -498,6 +500,11 @@ flux:
   api_url: https://api.bfl.ai
   api_key: ...
   model: flux-2-pro
+replies:
+  admin_denied:            # random denial messages for unauthorized admin commands
+    - "а ты кто такой вообще?!"
+    - "только для своих, брат"
+    - ...
 weather:
   api_url: ...
   api_key: ...

@@ -7,9 +7,7 @@ module Commands
     end
 
     def execute
-      unless user.role == 'admin'
-        return CommandResult.text('Только администратор может добавлять знания.')
-      end
+      return admin_denied unless admin?
 
       content = cmd.match(PATTERN)[:content].strip
       topic   = content.split(/\s+/).first(4).join(' ')

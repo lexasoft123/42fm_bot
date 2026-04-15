@@ -172,7 +172,8 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - `бот задачи` shows last 10 background tasks for the current chat
 - FLUX API settings in `config/settings.yml` under `flux` group: `api_key`; non-secret config (`api_url`, `model`) in `settings.common.yml`
 - Suno API settings in `config/settings.yml` under `suno` group: `api_key`; non-secret config (`api_url`, `model`) in `settings.common.yml`
-- `ChatContext` module (`lib/chat_context.rb`) provides `get_chat_context` and `get_relevant_knowledge` — included by both `SunoTaskHandler` and `ImageGenTaskHandler`
+- `ChatContext` module (`lib/chat_context.rb`) is the single source of truth for chat context and knowledge lookup — included by task handlers directly and by `GptHelpers` (which delegates via `super` with auto-passed `chat_id`)
+- Admin-only commands use `return admin_denied unless admin?` from `Commands::Base`; agent tools check `@user.role` — both pull denial messages from `Settings.replies['admin_denied']` in `settings.common.yml`
 - Radio search uses `Song.search` (multi-stage: FTS5 → Cyrillic→Latin transliteration with k/c variants → prefix truncation → LIKE → Levenshtein editdist); `radio.request` flow is unchanged
 - `Song.search` uses FTS5 prefix matching (`word*`) with `unicode61 remove_diacritics 1` tokenizer; Cyrillic input triggers transliteration chain (Stages 1–4); Stage 1 variants include k/c, ts/c, kh/h, and w/v (в→w in translit but v in English proper nouns, e.g. "нирвана"→"nirwana"→"nirvana"); Stage 4 uses a custom `editdist` SQLite function registered by `DatabaseConnector.register_editdist` — catches e.g. "раммштайн"→Rammstein (distance 3)
 - `MusicScanner` reads tags via `wahwah` (pure Ruby), falls back to parsing artist/title from filepath; run `bundle exec rake music:scan` to populate/refresh

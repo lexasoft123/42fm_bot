@@ -21,7 +21,7 @@ module Commands
 
       unless Settings.chat_gpt['agent_mode']
         quick = reply_master.reply_pattern_only(text)
-        return CommandResult.text(quick) if quick
+        return CommandResult.text(quick) if quick && !phrase
       end
       replied_to = extract_replied_text
       replied_image = extract_image || extract_replied_image

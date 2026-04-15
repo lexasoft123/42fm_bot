@@ -25,7 +25,7 @@ class MessageSender
       send_chunk(chunk)
     end
 
-    logger.debug "sending '#{text.slice(0, 80)}' to #{chat.title}"
+    logger.debug "MessageSender#send: '#{text.slice(0, 80)}' to #{chat.title}"
   end
 
   def send_sticker
@@ -36,14 +36,14 @@ class MessageSender
   def send_image
 
     if text =~ /[.]gif/
-      logger.debug "chat: #{chat.id} - send document: #{text}"
+      logger.debug "MessageSender#send_image: document #{text}"
       @api.sendDocument chat_id: chat.id, document: text
     else
-      logger.debug "chat: #{chat.id} - send photo: #{text}"
+      logger.debug "MessageSender#send_image: photo #{text}"
       @api.sendPhoto(chat_id: chat.id, photo: text)
     end
 
-  rescue Exception => e
+  rescue => e
     logger.error e.message + "\n\t" + e.backtrace.first(10).join("\n\t")
     @api.sendMessage(chat_id: chat.id, text: 'ебучий гугл!!11')
   end
@@ -73,7 +73,7 @@ class MessageSender
     begin
       bot.api.sendMessage(params)
     rescue => e
-      logger.warn "Markdown parse failed, retrying as plain text: #{e.message}"
+      logger.warn "MessageSender#send_chunk: Markdown parse failed, retrying as plain text: #{e.message}"
       params[:text] = chunk
       params.delete(:parse_mode)
       bot.api.sendMessage(params)
