@@ -23,7 +23,7 @@ class Horoscope
     @username + horos[ind]
 
   rescue => e
-    LOGGER.error "Horoscope#predict!: #{e.message}"
+    LOGGER.error "#{self.class.name}#predict!: #{e.message}"
     @@fails.sample
   end
 

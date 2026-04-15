@@ -98,14 +98,14 @@ class MessageResponder
     )
 
     result = dispatch(ctx)
-    LOGGER.debug "MessageResponder#respond: delivering #{result&.type}"
+    LOGGER.debug "#{self.class.name}#respond: delivering #{result&.type}"
     deliver(result)
   rescue => e
-    LOGGER.error "MessageResponder#respond: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
+    LOGGER.error "#{self.class.name}#respond: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
     begin
       MessageSender.new(bot: @bot, chat: message.chat, text: "Мозги перегрелись, попробуй позже 🤖").send
     rescue => notify_err
-      LOGGER.warn "MessageResponder#respond: failed to send error notification: #{notify_err.class}: #{notify_err.message}"
+      LOGGER.warn "#{self.class.name}#respond: failed to send error notification: #{notify_err.class}: #{notify_err.message}"
     end
   end
 
@@ -115,7 +115,7 @@ class MessageResponder
     Commands::REGISTRY.each do |klass|
       command = klass.new(ctx)
       if command.match?
-        LOGGER.info "MessageResponder#dispatch: matched #{klass.name}"
+        LOGGER.info "#{self.class.name}#dispatch: matched #{klass.name}"
         return command.execute
       end
     end
@@ -138,7 +138,7 @@ class MessageResponder
     when :none    then nil
     end
   rescue => e
-    LOGGER.error "MessageResponder#deliver(#{result.type}): #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
+    LOGGER.error "#{self.class.name}#deliver(#{result.type}): #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
   end
 
   def save_message
@@ -167,7 +167,7 @@ class MessageResponder
       end
       KnowledgeBase.extract_and_store(recent, chat_id: chat_id)
     rescue => e
-      LOGGER.error "MessageResponder#maybe_extract_knowledge: #{e.message}"
+      LOGGER.error "#{self.class.name}#maybe_extract_knowledge: #{e.message}"
     end
   end
 
@@ -187,7 +187,7 @@ class MessageResponder
     file_id = message.voice.file_id
     file = bot.api.getFile(file_id: file_id)
     file_path = file['result']['file_path']
-    LOGGER.debug "MessageResponder#process_voice_message: #{file_path}"
+    LOGGER.debug "#{self.class.name}#process_voice_message: #{file_path}"
 
     return unless message.voice.mime_type == "audio/ogg"
 

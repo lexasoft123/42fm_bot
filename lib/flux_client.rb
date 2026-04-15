@@ -9,7 +9,7 @@ class FluxClient
 
   # Submit image generation. Returns task_id string.
   def submit(prompt:, width: 1024, height: 1024)
-    LOGGER.debug "FluxClient: submitting prompt (#{prompt.length} chars) to #{@model}"
+    LOGGER.debug "#{self.class.name}: submitting prompt (#{prompt.length} chars) to #{@model}"
     resp = HTTParty.post("#{@base_url}/v1/#{@model}",
       body: { prompt: prompt, width: width, height: height,
               safety_tolerance: 5, output_format: 'jpeg' }.to_json,
@@ -33,7 +33,7 @@ class FluxClient
       :pending
     end
   rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
-    LOGGER.warn "FluxClient poll_once: #{e.class}: #{e.message}"
+    LOGGER.warn "#{self.class.name} poll_once: #{e.class}: #{e.message}"
     :pending
   end
 

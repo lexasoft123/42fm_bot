@@ -83,7 +83,7 @@ module Agent
     def execute_tool(name, input)
       tool = ToolRegistry.find(name)
       unless tool
-        LOGGER.warn "Agent: unknown tool #{name}"
+        LOGGER.warn "#{self.class.name}: unknown tool #{name}"
         return "Ошибка: неизвестный инструмент #{name}"
       end
 
@@ -95,7 +95,7 @@ module Agent
       result = tool.handler.call(input, @tool_ctx)
       truncate(result.to_s)
     rescue => e
-      LOGGER.error "Agent tool #{name} error: #{e.class}: #{e.message}"
+      LOGGER.error "#{self.class.name} tool #{name} error: #{e.class}: #{e.message}"
       AGENT_LOGGER.error "  #{name} ERROR: #{e.class}: #{e.message}"
       "идите нахуй"
     end

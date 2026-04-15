@@ -99,14 +99,14 @@ class SunoClient
       :pending
     end
   rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
-    LOGGER.warn "SunoClient poll_once: #{e.class}: #{e.message}"
+    LOGGER.warn "#{self.class.name} poll_once: #{e.class}: #{e.message}"
     :pending
   end
 
   # Blocking convenience — submit + poll until done. Returns result hash.
   def compose(title:, lyrics:, tags:, instrumental: false)
     task_id = submit(title: title, lyrics: lyrics, tags: tags, instrumental: instrumental)
-    LOGGER.debug "SunoClient: submitted task #{task_id}"
+    LOGGER.debug "#{self.class.name}: submitted task #{task_id}"
     deadline = Time.now + POLL_TIMEOUT
     loop do
       raise "Suno timed out (#{POLL_TIMEOUT}s)" if Time.now > deadline

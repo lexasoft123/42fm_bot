@@ -85,10 +85,10 @@ module Commands
       response = HTTParty.get(url, timeout: 30)
       return nil unless response.code == 200
 
-      LOGGER.debug "download_photo: downloaded #{response.body.bytesize} bytes"
+      LOGGER.debug "#{self.class.name}#download_photo: downloaded #{response.body.bytesize} bytes"
       { data: Base64.strict_encode64(response.body), media_type: 'image/jpeg' }
     rescue => e
-      LOGGER.warn "download_photo failed: #{e.class}: #{e.message}"
+      LOGGER.warn "#{self.class.name}#download_photo failed: #{e.class}: #{e.message}"
       nil
     end
   end

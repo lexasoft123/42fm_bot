@@ -47,14 +47,14 @@ class SunoTaskHandler
 
     # Step 1: Parse freeform request with LLM (only for chat command path)
     if !p['parsed'] && p.key?('request') && !p['request'].to_s.empty?
-      LOGGER.debug "SunoTaskHandler[#{task.id}]: parsing request '#{p['request']}'"
+      LOGGER.debug "#{self.class.name}[#{task.id}]: parsing request '#{p['request']}'"
 
       parsed = parse_request(p['request'])
       p.merge!(parsed)
       p['parsed'] = true
       ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
 
-      LOGGER.debug "SunoTaskHandler[#{task.id}]: parsed → genre=#{p['genre']}, artist=#{p['artist']}, topic=#{p['topic']}, tags=#{p['tags']}"
+      LOGGER.debug "#{self.class.name}[#{task.id}]: parsed → genre=#{p['genre']}, artist=#{p['artist']}, topic=#{p['topic']}, tags=#{p['tags']}"
     end
 
     # Step 2: Compose lyrics with GPT
@@ -76,7 +76,7 @@ class SunoTaskHandler
         .gsub('{CONTEXT}', context)
         .gsub('{KNOWLEDGE}', knowledge)
 
-      LOGGER.debug "SunoTaskHandler[#{task.id}]: composing lyrics for '#{subject}' (#{genre}#{artist.empty? ? '' : ", artist: #{artist}"})"
+      LOGGER.debug "#{self.class.name}[#{task.id}]: composing lyrics for '#{subject}' (#{genre}#{artist.empty? ? '' : ", artist: #{artist}"})"
 
       lyrics = GptMaster.new([{ role: 'user', content: prompt }]).call
       raise "GPT lyrics failed" unless lyrics && lyrics != 'жпт не жпт'
@@ -96,7 +96,7 @@ class SunoTaskHandler
       (artist != '' && !tags.downcase.include?(artist.downcase.split.first)) ||
       tags.split(',').size <= 3
 
-    LOGGER.debug "SunoTaskHandler[#{task.id}]: tags='#{tags}' generic=#{generic_tags} needs_enrichment=#{needs_enrichment}"
+    LOGGER.debug "#{self.class.name}[#{task.id}]: tags='#{tags}' generic=#{generic_tags} needs_enrichment=#{needs_enrichment}"
 
     if needs_enrichment
       tags = resolve_tags(genre, artist, title)
@@ -111,13 +111,13 @@ class SunoTaskHandler
       p['submit_failures'] = (p['submit_failures'] || 0) + 1
       ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
       if p['submit_failures'] >= 3
-        LOGGER.error "SunoTaskHandler[#{task.id}]: submit failed #{p['submit_failures']} times, giving up: #{e.message}"
+        LOGGER.error "#{self.class.name}[#{task.id}]: submit failed #{p['submit_failures']} times, giving up: #{e.message}"
         ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!("submit_failed: #{e.message}") }
         return :failed
       end
       raise
     end
-    LOGGER.debug "SunoTaskHandler[#{task.id}]: submitted #{suno_task_id} with tags '#{tags}'"
+    LOGGER.debug "#{self.class.name}[#{task.id}]: submitted #{suno_task_id} with tags '#{tags}'"
 
     ActiveRecord::Base.connection_pool.with_connection do
       task.update!(external_id: suno_task_id, params: p.merge('title' => title).to_json)
@@ -128,22 +128,22 @@ class SunoTaskHandler
   def poll_and_deliver(task, api)
     result = SunoClient.new.poll_once(task.external_id)
 
-    LOGGER.debug "SunoTaskHandler[#{task.id}]: polling #{task.external_id} (attempt #{task.attempts + 1}/#{task.max_attempts}) → #{result.inspect}"
+    LOGGER.debug "#{self.class.name}[#{task.id}]: polling #{task.external_id} (attempt #{task.attempts + 1}/#{task.max_attempts}) → #{result.inspect}"
 
     case result
     when :pending
       :pending
     when :failed
-      LOGGER.error "SunoTaskHandler[#{task.id}]: Suno generation failed for #{task.external_id}"
+      LOGGER.error "#{self.class.name}[#{task.id}]: Suno generation failed for #{task.external_id}"
       ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!('suno_failed') }
       begin
         api.sendMessage(chat_id: task.chat_id, text: "Не удалось сгенерировать песню")
       rescue => e
-        LOGGER.warn "SunoTaskHandler[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
+        LOGGER.warn "#{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
       end
       :failed
     when Array
-      LOGGER.info "SunoTaskHandler[#{task.id}]: complete! #{result.size} clips"
+      LOGGER.info "#{self.class.name}[#{task.id}]: complete! #{result.size} clips"
       ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
       title = task.params_hash['title'] || 'Песня от 42FM'
       send_audio(api, task.chat_id, result, title, task.params_hash)
@@ -163,10 +163,10 @@ class SunoTaskHandler
     }
     response = GptMaster.new([{ role: 'user', content: prompt }], setting: 'agent').call
     tags = response.to_s.strip.gsub(/^["']|["']$/, '')
-    LOGGER.debug "SunoTaskHandler: resolved tags → '#{tags}'"
+    LOGGER.debug "#{self.class.name}: resolved tags → '#{tags}'"
     tags.empty? ? (known || 'rock') : tags
   rescue => e
-    LOGGER.warn "SunoTaskHandler resolve_tags failed: #{e.message}"
+    LOGGER.warn "#{self.class.name} resolve_tags failed: #{e.message}"
     known || 'rock'
   end
 
@@ -187,7 +187,7 @@ class SunoTaskHandler
       'tags'   => parsed['tags'].to_s.strip
     }
   rescue => e
-    LOGGER.warn "SunoTaskHandler parse_request failed: #{e.message}, falling back to raw request"
+    LOGGER.warn "#{self.class.name} parse_request failed: #{e.message}, falling back to raw request"
     { 'genre' => 'рок', 'artist' => '', 'topic' => request, 'tags' => '' }
   end
 
@@ -243,7 +243,7 @@ class SunoTaskHandler
       api.sendMediaGroup(**send_params)
     rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed => e
       retries += 1
-      LOGGER.warn "SunoTaskHandler sendMediaGroup retry #{retries}: #{e.class}"
+      LOGGER.warn "#{self.class.name} sendMediaGroup retry #{retries}: #{e.class}"
       sleep 3 and retry if retries <= 3
     ensure
       temp_files.each { |tf| tf[:file].close; tf[:file].unlink rescue nil }
@@ -255,7 +255,7 @@ class SunoTaskHandler
     msg_id = messages&.first&.respond_to?(:message_id) ? messages.first.message_id : messages&.first&.dig('message_id')
     api.sendMessage(chat_id: chat_id, text: params['lyrics'], reply_to_message_id: msg_id)
   rescue => e
-    LOGGER.warn "SunoTaskHandler send_audio failed: #{e.class}: #{e.message}"
+    LOGGER.warn "#{self.class.name} send_audio failed: #{e.class}: #{e.message}"
   end
 
   def build_filename(performer, title, index, total)
@@ -275,7 +275,7 @@ class SunoTaskHandler
     tmp.rewind
     tmp
   rescue => e
-    LOGGER.warn "SunoTaskHandler download failed: #{e.class}: #{e.message}"
+    LOGGER.warn "#{self.class.name} download failed: #{e.class}: #{e.message}"
     nil
   end
 end

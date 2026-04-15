@@ -99,7 +99,7 @@ class Radio
         raw ? res : res.gsub(/[\r\n]+/, "").gsub("END", "").gsub(/\\"/, '"')
       rescue Errno::EPIPE, Errno::ECONNRESET, IOError => e
         unless retried
-          LOGGER.warn "Radio: #{e.class}: #{e.message} — reconnecting" if defined?(LOGGER)
+          LOGGER.warn "#{self.class.name}: #{e.class}: #{e.message} — reconnecting" if defined?(LOGGER)
           @sock&.close rescue nil
           @sock = nil
           retried = true

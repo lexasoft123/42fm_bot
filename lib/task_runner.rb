@@ -17,7 +17,7 @@ class TaskRunner
     def start(bot_api)
       @mutex.synchronize do
         if @thread&.alive?
-          LOGGER.info "TaskRunner: already running, updating bot_api"
+          LOGGER.info "#{name}: already running, updating bot_api"
           @runner&.update_api(bot_api)
           return @thread
         end
@@ -27,7 +27,7 @@ class TaskRunner
             @runner.process_pending
             sleep POLL_INTERVAL
           rescue => e
-            LOGGER.error "TaskRunner: #{e.class}: #{e.message}"
+            LOGGER.error "#{name}: #{e.class}: #{e.message}"
             sleep POLL_INTERVAL
           end
         end
@@ -51,7 +51,7 @@ class TaskRunner
     tasks.each do |task|
       handler_class = self.class.handler_for(task.task_type)
       unless handler_class
-        LOGGER.error "TaskRunner: unknown task_type '#{task.task_type}'"
+        LOGGER.error "#{self.class.name}: unknown task_type '#{task.task_type}'"
         ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!("unknown task_type") }
         next
       end
@@ -63,12 +63,12 @@ class TaskRunner
         ActiveRecord::Base.connection_pool.with_connection do
           task.increment_attempts!
           if task.reload.timed_out?
-            LOGGER.error "TaskRunner: task #{task.id} (#{task.task_type}) timed out after #{task.attempts} attempts"
+            LOGGER.error "#{self.class.name}: task #{task.id} (#{task.task_type}) timed out after #{task.attempts} attempts"
             task.mark_failed!('timeout')
             begin
               @api.sendMessage(chat_id: task.chat_id, text: "Задача не выполнена (таймаут)")
             rescue => e
-              LOGGER.warn "TaskRunner: failed to notify chat #{task.chat_id}: #{e.class}: #{e.message}"
+              LOGGER.warn "#{self.class.name}: failed to notify chat #{task.chat_id}: #{e.class}: #{e.message}"
             end
           end
         end
@@ -78,7 +78,7 @@ class TaskRunner
         nil # handler already called mark_failed! and sent error
       end
     rescue => e
-      LOGGER.error "TaskRunner task #{task.id}: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
+      LOGGER.error "#{self.class.name} task #{task.id}: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
       ActiveRecord::Base.connection_pool.with_connection do
         task.increment_attempts!
         permanent = e.message.match?(/\s4\d{2}[\s{]/)
@@ -87,7 +87,7 @@ class TaskRunner
           begin
             @api.sendMessage(chat_id: task.chat_id, text: "Ошибка: #{e.message.truncate(200)}")
           rescue => notify_err
-            LOGGER.warn "TaskRunner: failed to notify chat #{task.chat_id}: #{notify_err.class}: #{notify_err.message}"
+            LOGGER.warn "#{self.class.name}: failed to notify chat #{task.chat_id}: #{notify_err.class}: #{notify_err.message}"
           end
         end
       end
