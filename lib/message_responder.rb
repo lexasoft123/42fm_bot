@@ -81,9 +81,11 @@ class MessageResponder
 
     return if message.date + 30 < Time.now.to_i
     process_voice_message if message.voice
-    return unless message.text
 
-    cmd = UnicodeUtils.downcase(message.text)
+    text = message.text || message.caption
+    return unless text
+
+    cmd = UnicodeUtils.downcase(text)
 
     ctx = CommandContext.new(
       bot: @bot,
@@ -140,8 +142,9 @@ class MessageResponder
   end
 
   def save_message
-    return unless message.text
-    Message.create(user_uid: @user.uid, chat_id: @chat_id, body: message.text)
+    body = message.text || message.caption
+    return unless body
+    Message.create(user_uid: @user.uid, chat_id: @chat_id, body: body)
     maybe_extract_knowledge
   end
 

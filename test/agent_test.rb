@@ -532,6 +532,71 @@ class GptChatTest < BotTest
     command = Commands::GptChat.new(ctx)
     assert_nil command.send(:extract_replied_text)
   end
+
+  # --- extract_image (current message photo) ---
+
+  # extract_image returns nil when message has no photo
+  def test_extract_image_no_photo
+    msg = OpenStruct.new(text: 'бот что', message_id: 1, reply_to_message: nil, photo: nil)
+    ctx = build_ctx(cmd: "бот что", user: @user, message: msg)
+    command = Commands::GptChat.new(ctx)
+    assert_nil command.send(:extract_image)
+  end
+
+  # extract_image returns nil when photo array is empty
+  def test_extract_image_empty_photo
+    msg = OpenStruct.new(text: 'бот что', message_id: 1, reply_to_message: nil, photo: [])
+    ctx = build_ctx(cmd: "бот что", user: @user, message: msg)
+    command = Commands::GptChat.new(ctx)
+    assert_nil command.send(:extract_image)
+  end
+
+  # extract_image downloads photo from the current message
+  def test_extract_image_downloads_photo
+    photo = OpenStruct.new(file_id: 'photo123')
+    msg = OpenStruct.new(text: nil, caption: 'бот что это', message_id: 1, reply_to_message: nil, photo: [photo])
+
+    file_obj = OpenStruct.new(file_path: 'photos/file_0.jpg')
+    api = Object.new
+    api.define_singleton_method(:getFile) { |**_| file_obj }
+    bot = OpenStruct.new(api: api)
+
+    ctx = CommandContext.new(
+      bot: bot, message: msg, user: @user,
+      chat_id: 100, radio: nil,
+      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      cmd: "бот что это"
+    )
+    command = Commands::GptChat.new(ctx)
+
+    # Stub HTTParty.get to return fake image data
+    fake_response = OpenStruct.new(code: 200, body: 'fake_image_bytes')
+    HTTParty.stub(:get, fake_response) do
+      result = command.send(:extract_image)
+      assert result.is_a?(Hash)
+      assert_equal 'image/jpeg', result[:media_type]
+      assert_equal Base64.strict_encode64('fake_image_bytes'), result[:data]
+    end
+  end
+
+  # download_photo returns nil when getFile raises an error
+  def test_download_photo_getfile_error
+    photo = OpenStruct.new(file_id: 'photo123')
+    msg = OpenStruct.new(text: nil, caption: 'бот что', message_id: 1, reply_to_message: nil, photo: [photo])
+
+    api = Object.new
+    api.define_singleton_method(:getFile) { |**_| raise "API error" }
+    bot = OpenStruct.new(api: api)
+
+    ctx = CommandContext.new(
+      bot: bot, message: msg, user: @user,
+      chat_id: 100, radio: nil,
+      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      cmd: "бот что"
+    )
+    command = Commands::GptChat.new(ctx)
+    assert_nil command.send(:extract_image)
+  end
 end
 
 # ==========================================================================
@@ -621,6 +686,60 @@ class GptChatExecuteTest < BotTest
     result = Commands::GptChat.new(ctx).execute
     assert_equal :text, result.type
     assert_equal 'canned reply', result.payload
+  end
+
+  # Photo with caption "бот что это" — agent receives the image from the current message
+  # (production bug: photo messages were dropped because message.text is nil for photos,
+  #  and even after fixing that, only reply_to photos were extracted, not current message photos)
+  def test_photo_with_caption_sends_image_to_agent
+    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => true))
+
+    photo = OpenStruct.new(file_id: 'photo123')
+    file_obj = OpenStruct.new(file_path: 'photos/file_0.jpg')
+    api = Object.new
+    api.define_singleton_method(:getFile) { |**_| file_obj }
+    bot = OpenStruct.new(api: api)
+
+    msg = OpenStruct.new(text: nil, caption: "бот что это", message_id: 1,
+                         reply_to_message: nil, photo: [photo])
+
+    FakeGptMaster.enqueue(anthropic_text('I see a cat'))
+
+    fake_response = OpenStruct.new(code: 200, body: 'fake_image_bytes')
+    HTTParty.stub(:get, fake_response) do
+      ctx = CommandContext.new(
+        bot: bot, message: msg, user: @user,
+        chat_id: 100, radio: nil,
+        reply_master: OpenStruct.new(reply_pattern_only: nil),
+        cmd: "бот что это"
+      )
+      result = Commands::GptChat.new(ctx).execute
+      assert_equal :text, result.type
+      assert_equal 'I see a cat', result.payload
+
+      # Verify agent received image in the message
+      first_call = FakeGptMaster.calls.first
+      user_msg = first_call[:messages].first
+      assert user_msg[:content].is_a?(Array), 'content should be array for image messages'
+      types = user_msg[:content].map { |b| b[:type] }
+      assert_includes types, 'image'
+    end
+  end
+
+  # Photo with caption but no "бот" prefix — not matched, no execute
+  # (message_responder uses caption as text fallback, but GptChat still needs pattern match)
+  def test_photo_without_bot_prefix_no_match
+    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => true))
+
+    msg = OpenStruct.new(text: nil, caption: "просто фото", message_id: 1,
+                         reply_to_message: nil, photo: [OpenStruct.new(file_id: 'x')])
+    ctx = CommandContext.new(
+      bot: nil, message: msg, user: @user,
+      chat_id: 100, radio: nil,
+      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      cmd: "просто фото"
+    )
+    refute Commands::GptChat.new(ctx).match?
   end
 
   private

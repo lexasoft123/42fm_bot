@@ -24,7 +24,7 @@ module Commands
         return CommandResult.text(quick) if quick
       end
       replied_to = extract_replied_text
-      replied_image = extract_replied_image
+      replied_image = extract_image || extract_replied_image
 
       reply = if Settings.chat_gpt['agent_mode']
         Agent::Runner.new(
@@ -62,12 +62,20 @@ module Commands
       message.reply_to_message.text || message.reply_to_message.caption
     end
 
+    def extract_image
+      photos = message.photo
+      return nil unless photos.is_a?(Array) && !photos.empty?
+      download_photo(photos.last.file_id)
+    end
+
     def extract_replied_image
       return nil unless message.reply_to_message
       photos = message.reply_to_message.photo
       return nil unless photos.is_a?(Array) && !photos.empty?
+      download_photo(photos.last.file_id)
+    end
 
-      file_id = photos.last.file_id
+    def download_photo(file_id)
       file = bot.api.getFile(file_id: file_id)
       file_path = file.file_path
       return nil unless file_path
@@ -77,10 +85,10 @@ module Commands
       response = HTTParty.get(url, timeout: 30)
       return nil unless response.code == 200
 
-      LOGGER.debug "extract_replied_image: downloaded #{response.body.bytesize} bytes"
+      LOGGER.debug "download_photo: downloaded #{response.body.bytesize} bytes"
       { data: Base64.strict_encode64(response.body), media_type: 'image/jpeg' }
     rescue => e
-      LOGGER.warn "extract_replied_image failed: #{e.class}: #{e.message}"
+      LOGGER.warn "download_photo failed: #{e.class}: #{e.message}"
       nil
     end
   end

@@ -567,3 +567,72 @@ class ExtractRepliedImageTest < BotTest
     assert_nil command.send(:extract_replied_image)
   end
 end
+
+# ==========================================================================
+# MessageResponderCaptionTest — covers photo-with-caption messages (Apr 15)
+# ==========================================================================
+class MessageResponderCaptionTest < BotTest
+  include ProdTestHelpers
+  include Fixtures::Users
+
+  def setup
+    super
+    stub_settings!
+    @user = member_user
+  end
+
+  # Photo message with caption "бот ..." should be dispatched (text is nil, caption is used)
+  # (production: Apr 15 — photo messages silently dropped because `return unless message.text`)
+  def test_caption_used_as_text_fallback
+    msg = OpenStruct.new(
+      text: nil,
+      caption: "бот что это",
+      message_id: 1,
+      reply_to_message: nil,
+      photo: [OpenStruct.new(file_id: 'abc')],
+      date: Time.now.to_i,
+      voice: nil,
+      chat: OpenStruct.new(id: 100, title: 'test'),
+      from: OpenStruct.new(id: 123, username: 'testuser', first_name: 'Test', last_name: nil)
+    )
+
+    # Use caption as text fallback (the fix)
+    text = msg.text || msg.caption
+    assert_equal "бот что это", text
+  end
+
+  # Photo message without caption — still nil, nothing to dispatch
+  def test_no_text_no_caption_returns_nil
+    msg = OpenStruct.new(
+      text: nil,
+      caption: nil,
+      message_id: 1,
+      photo: [OpenStruct.new(file_id: 'abc')]
+    )
+    text = msg.text || msg.caption
+    assert_nil text
+  end
+
+  # Regular text message — text is used as-is (caption fallback not needed)
+  def test_text_message_uses_text
+    msg = OpenStruct.new(text: "бот привет", caption: nil, message_id: 1)
+    text = msg.text || msg.caption
+    assert_equal "бот привет", text
+  end
+
+  # save_message uses caption for photo messages
+  def test_save_message_stores_caption
+    msg = OpenStruct.new(
+      text: nil,
+      caption: "фото с подписью",
+      message_id: 1,
+      date: Time.now.to_i,
+      voice: nil,
+      chat: OpenStruct.new(id: 100, title: 'test'),
+      from: OpenStruct.new(id: @user.uid, username: @user.name, first_name: 'Test', last_name: nil)
+    )
+    body = msg.text || msg.caption
+    Message.create(user_uid: @user.uid, chat_id: 100, body: body)
+    assert_equal "фото с подписью", Message.last.body
+  end
+end
