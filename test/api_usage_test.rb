@@ -6,9 +6,9 @@ require 'bigdecimal'
 module Settings
   @chat_gpt = {
     'pricing' => {
-      'claude-sonnet-4-6' => { 'input' => 3,  'output' => 15, 'cache_read' => 0.30, 'cache_write' => 3.75 },
-      'claude-opus-4-6'   => { 'input' => 15, 'output' => 75, 'cache_read' => 1.50, 'cache_write' => 18.75 },
-      'claude-opus-4-7'   => { 'input' => 15, 'output' => 75, 'cache_read' => 1.50, 'cache_write' => 18.75 },
+      'claude-sonnet-4-6' => { 'input' => 3, 'output' => 15, 'cache_read' => 0.30, 'cache_write' => 3.75 },
+      'claude-opus-4-6'   => { 'input' => 5, 'output' => 25, 'cache_read' => 0.50, 'cache_write' => 6.25 },
+      'claude-opus-4-7'   => { 'input' => 5, 'output' => 25, 'cache_read' => 0.50, 'cache_write' => 6.25 },
       'text-embedding-3-small' => { 'input' => 0.02, 'output' => 0, 'cache_read' => 0, 'cache_write' => 0 },
     }
   }
@@ -29,11 +29,11 @@ class ApiUsageCostTest < BotTest
   end
 
   def test_opus_46_cost
-    # 10k input @ $15/M = 15¢; 2k output @ $75/M = 15¢; 5k cache_read @ $1.50/M = 0.75¢
-    # Total = 30.75¢
+    # 10k input @ $5/M = 5¢; 2k output @ $25/M = 5¢; 5k cache_read @ $0.50/M = 0.25¢
+    # Total = 10.25¢
     cents = ApiUsage.compute_cost('claude-opus-4-6',
                                    input: 10_000, output: 2_000, cache_read: 5_000, cache_write: 0)
-    assert_in_delta 30.75, cents.to_f, 0.0001
+    assert_in_delta 10.25, cents.to_f, 0.0001
   end
 
   def test_opus_47_cost_matches_opus_46
@@ -145,11 +145,11 @@ class ApiUsageCacheSavingsTest < BotTest
   end
 
   def test_per_model_prices_applied_independently
-    # Sonnet cache_read save = 1M × ($3 − $0.30) = 270¢
-    # Opus 4.7 cache_read save = 500k × ($15 − $1.50) = 675¢
-    # Total = 945¢
+    # Sonnet cache_read save = 1M × ($3 − $0.30)  = 270¢
+    # Opus 4.7 cache_read save = 500k × ($5 − $0.50) = 225¢
+    # Total = 495¢
     seed(model: 'claude-sonnet-4-6', input: 0, output: 0, cache_read: 1_000_000, cache_write: 0)
     seed(model: 'claude-opus-4-7',   input: 0, output: 0, cache_read: 500_000,   cache_write: 0)
-    assert_in_delta 945.0, ApiUsage.cache_savings_cents(ApiUsage.all).to_f, 0.0001
+    assert_in_delta 495.0, ApiUsage.cache_savings_cents(ApiUsage.all).to_f, 0.0001
   end
 end

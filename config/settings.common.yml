@@ -27,6 +27,7 @@ chat_gpt:
       provider: openai
       model: text-embedding-3-small
   # USD per 1M tokens. Used by ApiUsage.compute_cost. Unknown models → row recorded with cost 0.
+  # cache_write is the 5m-TTL cache write rate (we only use ephemeral cache_control).
   pricing:
     claude-sonnet-4-6:
       input: 3
@@ -34,15 +35,20 @@ chat_gpt:
       cache_read: 0.30
       cache_write: 3.75
     claude-opus-4-6:
-      input: 15
-      output: 75
-      cache_read: 1.50
-      cache_write: 18.75
+      input: 5
+      output: 25
+      cache_read: 0.50
+      cache_write: 6.25
     claude-opus-4-7:
-      input: 15
-      output: 75
-      cache_read: 1.50
-      cache_write: 18.75
+      input: 5
+      output: 25
+      cache_read: 0.50
+      cache_write: 6.25
+    claude-haiku-4-5:
+      input: 1
+      output: 5
+      cache_read: 0.10
+      cache_write: 1.25
     text-embedding-3-small:
       input: 0.02
       output: 0
