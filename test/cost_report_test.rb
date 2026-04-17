@@ -56,8 +56,9 @@ class CostReportDispatchTest < BotTest
     @chat_id  = -100_555
   end
 
-  def ctx(user:, cmd: 'бот затраты')
-    OpenStruct.new(cmd: cmd, user: user, chat_id: @chat_id)
+  def ctx(user:, cmd: 'бот затраты', message: nil)
+    message ||= OpenStruct.new(chat: OpenStruct.new(title: 'claude_cook', type: 'supergroup'))
+    OpenStruct.new(cmd: cmd, user: user, chat_id: @chat_id, message: message)
   end
 
   def seed_row(chat_id, cents, purpose: 'agent', at: Time.now - 60)
@@ -80,6 +81,24 @@ class CostReportDispatchTest < BotTest
     assert_includes result.payload, '💰'
     assert_includes result.payload, '0.00¢'
     assert_includes result.payload, 'сэкономлено кэшем'
+  end
+
+  def test_header_shows_chat_title_when_present
+    result = Commands::CostReport.new(ctx(user: @admin)).execute
+    assert_includes result.payload, 'Этот чат (claude_cook)'
+    refute_includes result.payload, "Этот чат (`#{@chat_id}`)"
+  end
+
+  def test_header_falls_back_to_user_name_for_private_chats
+    private_msg = OpenStruct.new(chat: OpenStruct.new(title: nil, first_name: 'Alice', last_name: 'Smith', type: 'private'))
+    result = Commands::CostReport.new(ctx(user: @admin, message: private_msg)).execute
+    assert_includes result.payload, 'Этот чат (Alice Smith)'
+  end
+
+  def test_header_falls_back_to_chat_id_when_title_and_name_missing
+    blank_msg = OpenStruct.new(chat: OpenStruct.new(title: nil, first_name: nil, last_name: nil, type: 'private'))
+    result = Commands::CostReport.new(ctx(user: @admin, message: blank_msg)).execute
+    assert_includes result.payload, "Этот чат (`#{@chat_id}`)"
   end
 
   def test_digest_surfaces_cache_savings

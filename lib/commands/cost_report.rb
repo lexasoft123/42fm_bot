@@ -19,7 +19,7 @@ module Commands
 
       lines = ["💰 *Расходы API*"]
       lines << ''
-      lines << "*Этот чат (`#{chat_id}`):*"
+      lines << "*Этот чат (#{chat_label}):*"
       WINDOWS.each { |label, sec| lines << format_window(label, sec, chat_id: chat_id) }
 
       lines << ''
@@ -75,6 +75,17 @@ module Commands
     def fmt_cost(cents)
       c = cents.to_f
       c < 100 ? format('%.2f¢', c) : format('$%.2f', c / 100.0)
+    end
+
+    # Prefer the Telegram chat title; fall back to a user-facing label for DMs
+    # and ultimately to the numeric id.
+    def chat_label
+      chat = message&.chat
+      title = chat&.title
+      return title if title && !title.empty?
+      name = [chat&.first_name, chat&.last_name].compact.join(' ').strip
+      return name unless name.empty?
+      "`#{chat_id}`"
     end
   end
 end
