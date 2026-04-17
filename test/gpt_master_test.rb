@@ -11,6 +11,8 @@ module Settings
     'settings' => {
       'main'    => { 'provider' => 'anthropic', 'model' => 'claude-sonnet-4-6', 'max_tokens' => 100 },
       'agent'   => { 'provider' => 'anthropic', 'model' => 'claude-sonnet-4-6', 'max_tokens' => 100 },
+      'legacy_thinking' => { 'provider' => 'anthropic', 'model' => 'claude-sonnet-4-6', 'max_tokens' => 100, 'thinking_budget' => 1600 },
+      'adaptive_thinking' => { 'provider' => 'anthropic', 'model' => 'claude-opus-4-7', 'max_tokens' => 100, 'thinking' => { 'type' => 'adaptive' }, 'output_config' => { 'effort' => 'high' } },
       'openai'  => { 'provider' => 'openai',    'model' => 'gpt-4' },
     },
     'pricing' => {
@@ -242,6 +244,46 @@ class GptMasterBodyBuildingTest < BotTest
     refute captured.key?('system')
     assert_equal 'system', captured['messages'].first['role']
     assert_equal 'STATIC', captured['messages'].first['content']
+  end
+
+  def test_legacy_thinking_budget_serializes_to_enabled_shape
+    captured = nil
+    HTTParty.define_singleton_method(:post) do |_url, opts|
+      captured = JSON.parse(opts[:body])
+      FakeResponse.new(200,
+        'content' => [{ 'type' => 'text', 'text' => 'k' }],
+        'usage' => { 'input_tokens' => 1, 'output_tokens' => 1,
+                     'cache_creation_input_tokens' => 0, 'cache_read_input_tokens' => 0 })
+    end
+    begin
+      GptMaster.new([{ role: 'user', content: 'hi' }], setting: 'legacy_thinking',
+                    chat_id: 1, purpose: 'main_chat').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    assert_equal 'enabled', captured['thinking']['type']
+    assert_equal 1600,      captured['thinking']['budget_tokens']
+    refute captured.key?('output_config')
+  end
+
+  def test_new_adaptive_thinking_passes_through_verbatim_plus_output_config
+    captured = nil
+    HTTParty.define_singleton_method(:post) do |_url, opts|
+      captured = JSON.parse(opts[:body])
+      FakeResponse.new(200,
+        'content' => [{ 'type' => 'text', 'text' => 'k' }],
+        'usage' => { 'input_tokens' => 1, 'output_tokens' => 1,
+                     'cache_creation_input_tokens' => 0, 'cache_read_input_tokens' => 0 })
+    end
+    begin
+      GptMaster.new([{ role: 'user', content: 'hi' }], setting: 'adaptive_thinking',
+                    chat_id: 1, purpose: 'agent').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    assert_equal 'adaptive', captured['thinking']['type']
+    refute captured['thinking'].key?('budget_tokens'), 'adaptive mode must not include legacy budget_tokens'
+    assert_equal 'high', captured['output_config']['effort']
   end
 
   def test_openai_tools_do_not_get_cache_control

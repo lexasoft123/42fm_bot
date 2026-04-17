@@ -22,7 +22,12 @@ chat_gpt:
       provider: anthropic
       model: claude-opus-4-7
       max_tokens: 16000
-      thinking_budget: 10000
+      # Opus 4.7 replaces the old {type: enabled, budget_tokens: N} scheme with
+      # adaptive thinking driven by output_config.effort (low|medium|high).
+      thinking:
+        type: adaptive
+      output_config:
+        effort: medium
     embedder:
       provider: openai
       model: text-embedding-3-small

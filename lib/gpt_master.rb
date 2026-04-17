@@ -19,6 +19,8 @@ class GptMaster
     @model    = cfg[:model]
     @max_tokens      = cfg[:max_tokens]
     @thinking_budget = cfg[:thinking_budget]
+    @thinking        = cfg[:thinking]
+    @output_config   = cfg[:output_config]
     @messages        = messages
     @chat_id         = chat_id
     @purpose         = purpose
@@ -112,6 +114,8 @@ class GptMaster
         model:           setting['model'],
         max_tokens:      setting['max_tokens'],
         thinking_budget: setting['thinking_budget'],
+        thinking:        setting['thinking'],
+        output_config:   setting['output_config'],
       }
     end
   end
@@ -147,9 +151,14 @@ class GptMaster
       if @system_prompt && !@system_prompt.empty?
         body[:system] = [{ type: 'text', text: @system_prompt, cache_control: { type: 'ephemeral' } }]
       end
-      if @thinking_budget
+      # New-style: explicit `thinking:` hash from config (e.g. {type: 'adaptive'} for Opus 4.7).
+      # Legacy: `thinking_budget:` maps to the enabled+budget_tokens shape.
+      if @thinking
+        body[:thinking] = symbolize(@thinking)
+      elsif @thinking_budget
         body[:thinking] = { type: 'enabled', budget_tokens: @thinking_budget }
       end
+      body[:output_config] = symbolize(@output_config) if @output_config
       body
     else
       messages = @messages
@@ -169,6 +178,16 @@ class GptMaster
     last = cached.last
     cached[-1] = last.merge(cache_control: { type: 'ephemeral' }) if last.is_a?(Hash)
     cached
+  end
+
+  # YAML loads config hashes with string keys; Anthropic expects symbols via to_json either way,
+  # but we normalize to symbols for consistency with the rest of the body hash.
+  def symbolize(obj)
+    case obj
+    when Hash  then obj.each_with_object({}) { |(k, v), h| h[k.to_sym] = symbolize(v) }
+    when Array then obj.map { |v| symbolize(v) }
+    else obj
+    end
   end
 
   def extract_content(response)
