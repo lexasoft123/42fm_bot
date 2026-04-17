@@ -12,7 +12,7 @@ Agent::ToolRegistry.register(
       task_type: 'image_generate',
       chat_id: ctx[:chat_id],
       max_attempts: 20,
-      params: { request: args['prompt'] }.to_json
+      params: { request: args['prompt'], user_uid: ctx[:user]&.uid }.to_json
     )
     "Картинка поставлена в очередь генерации и скоро будет отправлена в чат"
   }

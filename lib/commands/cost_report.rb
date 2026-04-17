@@ -8,6 +8,8 @@ module Commands
       ['30д',     30 * 86_400],
     ].freeze
 
+    TOP_USERS_LIMIT = 5
+
     def match?
       cmd =~ PATTERN
     end
@@ -19,6 +21,11 @@ module Commands
       lines << ''
       lines << "*Этот чат (`#{chat_id}`):*"
       WINDOWS.each { |label, sec| lines << format_window(label, sec, chat_id: chat_id) }
+
+      lines << ''
+      lines << '*Топ юзеров в этом чате:*'
+      WINDOWS.each { |label, sec| lines << format_top_users(label, sec, chat_id: chat_id) }
+
       lines << ''
       lines << '*Все чаты:*'
       WINDOWS.each { |label, sec| lines << format_window(label, sec, chat_id: nil) }
@@ -43,6 +50,26 @@ module Commands
         "    #{purpose}: #{fmt_cost(cents)} (#{n})"
       end
       ([header] + rows).join("\n")
+    end
+
+    def format_top_users(label, seconds, chat_id:)
+      rows = ApiUsage
+        .where(chat_id: chat_id)
+        .where('created_at > ?', Time.now - seconds)
+        .where.not(user_uid: nil)
+        .group(:user_uid)
+        .pluck(:user_uid, Arel.sql('SUM(cost_cents)'), Arel.sql('COUNT(*)'))
+        .sort_by { |_, cents, _| -cents.to_f }
+        .first(TOP_USERS_LIMIT)
+
+      return "• *#{label}*: нет данных" if rows.empty?
+
+      names = User.where(uid: rows.map(&:first)).pluck(:uid, :name, :first_name).to_h { |u, n, f| [u, n || f || u.to_s] }
+      body = rows.map do |uid, cents, n|
+        "    #{names[uid] || uid}: #{fmt_cost(cents)} (#{n})"
+      end.join("\n")
+
+      "• *#{label}*:\n#{body}"
     end
 
     def fmt_cost(cents)

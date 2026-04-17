@@ -11,7 +11,7 @@ class GptMaster
     'openai'    => 'https://api.openai.com/v1/chat/completions',
   }.freeze
 
-  def initialize(messages, setting: 'main', chat_id: nil, purpose: nil, system_prompt: nil)
+  def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil)
     cfg      = self.class.resolve_setting(setting)
     @api_key  = cfg[:api_key]
     @api_url  = cfg[:api_url]
@@ -23,6 +23,7 @@ class GptMaster
     @output_config   = cfg[:output_config]
     @messages        = messages
     @chat_id         = chat_id
+    @user_uid        = user_uid
     @purpose         = purpose
     @system_prompt   = system_prompt
   end
@@ -76,20 +77,21 @@ class GptMaster
   end
 
   class << self
-    def chat(text, context: '', knowledge: '', setting: 'main', chat_id: nil, purpose: 'main_chat')
+    def chat(text, context: '', knowledge: '', setting: 'main', chat_id: nil, user_uid: nil, purpose: 'main_chat')
       content = Settings.chat_gpt['prompt']
         .gsub('{REQUEST}', text)
         .gsub('{CONTEXT}', context)
         .gsub('{KNOWLEDGE}', knowledge)
       system_prompt, user_content = split_cache_break(content)
       new([{ role: 'user', content: user_content }],
-          setting: setting, chat_id: chat_id, purpose: purpose, system_prompt: system_prompt).call
+          setting: setting, chat_id: chat_id, user_uid: user_uid,
+          purpose: purpose, system_prompt: system_prompt).call
     end
 
-    def ask(text, prompt:, setting: 'main', chat_id: nil, purpose: 'ask')
+    def ask(text, prompt:, setting: 'main', chat_id: nil, user_uid: nil, purpose: 'ask')
       content = prompt.gsub('{REQUEST}', text)
       new([{ role: 'user', content: content }],
-          setting: setting, chat_id: chat_id, purpose: purpose).call
+          setting: setting, chat_id: chat_id, user_uid: user_uid, purpose: purpose).call
     end
 
     # Split a rendered prompt on CACHE_BREAK_MARKER.
@@ -204,12 +206,13 @@ class GptMaster
     return unless usage
     cost = ApiUsage.compute_cost(@model, usage) rescue BigDecimal('0')
     LOGGER.info format(
-      "%s usage [%s]: in=%d out=%d cache_r=%d cache_w=%d cost=$%.4f purpose=%s chat=%s",
+      "%s usage [%s]: in=%d out=%d cache_r=%d cache_w=%d cost=$%.4f purpose=%s chat=%s user=%s",
       self.class.name, @model,
       usage[:input], usage[:output], usage[:cache_read], usage[:cache_write],
-      (cost / 100.0).to_f, @purpose || '-', @chat_id || '-'
+      (cost / 100.0).to_f, @purpose || '-', @chat_id || '-', @user_uid || '-'
     )
-    ApiUsage.record(model: @model, purpose: @purpose || 'unknown', usage: usage, chat_id: @chat_id)
+    ApiUsage.record(model: @model, purpose: @purpose || 'unknown', usage: usage,
+                    chat_id: @chat_id, user_uid: @user_uid)
   rescue => e
     LOGGER.warn "#{self.class.name}: telemetry failed: #{e.class}: #{e.message}"
   end

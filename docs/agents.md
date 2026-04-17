@@ -138,8 +138,8 @@ CommandResult.text(GptMaster.ask(text, prompt: PROMPT,
                                   chat_id: chat_id, purpose: 'my_new_purpose'))
 ```
 
-### Telemetry (`chat_id` + `purpose`)
-Every `GptMaster` call persists a row to `api_usage` with the `chat_id` and `purpose` you pass. Always pass both so `бот затраты` can attribute costs. Existing purpose labels: `agent` / `main_chat` / `translate` / `knowledge_extract` / `knowledge_compact` / `suno_lyrics` / `suno_tags` / `suno_parse` / `image_prompt`. If you add a new call site, pick a short snake_case label and use it consistently.
+### Telemetry (`chat_id` + `user_uid` + `purpose`)
+Every `GptMaster` call persists a row to `api_usage` with the `chat_id`, `user_uid`, and `purpose` you pass. Always pass all three where possible so `бот затраты` can attribute costs and show top spenders. Existing purpose labels: `agent` / `main_chat` / `translate` / `knowledge_extract` / `knowledge_compact` / `suno_lyrics` / `suno_tags` / `suno_parse` / `image_prompt`. If you add a new call site, pick a short snake_case label and use it consistently. Background tasks that don't have a triggering user (knowledge extraction, compaction) leave `user_uid` nil — the top-spenders section filters those out.
 
 ### Prompt caching
 `Settings.chat_gpt['prompt']` and `Settings.chat_gpt['agent_prompt']` contain a `{CACHE_BREAK}` marker. `GptMaster.chat` + `Agent::Runner` split on it — the static prefix is sent as a cached Anthropic `system` block, the dynamic suffix (`{KNOWLEDGE}` / `{CONTEXT}` / `{REQUEST}`) as the user message. Agent tool definitions are also cached via `cache_control` on the last tool. Second+ calls within 5 min hit the cache (see `cache_read_tokens > 0` in `api_usage`). `GptMaster.ask` does **not** cache — its prompts vary per call.

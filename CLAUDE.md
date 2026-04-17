@@ -139,7 +139,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 | `songs` | `title`, `artist`, `album`, `genre`, `year`, `filepath` (unique, relative to music root), `duration`, `category` |
 | `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — `content='songs'`, `content_rowid='id'`, `unicode61 remove_diacritics 1` tokenizer; auto-synced via triggers |
-| `api_usage` | `chat_id`, `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_compact`/`suno_lyrics`/`suno_tags`/`suno_parse`/`image_prompt`), `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per LLM API response; feeds `бот затраты` |
+| `api_usage` | `chat_id`, `user_uid` (nullable — null for background extractions), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_compact`/`suno_lyrics`/`suno_tags`/`suno_parse`/`image_prompt`), `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per LLM API response; feeds `бот затраты` |
 
 ## Gotchas
 
@@ -167,7 +167,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - `GptMaster.new(messages, setting: 'main', chat_id:, purpose:, system_prompt:)` resolves provider + model from settings; class methods `.chat`/`.ask` default to `setting: 'main'`; `chat_id` + `purpose` feed the `api_usage` table (telemetry is fire-and-forget — errors logged, never propagated)
 - **Prompt caching:** the `prompt` and `agent_prompt` templates in `settings.common.yml` contain a `{CACHE_BREAK}` marker. Everything before it is sent as the Anthropic `system` param with `cache_control: { type: 'ephemeral' }`; everything after is the dynamic user message. Agent tools also get `cache_control` on the last tool in the array. Second+ calls within 5 min hit the cache (`cache_read_tokens > 0`, much cheaper input). OpenAI-compatible providers auto-cache; the split is harmless for them.
 - `chat_gpt.pricing` (in `settings.common.yml`) maps exact model id → `input`/`output`/`cache_read`/`cache_write` in USD per 1M tokens. `ApiUsage.compute_cost(model, usage)` returns cents as `BigDecimal`. Unknown models → row with `cost_cents = 0` + warn log
-- `бот затраты` / `бот расходы` / `бот cost` (admin-only) prints a Markdown digest of API costs broken down by purpose for today / 7d / 30d, both for the current chat and globally
+- `бот затраты` / `бот расходы` / `бот cost` (admin-only) prints a Markdown digest of API costs broken down by purpose for today / 7d / 30d, plus top-5 spenders per window in the current chat, and global totals
 - `TaskRunner` poller thread starts inside `Telegram::Bot::Client.run` block, reuses `bot.api` — no second bot instance
 - Background tasks are generic: `TaskRunner.register('type', HandlerClass)` + `BackgroundTask.create!(task_type: 'type', ...)` — add new task types via handler files in `lib/task_handlers/`
 - Suno song generation is agent-only — the `compose_song` agent tool creates a `suno_generate` background task (no direct `бот спой` command). Suno returns 2 clip variants; both are downloaded, named as `Performer_-_Song_Name.mp3`, and sent as a media group. Lyrics follow as a reply.

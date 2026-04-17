@@ -61,7 +61,7 @@ module Agent
 
     def new_gpt(messages, system_prompt)
       GptMaster.new(messages, setting: @setting,
-                    chat_id: @chat_id, purpose: 'agent',
+                    chat_id: @chat_id, user_uid: @user&.uid, purpose: 'agent',
                     system_prompt: system_prompt)
     end
 

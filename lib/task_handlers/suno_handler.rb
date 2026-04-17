@@ -49,7 +49,7 @@ class SunoTaskHandler
     if !p['parsed'] && p.key?('request') && !p['request'].to_s.empty?
       LOGGER.debug "#{self.class.name}[#{task.id}]: parsing request '#{p['request']}'"
 
-      parsed = parse_request(p['request'], chat_id: task.chat_id)
+      parsed = parse_request(p['request'], chat_id: task.chat_id, user_uid: p['user_uid'])
       p.merge!(parsed)
       p['parsed'] = true
       ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
@@ -79,7 +79,8 @@ class SunoTaskHandler
       LOGGER.debug "#{self.class.name}[#{task.id}]: composing lyrics for '#{subject}' (#{genre}#{artist.empty? ? '' : ", artist: #{artist}"})"
 
       lyrics = GptMaster.new([{ role: 'user', content: prompt }],
-                             chat_id: task.chat_id, purpose: 'suno_lyrics').call
+                             chat_id: task.chat_id, user_uid: p['user_uid'],
+                             purpose: 'suno_lyrics').call
       raise "GPT lyrics failed" unless lyrics && lyrics != 'жпт не жпт'
       p['lyrics'] = lyrics
     end
@@ -100,7 +101,7 @@ class SunoTaskHandler
     LOGGER.debug "#{self.class.name}[#{task.id}]: tags='#{tags}' generic=#{generic_tags} needs_enrichment=#{needs_enrichment}"
 
     if needs_enrichment
-      tags = resolve_tags(genre, artist, title, chat_id: task.chat_id)
+      tags = resolve_tags(genre, artist, title, chat_id: task.chat_id, user_uid: p['user_uid'])
       p['tags'] = tags
     end
 
@@ -152,7 +153,7 @@ class SunoTaskHandler
     end
   end
 
-  def resolve_tags(genre, artist, title = '', chat_id: nil)
+  def resolve_tags(genre, artist, title = '', chat_id: nil, user_uid: nil)
     # Try predefined genres first — only if no artist to describe
     known = SunoClient.resolve_genre(genre)
     return known if known && artist.empty? && title.empty?
@@ -163,7 +164,7 @@ class SunoTaskHandler
       title: title.empty? ? 'не указано' : title
     }
     response = GptMaster.new([{ role: 'user', content: prompt }], setting: 'agent',
-                             chat_id: chat_id, purpose: 'suno_tags').call
+                             chat_id: chat_id, user_uid: user_uid, purpose: 'suno_tags').call
     tags = response.to_s.strip.gsub(/^["']|["']$/, '')
     LOGGER.debug "#{self.class.name}: resolved tags → '#{tags}'"
     tags.empty? ? (known || 'rock') : tags
@@ -172,14 +173,14 @@ class SunoTaskHandler
     known || 'rock'
   end
 
-  def parse_request(request, chat_id: nil)
+  def parse_request(request, chat_id: nil, user_uid: nil)
     return { 'genre' => 'рок', 'artist' => '', 'topic' => '', 'tags' => 'rock, energetic' } if request.empty?
 
     genres_list = SunoClient::GENRES.keys.join(', ')
     prompt = PARSE_PROMPT % { genres: genres_list, request: request }
 
     response = GptMaster.new([{ role: 'user', content: prompt }], setting: 'agent',
-                             chat_id: chat_id, purpose: 'suno_parse').call
+                             chat_id: chat_id, user_uid: user_uid, purpose: 'suno_parse').call
     json = response[/\{.*\}/m]
     parsed = JSON.parse(json)
 

@@ -20,7 +20,8 @@ Agent::ToolRegistry.register(
                 title: args['title'] || 'Песня от 42FM',
                 lyrics: args['lyrics'],
                 artist: args['artist'].to_s,
-                genre: args['genre'].to_s.presence || 'рок' }.to_json
+                genre: args['genre'].to_s.presence || 'рок',
+                user_uid: ctx[:user]&.uid }.to_json
     )
     "Песня «#{args['title']}» поставлена в очередь генерации и скоро будет отправлена в чат"
   }

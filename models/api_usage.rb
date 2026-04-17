@@ -4,10 +4,11 @@ class ApiUsage < ActiveRecord::Base
   self.table_name = 'api_usage'
 
   # Record usage + computed cost. Never raises — telemetry must not break the bot.
-  def self.record(model:, purpose:, usage:, chat_id: nil)
+  def self.record(model:, purpose:, usage:, chat_id: nil, user_uid: nil)
     cost = compute_cost(model, usage)
     create!(
       chat_id:            chat_id,
+      user_uid:           user_uid,
       model:              model,
       purpose:            purpose,
       input_tokens:       usage[:input].to_i,

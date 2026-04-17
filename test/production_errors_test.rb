@@ -69,7 +69,7 @@ class FakeGptMaster
     [prefix.strip, suffix.strip]
   end
 
-  def initialize(messages, setting: 'main', chat_id: nil, purpose: nil, system_prompt: nil)
+  def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil)
     @messages = messages
     @setting  = setting
   end

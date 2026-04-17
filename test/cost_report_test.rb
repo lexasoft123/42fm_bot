@@ -116,6 +116,43 @@ class CostReportDispatchTest < BotTest
     # Should mention the 30d cutoff total (10+20+30=60) but not 99
     refute_includes result.payload, '$0.99'
   end
+
+  def test_top_users_lists_names_and_sorts_by_cost
+    User.create!(uid: 777, name: 'alice', role: 'member')
+    User.create!(uid: 888, name: 'bob',   role: 'member')
+    ApiUsage.create!(chat_id: @chat_id, user_uid: 777, model: 'claude-sonnet-4-6', purpose: 'agent',
+                     input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+                     cost_cents: 150, created_at: Time.now - 60)
+    ApiUsage.create!(chat_id: @chat_id, user_uid: 888, model: 'claude-sonnet-4-6', purpose: 'agent',
+                     input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+                     cost_cents: 50,  created_at: Time.now - 60)
+    result = Commands::CostReport.new(ctx(user: @admin)).execute
+    assert_includes result.payload, 'Топ юзеров'
+    assert_includes result.payload, 'alice'
+    assert_includes result.payload, 'bob'
+    # alice must appear before bob (higher cost first)
+    assert result.payload.index('alice') < result.payload.index('bob'), 'alice should be listed before bob'
+  end
+
+  def test_top_users_ignores_rows_with_nil_uid
+    ApiUsage.create!(chat_id: @chat_id, user_uid: nil, model: 'claude-sonnet-4-6', purpose: 'knowledge_extract',
+                     input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+                     cost_cents: 99, created_at: Time.now - 60)
+    result = Commands::CostReport.new(ctx(user: @admin)).execute
+    assert_includes result.payload, 'нет данных'
+  end
+
+  def test_top_users_section_limited_to_top_5
+    (1..8).each do |i|
+      User.create!(uid: 100 + i, name: "u#{i}", role: 'member')
+      ApiUsage.create!(chat_id: @chat_id, user_uid: 100 + i, model: 'claude-sonnet-4-6', purpose: 'agent',
+                       input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+                       cost_cents: i * 10, created_at: Time.now - 60)
+    end
+    result = Commands::CostReport.new(ctx(user: @admin)).execute
+    %w[u8 u7 u6 u5 u4].each { |n| assert_includes result.payload, n }
+    %w[u1 u2 u3].each { |n| refute_includes result.payload, n }
+  end
 end
 
 class CostReportRegistryOrderTest < BotTest

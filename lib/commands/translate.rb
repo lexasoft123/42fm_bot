@@ -26,7 +26,8 @@ module Commands
       m        = cmd.match(pattern)
       lang     = find_lang(m[:lang])
       prompt   = PROMPT.gsub('{LANG}', lang)
-      CommandResult.text(GptMaster.ask(m[:text], prompt: prompt, chat_id: chat_id, purpose: 'translate'))
+      CommandResult.text(GptMaster.ask(m[:text], prompt: prompt,
+                                       chat_id: chat_id, user_uid: user.uid, purpose: 'translate'))
     end
 
     private

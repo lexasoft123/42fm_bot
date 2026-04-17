@@ -47,8 +47,8 @@ class FakeGptMaster
   end
 
   # Unused by Runner but required for GptHelpers
-  def self.chat(text, context: '', knowledge: '', setting: 'main', chat_id: nil, purpose: 'main_chat')
-    @@calls << { method: :chat, text: text, chat_id: chat_id, purpose: purpose }
+  def self.chat(text, context: '', knowledge: '', setting: 'main', chat_id: nil, user_uid: nil, purpose: 'main_chat')
+    @@calls << { method: :chat, text: text, chat_id: chat_id, user_uid: user_uid, purpose: purpose }
     @@responses.shift || 'fake chat reply'
   end
 
@@ -59,25 +59,26 @@ class FakeGptMaster
     [prefix.strip, suffix.strip]
   end
 
-  def initialize(messages, setting: 'main', chat_id: nil, purpose: nil, system_prompt: nil)
+  def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil)
     @messages      = messages
     @setting       = setting
     @chat_id       = chat_id
+    @user_uid      = user_uid
     @purpose       = purpose
     @system_prompt = system_prompt
   end
 
   def call_raw(tools: [])
     @@calls << { messages: @messages.dup, setting: @setting, tools: tools,
-                 chat_id: @chat_id, purpose: @purpose, system_prompt: @system_prompt,
-                 method: :call_raw }
+                 chat_id: @chat_id, user_uid: @user_uid, purpose: @purpose,
+                 system_prompt: @system_prompt, method: :call_raw }
     @@responses.shift
   end
 
   def call
     @@calls << { messages: @messages.dup, setting: @setting,
-                 chat_id: @chat_id, purpose: @purpose, system_prompt: @system_prompt,
-                 method: :call }
+                 chat_id: @chat_id, user_uid: @user_uid, purpose: @purpose,
+                 system_prompt: @system_prompt, method: :call }
     @@responses.shift
   end
 end
@@ -442,6 +443,13 @@ class RunnerTest < BotTest
     first_call = FakeGptMaster.calls.first
     assert_equal -999, first_call[:chat_id]
     assert_equal 'agent', first_call[:purpose]
+  end
+
+  def test_runner_passes_user_uid
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    build_runner(text: 'hi', user: @user).run
+    first_call = FakeGptMaster.calls.first
+    assert_equal @user.uid, first_call[:user_uid]
   end
 
   # When the agent_prompt contains {CACHE_BREAK}, the static prefix goes to system_prompt

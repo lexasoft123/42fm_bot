@@ -36,7 +36,7 @@ module Commands
         ).run
       else
         GptMaster.chat(text, context: get_chat_context, knowledge: get_relevant_knowledge(text),
-                       chat_id: chat_id, purpose: 'main_chat')
+                       chat_id: chat_id, user_uid: user.uid, purpose: 'main_chat')
       end
       save_bot_reply(reply)
       CommandResult.text(reply, reply_to_message_id: message.message_id)
