@@ -20,7 +20,7 @@ chat_gpt:
       thinking_budget: 10000
     agent:
       provider: anthropic
-      model: claude-sonnet-4-6
+      model: claude-opus-4-7
       max_tokens: 16000
       thinking_budget: 10000
     embedder:
