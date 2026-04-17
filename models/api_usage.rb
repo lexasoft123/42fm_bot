@@ -43,4 +43,31 @@ class ApiUsage < ActiveRecord::Base
     cfg = Settings.chat_gpt['pricing'] rescue nil
     cfg && cfg[model]
   end
+
+  # Cents saved by prompt caching in the given scope, relative to a no-cache baseline:
+  #   saved = cache_read_tokens × (input_rate − cache_read_rate)
+  #         − cache_write_tokens × (cache_write_rate − input_rate)
+  # The read term is the discount on cached input; the write term is the surcharge we pay
+  # on the initial cache creation. Net value tells us whether caching is actually winning.
+  def self.cache_savings_cents(scope)
+    per_mtok  = BigDecimal('1000000')
+    cents     = BigDecimal('100')
+    total_usd = BigDecimal('0')
+
+    rows = scope.group(:model).pluck(
+      :model,
+      Arel.sql('SUM(cache_read_tokens)'),
+      Arel.sql('SUM(cache_write_tokens)'),
+    )
+    rows.each do |model, read_tokens, write_tokens|
+      price = pricing_for(model)
+      next unless price
+      input_rate  = BigDecimal(price['input'].to_s)
+      read_rate   = BigDecimal(price['cache_read'].to_s)
+      write_rate  = BigDecimal(price['cache_write'].to_s)
+      total_usd += BigDecimal(read_tokens.to_i)  * (input_rate - read_rate)
+      total_usd -= BigDecimal(write_tokens.to_i) * (write_rate - input_rate)
+    end
+    total_usd / per_mtok * cents
+  end
 end

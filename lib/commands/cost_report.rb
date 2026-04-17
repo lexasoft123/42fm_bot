@@ -33,9 +33,10 @@ module Commands
       scope = scope.where(chat_id: chat_id) if chat_id
       total_cents = scope.sum(:cost_cents)
       count       = scope.count
+      saved_cents = ApiUsage.cache_savings_cents(scope)
       by_purpose  = scope.group(:purpose).pluck(:purpose, Arel.sql('SUM(cost_cents)'), Arel.sql('COUNT(*)'))
 
-      header = "• *#{label}*: #{fmt_cost(total_cents)} (#{count} вызовов)"
+      header = "• *#{label}*: #{fmt_cost(total_cents)} (#{count} вызовов, сэкономлено кэшем #{fmt_cost(saved_cents)})"
       return header if by_purpose.empty?
 
       rows = by_purpose.sort_by { |_, c, _| -c.to_f }.map do |purpose, cents, n|

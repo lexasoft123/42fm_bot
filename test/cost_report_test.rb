@@ -79,6 +79,19 @@ class CostReportDispatchTest < BotTest
     assert_equal :text, result.type
     assert_includes result.payload, '💰'
     assert_includes result.payload, '0.00¢'
+    assert_includes result.payload, 'сэкономлено кэшем'
+  end
+
+  def test_digest_surfaces_cache_savings
+    ApiUsage.create!(
+      chat_id: @chat_id, model: 'claude-sonnet-4-6', purpose: 'agent',
+      input_tokens: 0, output_tokens: 0,
+      cache_read_tokens: 1_000_000, cache_write_tokens: 0,
+      cost_cents: 30, created_at: Time.now - 60,
+    )
+    # 1M cache_read → $2.70 saved = 270¢ → shown as "$2.70"
+    result = Commands::CostReport.new(ctx(user: @admin)).execute
+    assert_includes result.payload, 'сэкономлено кэшем $2.70'
   end
 
   def test_admin_digest_includes_both_chat_and_global_sections

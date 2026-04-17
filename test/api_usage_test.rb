@@ -106,3 +106,50 @@ class ApiUsageRecordTest < BotTest
     assert_equal 0, row.cost_cents.to_i
   end
 end
+
+class ApiUsageCacheSavingsTest < BotTest
+  def seed(usage)
+    ApiUsage.create!(
+      chat_id: 1, model: usage[:model], purpose: 'agent',
+      input_tokens: usage[:input].to_i, output_tokens: usage[:output].to_i,
+      cache_read_tokens: usage[:cache_read].to_i, cache_write_tokens: usage[:cache_write].to_i,
+      cost_cents: 0, created_at: Time.now,
+    )
+  end
+
+  def test_empty_scope_returns_zero
+    assert_equal 0, ApiUsage.cache_savings_cents(ApiUsage.all).to_i
+  end
+
+  def test_pure_cache_read_yields_discount
+    # 1M cache_read tokens on Sonnet 4.6: input=$3/M, cache_read=$0.30/M → saved $2.70 = 270¢
+    seed(model: 'claude-sonnet-4-6', input: 0, output: 0, cache_read: 1_000_000, cache_write: 0)
+    assert_in_delta 270.0, ApiUsage.cache_savings_cents(ApiUsage.all).to_f, 0.0001
+  end
+
+  def test_pure_cache_write_is_a_loss
+    # 1M cache_write tokens on Sonnet 4.6: cache_write=$3.75/M vs input=$3/M → overhead $0.75 = -75¢ saved
+    seed(model: 'claude-sonnet-4-6', input: 0, output: 0, cache_read: 0, cache_write: 1_000_000)
+    assert_in_delta(-75.0, ApiUsage.cache_savings_cents(ApiUsage.all).to_f, 0.0001)
+  end
+
+  def test_net_savings_combines_reads_and_writes
+    # 1M read + 100k write on Sonnet 4.6: 270¢ − 7.5¢ = 262.5¢
+    seed(model: 'claude-sonnet-4-6', input: 0, output: 0, cache_read: 1_000_000, cache_write: 100_000)
+    assert_in_delta 262.5, ApiUsage.cache_savings_cents(ApiUsage.all).to_f, 0.0001
+  end
+
+  def test_unknown_model_contributes_nothing
+    seed(model: 'mystery-v99', input: 0, output: 0, cache_read: 1_000_000, cache_write: 0)
+    assert_equal 0, ApiUsage.cache_savings_cents(ApiUsage.all).to_i
+  end
+
+  def test_per_model_prices_applied_independently
+    # Sonnet cache_read save = 1M × ($3 − $0.30) = 270¢
+    # Opus 4.7 cache_read save = 500k × ($15 − $1.50) = 675¢
+    # Total = 945¢
+    seed(model: 'claude-sonnet-4-6', input: 0, output: 0, cache_read: 1_000_000, cache_write: 0)
+    seed(model: 'claude-opus-4-7',   input: 0, output: 0, cache_read: 500_000,   cache_write: 0)
+    assert_in_delta 945.0, ApiUsage.cache_savings_cents(ApiUsage.all).to_f, 0.0001
+  end
+end
