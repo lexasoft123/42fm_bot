@@ -9,6 +9,7 @@ Full docs: `docs/architecture.md` | Agent guide: `docs/agents.md`
 - **Never commit automatically.** Always ask the user before creating a git commit.
 - **Always run `make test` before committing.** All tests must pass before creating a commit.
 - **Never run `ruby lib/bot.rb` directly.** Use Docker in production; use `./bin/bot start/stop/restart` only for local non-Docker development.
+- **Back up `db/bot.db` on prod only when the deploy includes a new migration.** Use `make backup` (keeps last 5 timestamped snapshots on the prod host; override with `BACKUP_KEEP=N`). Code-only deploys don't need a backup.
 - Always update all documents on changes.
 
 ---
