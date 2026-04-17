@@ -47,23 +47,37 @@ class FakeGptMaster
   end
 
   # Unused by Runner but required for GptHelpers
-  def self.chat(text, context: '', knowledge: '', setting: 'main')
-    @@calls << { method: :chat, text: text }
+  def self.chat(text, context: '', knowledge: '', setting: 'main', chat_id: nil, purpose: 'main_chat')
+    @@calls << { method: :chat, text: text, chat_id: chat_id, purpose: purpose }
     @@responses.shift || 'fake chat reply'
   end
 
-  def initialize(messages, setting: 'main')
-    @messages = messages
-    @setting  = setting
+  def self.split_cache_break(content)
+    marker = '{CACHE_BREAK}'
+    return [nil, content] unless content.include?(marker)
+    prefix, suffix = content.split(marker, 2)
+    [prefix.strip, suffix.strip]
+  end
+
+  def initialize(messages, setting: 'main', chat_id: nil, purpose: nil, system_prompt: nil)
+    @messages      = messages
+    @setting       = setting
+    @chat_id       = chat_id
+    @purpose       = purpose
+    @system_prompt = system_prompt
   end
 
   def call_raw(tools: [])
-    @@calls << { messages: @messages.dup, setting: @setting, tools: tools, method: :call_raw }
+    @@calls << { messages: @messages.dup, setting: @setting, tools: tools,
+                 chat_id: @chat_id, purpose: @purpose, system_prompt: @system_prompt,
+                 method: :call_raw }
     @@responses.shift
   end
 
   def call
-    @@calls << { messages: @messages.dup, setting: @setting, method: :call }
+    @@calls << { messages: @messages.dup, setting: @setting,
+                 chat_id: @chat_id, purpose: @purpose, system_prompt: @system_prompt,
+                 method: :call }
     @@responses.shift
   end
 end
@@ -419,6 +433,39 @@ class RunnerTest < BotTest
     first_call = FakeGptMaster.calls.first
     content = first_call[:messages].first[:content]
     assert_match(/RE: some earlier message/, content)
+  end
+
+  # Runner threads chat_id and purpose='agent' into every GptMaster call
+  def test_runner_passes_chat_id_and_purpose_agent
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    build_runner(text: 'hi', user: @user, chat_id: -999).run
+    first_call = FakeGptMaster.calls.first
+    assert_equal -999, first_call[:chat_id]
+    assert_equal 'agent', first_call[:purpose]
+  end
+
+  # When the agent_prompt contains {CACHE_BREAK}, the static prefix goes to system_prompt
+  # and the user message gets only the dynamic suffix.
+  def test_cache_break_splits_prompt_into_system_and_user
+    stub_settings!(chat_gpt: Settings.chat_gpt.merge(
+      'agent_prompt' => "STATIC AGENT HEADER\n{CACHE_BREAK}\nKnowledge: {KNOWLEDGE}\nReq: {REQUEST}"
+    ))
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    build_runner(text: 'hello', user: @user, knowledge: 'facts here').run
+    first_call = FakeGptMaster.calls.first
+    assert_equal 'STATIC AGENT HEADER', first_call[:system_prompt]
+    content = first_call[:messages].first[:content]
+    assert_includes content, 'Knowledge: facts here'
+    assert_includes content, 'Req: hello'
+    refute_includes content, 'STATIC AGENT HEADER'
+  end
+
+  # Without marker, system_prompt is nil (no caching)
+  def test_no_cache_break_means_no_system_prompt
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    build_runner(text: 'hi', user: @user).run
+    first_call = FakeGptMaster.calls.first
+    assert_nil first_call[:system_prompt]
   end
 end
 

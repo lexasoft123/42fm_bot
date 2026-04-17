@@ -21,13 +21,14 @@ module Agent
     end
 
     def run
-      messages = build_initial_messages
+      system_prompt, user_content = build_initial_content
+      messages = build_initial_messages(user_content)
       tools    = ToolRegistry.definitions_for(user_role: @user.role, api_type: @api_type)
 
       AGENT_LOGGER.info "START chat=#{@chat_id} user=#{@user.name} (#{@user.role})\nREQUEST: #{@text}"
 
       MAX_ITERATIONS.times do |i|
-        raw = GptMaster.new(messages, setting: @setting).call_raw(tools: tools)
+        raw = new_gpt(messages, system_prompt).call_raw(tools: tools)
         return 'жпт не жпт' unless raw
 
         tool_calls = extract_tool_calls(raw)
@@ -51,32 +52,41 @@ module Agent
       end
 
       # Safety: final call without tools to force a text response
-      text = GptMaster.new(messages, setting: @setting).call || 'жпт не жпт'
+      text = new_gpt(messages, system_prompt).call || 'жпт не жпт'
       AGENT_LOGGER.info "DONE (#{MAX_ITERATIONS} iterations, forced final)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
       text
     end
 
     private
 
-    def build_initial_messages
+    def new_gpt(messages, system_prompt)
+      GptMaster.new(messages, setting: @setting,
+                    chat_id: @chat_id, purpose: 'agent',
+                    system_prompt: system_prompt)
+    end
+
+    # Render prompt template, split on CACHE_BREAK_MARKER, return [system_prompt, user_content].
+    def build_initial_content
       prompt_template = Settings.chat_gpt['agent_prompt'] || Settings.chat_gpt['prompt']
-      # gsub main placeholders first, then ERB for conditional blocks
       replied_to = @replied_to
-      image = @image
-      phrase = @phrase
+      image      = @image
+      phrase     = @phrase
       content = prompt_template
         .gsub('{REQUEST}', @text)
         .gsub('{CONTEXT}', @context)
         .gsub('{KNOWLEDGE}', @knowledge)
       content = ERB.new(content, trim_mode: '-').result(binding)
+      GptMaster.split_cache_break(content)
+    end
 
+    def build_initial_messages(user_content)
       if @image
         [{ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: @image[:media_type], data: @image[:data] } },
-          { type: 'text', text: content }
+          { type: 'text', text: user_content }
         ] }]
       else
-        [{ role: 'user', content: content }]
+        [{ role: 'user', content: user_content }]
       end
     end
 

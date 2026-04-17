@@ -3,6 +3,7 @@ require 'httparty'
 class GptMaster
   MAX_RETRIES = 3
   RETRY_DELAYS = [5, 10, 20].freeze
+  CACHE_BREAK_MARKER = '{CACHE_BREAK}'.freeze
 
   # Default API URLs per api_type (used when provider has no explicit api_url)
   DEFAULT_URLS = {
@@ -10,7 +11,7 @@ class GptMaster
     'openai'    => 'https://api.openai.com/v1/chat/completions',
   }.freeze
 
-  def initialize(messages, setting: 'main')
+  def initialize(messages, setting: 'main', chat_id: nil, purpose: nil, system_prompt: nil)
     cfg      = self.class.resolve_setting(setting)
     @api_key  = cfg[:api_key]
     @api_url  = cfg[:api_url]
@@ -18,7 +19,10 @@ class GptMaster
     @model    = cfg[:model]
     @max_tokens      = cfg[:max_tokens]
     @thinking_budget = cfg[:thinking_budget]
-    @messages = messages
+    @messages        = messages
+    @chat_id         = chat_id
+    @purpose         = purpose
+    @system_prompt   = system_prompt
   end
 
   def call
@@ -29,6 +33,7 @@ class GptMaster
     loop do
       response = HTTParty.post(@api_url, body: body.to_json, headers: headers, timeout: 300)
       if response.code == 200
+        record_usage(response)
         result = extract_content(response)
         LOGGER.debug("#{self.class.name}#call: reply #{result.to_s.length} chars")
         return result
@@ -46,13 +51,14 @@ class GptMaster
 
   def call_raw(tools: [])
     body = build_body
-    body[:tools] = tools
+    body[:tools] = attach_tool_cache_control(tools)
     LOGGER.debug("#{self.class.name}#call_raw [#{@model}]: #{tools.size} tools")
 
     retries = 0
     loop do
       response = HTTParty.post(@api_url, body: body.to_json, headers: headers, timeout: 300)
       if response.code == 200
+        record_usage(response)
         LOGGER.debug("#{self.class.name}#call_raw: stop_reason=#{response['stop_reason'] || response.dig('choices', 0, 'finish_reason')}")
         return response.parsed_response
       elsif response.code == 529 && retries < MAX_RETRIES
@@ -68,17 +74,28 @@ class GptMaster
   end
 
   class << self
-    def chat(text, context: '', knowledge: '', setting: 'main')
+    def chat(text, context: '', knowledge: '', setting: 'main', chat_id: nil, purpose: 'main_chat')
       content = Settings.chat_gpt['prompt']
         .gsub('{REQUEST}', text)
         .gsub('{CONTEXT}', context)
         .gsub('{KNOWLEDGE}', knowledge)
-      new([{ role: 'user', content: content }], setting: setting).call
+      system_prompt, user_content = split_cache_break(content)
+      new([{ role: 'user', content: user_content }],
+          setting: setting, chat_id: chat_id, purpose: purpose, system_prompt: system_prompt).call
     end
 
-    def ask(text, prompt:, setting: 'main')
+    def ask(text, prompt:, setting: 'main', chat_id: nil, purpose: 'ask')
       content = prompt.gsub('{REQUEST}', text)
-      new([{ role: 'user', content: content }], setting: setting).call
+      new([{ role: 'user', content: content }],
+          setting: setting, chat_id: chat_id, purpose: purpose).call
+    end
+
+    # Split a rendered prompt on CACHE_BREAK_MARKER.
+    # Returns [system_prompt, user_content]. If no marker, system_prompt is nil.
+    def split_cache_break(content)
+      return [nil, content] unless content.include?(CACHE_BREAK_MARKER)
+      prefix, suffix = content.split(CACHE_BREAK_MARKER, 2)
+      [prefix.strip, suffix.strip]
     end
 
     # Resolve a named setting into a flat config hash
@@ -127,16 +144,31 @@ class GptMaster
         messages:   @messages,
         max_tokens: @max_tokens || 16000,
       }
+      if @system_prompt && !@system_prompt.empty?
+        body[:system] = [{ type: 'text', text: @system_prompt, cache_control: { type: 'ephemeral' } }]
+      end
       if @thinking_budget
         body[:thinking] = { type: 'enabled', budget_tokens: @thinking_budget }
       end
       body
     else
+      messages = @messages
+      if @system_prompt && !@system_prompt.empty?
+        messages = [{ role: 'system', content: @system_prompt }] + @messages
+      end
       {
         model:    @model,
-        messages: @messages,
+        messages: messages,
       }
     end
+  end
+
+  def attach_tool_cache_control(tools)
+    return tools unless anthropic? && tools.is_a?(Array) && !tools.empty?
+    cached = tools.map { |t| t.is_a?(Hash) ? t.dup : t }
+    last = cached.last
+    cached[-1] = last.merge(cache_control: { type: 'ephemeral' }) if last.is_a?(Hash)
+    cached
   end
 
   def extract_content(response)
@@ -145,6 +177,43 @@ class GptMaster
       text_block&.dig('text')
     else
       response['choices'][0]['message']['content']
+    end
+  end
+
+  def record_usage(response)
+    usage = extract_usage(response)
+    return unless usage
+    cost = ApiUsage.compute_cost(@model, usage) rescue BigDecimal('0')
+    LOGGER.info format(
+      "%s usage [%s]: in=%d out=%d cache_r=%d cache_w=%d cost=$%.4f purpose=%s chat=%s",
+      self.class.name, @model,
+      usage[:input], usage[:output], usage[:cache_read], usage[:cache_write],
+      (cost / 100.0).to_f, @purpose || '-', @chat_id || '-'
+    )
+    ApiUsage.record(model: @model, purpose: @purpose || 'unknown', usage: usage, chat_id: @chat_id)
+  rescue => e
+    LOGGER.warn "#{self.class.name}: telemetry failed: #{e.class}: #{e.message}"
+  end
+
+  def extract_usage(response)
+    u = response['usage']
+    return nil unless u.is_a?(Hash)
+    if anthropic?
+      {
+        input:       u['input_tokens'].to_i,
+        output:      u['output_tokens'].to_i,
+        cache_read:  u['cache_read_input_tokens'].to_i,
+        cache_write: u['cache_creation_input_tokens'].to_i,
+      }
+    else
+      cached = u.dig('prompt_tokens_details', 'cached_tokens').to_i
+      prompt = u['prompt_tokens'].to_i
+      {
+        input:       prompt - cached,
+        output:      u['completion_tokens'].to_i,
+        cache_read:  cached,
+        cache_write: 0,
+      }
     end
   end
 end

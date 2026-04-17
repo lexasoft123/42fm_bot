@@ -215,6 +215,7 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 | `songs` | `title`, `artist`, `album`, `genre`, `year` (int), `filepath` (unique, relative to music root), `duration` (int, seconds), `category` (top-level dir) |
 | `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — content table mode (`content='songs'`, `content_rowid='id'`), `unicode61 remove_diacritics 1` tokenizer, auto-synced via INSERT/UPDATE/DELETE triggers |
+| `api_usage` | `chat_id` (nullable), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_compact`/`suno_lyrics`/`suno_tags`/`suno_parse`/`image_prompt`), `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per API response; `ApiUsage.record` is fire-and-forget (rescues errors so telemetry never breaks replies) |
 
 **Relationships:**
 - `User` has_many `messages` (FK: `user_uid` → `users.uid`)
@@ -242,11 +243,15 @@ Reads audio file tags via `wahwah` (pure Ruby, no native deps), populates the `s
 ### GptMaster — `lib/gpt_master.rb`
 HTTP client (HTTParty) supporting both Anthropic and OpenAI-compatible APIs. Provider selected via `settings.yml` `chat_gpt.provider`. Two class-method interfaces:
 
-- `GptMaster.chat(text, context:, knowledge:, model:)` — uses the prompt template from `settings.yml` (`{REQUEST}` / `{CONTEXT}` / `{KNOWLEDGE}` substitution). Used by chat commands.
-- `GptMaster.ask(text, prompt:, model:)` — caller supplies prompt template (`{REQUEST}` only). Used for one-off tasks like translation and knowledge extraction. No context.
+- `GptMaster.chat(text, context:, knowledge:, setting:, chat_id:, purpose:)` — uses the prompt template from `settings.yml` (`{REQUEST}` / `{CONTEXT}` / `{KNOWLEDGE}` substitution). Splits the template on `{CACHE_BREAK}` — everything before becomes a cached system prompt, everything after becomes the user message. Used by chat commands.
+- `GptMaster.ask(text, prompt:, setting:, chat_id:, purpose:)` — caller supplies prompt template (`{REQUEST}` only). Used for one-off tasks like translation and knowledge extraction. No context, no cache split.
 
-**Anthropic specifics:** uses `x-api-key` + `anthropic-version` headers, requires `max_tokens`, optionally enables extended thinking via `thinking_budget`. Extracts the `text` block from the `content` array (skipping thinking blocks).
-**OpenAI/DeepSeek specifics:** uses `Authorization: Bearer`, passes `thinking: {type: 'enabled'}` for reasoning models.
+**Anthropic specifics:** uses `x-api-key` + `anthropic-version` headers, requires `max_tokens`, optionally enables extended thinking via `thinking_budget`. Extracts the `text` block from the `content` array (skipping thinking blocks). When a `system_prompt:` is supplied, it is sent as a `system` array with `cache_control: { type: 'ephemeral' }` on its single text block. When `call_raw(tools:)` is invoked, `cache_control` is attached to the **last** tool definition — caching the entire tools array as one prefix segment.
+**OpenAI/DeepSeek specifics:** uses `Authorization: Bearer`, passes `thinking: {type: 'enabled'}` for reasoning models. `system_prompt:` is converted into a leading `{role: 'system'}` message. No explicit cache markers (these providers auto-cache).
+
+**Telemetry:** every successful response's `usage` block is extracted (Anthropic: `input_tokens`/`output_tokens`/`cache_creation_input_tokens`/`cache_read_input_tokens`; OpenAI: `prompt_tokens` minus `prompt_tokens_details.cached_tokens`, `completion_tokens`) and persisted as an `ApiUsage` row tagged with `chat_id` and `purpose`. A one-line log entry (`GptMaster usage [model]: in=N out=M cache_r=X cache_w=Y cost=$0.0042 purpose=agent chat=-100…`) is also emitted. Telemetry errors are swallowed (`LOGGER.warn`) — a broken `api_usage` table never blocks a reply.
+
+**Pricing:** `Settings.chat_gpt['pricing']` is a hash keyed by exact model id with `input`/`output`/`cache_read`/`cache_write` prices in USD per 1M tokens. Unknown models are logged and persisted with `cost_cents = 0`.
 
 ### GptHelpers — `lib/commands/gpt_helpers.rb`
 Mixed into GPT commands. Delegates to `ChatContext` module (via `include ChatContext` + `super`), auto-passing `chat_id` from the command context:
@@ -483,10 +488,21 @@ chat_gpt:
     embedder:                     # used for EmbeddingService
       provider: openai
       model: text-embedding-3-small
+  pricing:                        # USD per 1M tokens; used by ApiUsage.compute_cost
+    claude-sonnet-4-6:
+      input: 3
+      output: 15
+      cache_read: 0.30
+      cache_write: 3.75
+    claude-opus-4-7:
+      input: 15
+      output: 75
+      cache_read: 1.50
+      cache_write: 18.75
   agent_mode: true                # false to disable agent tool-calling
   context_messages_size: 30
-  prompt: "...{KNOWLEDGE}...{CONTEXT}...{REQUEST}..."
-  agent_prompt: "..."             # optional, falls back to prompt
+  prompt: "...{CACHE_BREAK}...{KNOWLEDGE}...{CONTEXT}...{REQUEST}..."
+  agent_prompt: "..."             # optional, falls back to prompt; {CACHE_BREAK} also supported
 knowledge:
   top_k: 3            # facts to inject per GPT call
   extract_every: 50   # auto-extract after every N user messages per chat

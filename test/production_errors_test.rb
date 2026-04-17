@@ -62,7 +62,14 @@ class FakeGptMaster
       model: 'fake', max_tokens: 100, thinking_budget: nil }
   end
 
-  def initialize(messages, setting: 'main')
+  def self.split_cache_break(content)
+    marker = '{CACHE_BREAK}'
+    return [nil, content] unless content.include?(marker)
+    prefix, suffix = content.split(marker, 2)
+    [prefix.strip, suffix.strip]
+  end
+
+  def initialize(messages, setting: 'main', chat_id: nil, purpose: nil, system_prompt: nil)
     @messages = messages
     @setting  = setting
   end

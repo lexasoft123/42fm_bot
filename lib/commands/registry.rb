@@ -31,6 +31,7 @@ module Commands
     ReplyYou,
     PhraseTop,
     TaskQueue,
+    CostReport,
     GptChat,
     FallbackReply,
   ].freeze

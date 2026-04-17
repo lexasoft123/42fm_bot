@@ -52,7 +52,7 @@ class KnowledgeBase
       formatted = messages.map { |m| "@#{m.name}: #{m.body}" }.join("\n")
       prompt    = EXTRACTION_PROMPT.gsub('{MESSAGES}', formatted)
 
-      raw = GptMaster.ask('', prompt: prompt)
+      raw = GptMaster.ask('', prompt: prompt, chat_id: chat_id, purpose: 'knowledge_extract')
       # Strip markdown code fences if present
       json_str = raw.gsub(/\A```(?:json)?\n?|\n?```\z/, '').strip
       facts    = JSON.parse(json_str)
@@ -86,7 +86,7 @@ class KnowledgeBase
       removed = 0
 
       clusters.each do |group|
-        merged_fact = merge_cluster(group)
+        merged_fact = merge_cluster(group, chat_id: chat_id)
         next unless merged_fact
         add(topic: merged_fact['topic'], content: merged_fact['content'], chat_id: chat_id, source: 'auto')
         group.each(&:destroy)
@@ -105,11 +105,11 @@ class KnowledgeBase
 
     private
 
-    def merge_cluster(group)
+    def merge_cluster(group, chat_id:)
       entries  = group.map { |k| "- [#{k.topic}]: #{k.content}" }.join("\n")
       prompt   = MERGE_PROMPT.gsub('{ENTRIES}', entries)
       COMPACT_LOGGER.info "merge_cluster ids=#{group.map(&:id)}\nBEFORE (#{group.size} entries):\n#{entries}\nPROMPT:\n#{prompt}"
-      raw = GptMaster.ask('', prompt: prompt)
+      raw = GptMaster.ask('', prompt: prompt, chat_id: chat_id, purpose: 'knowledge_compact')
       COMPACT_LOGGER.info "RAW RESPONSE:\n#{raw}"
       json_str = raw.gsub(/\A```(?:json)?\n?|\n?```\z/, '').strip
       result   = JSON.parse(json_str)

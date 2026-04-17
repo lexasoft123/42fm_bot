@@ -38,7 +38,8 @@ class ImageGenTaskHandler
       knowledge = get_relevant_knowledge(request, task.chat_id)
 
       llm_prompt = PROMPT_TEMPLATE % { request: request, context: context, knowledge: knowledge }
-      p['prompt'] = GptMaster.new([{ role: 'user', content: llm_prompt }], setting: 'agent').call
+      p['prompt'] = GptMaster.new([{ role: 'user', content: llm_prompt }], setting: 'agent',
+                                  chat_id: task.chat_id, purpose: 'image_prompt').call
       raise "GPT prompt failed" unless p['prompt'] && p['prompt'] != 'жпт не жпт'
       LOGGER.debug "#{self.class.name}[#{task.id}]: prompt → '#{p['prompt'][0..100]}...'"
       ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }

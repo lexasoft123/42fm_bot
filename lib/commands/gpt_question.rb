@@ -17,7 +17,8 @@ module Commands
           radio: radio, chat_id: chat_id, user: user, bot: bot
         ).run
       else
-        GptMaster.chat(text, context: get_chat_context, knowledge: get_relevant_knowledge(text))
+        GptMaster.chat(text, context: get_chat_context, knowledge: get_relevant_knowledge(text),
+                       chat_id: chat_id, purpose: 'main_chat')
       end
       save_bot_reply(reply)
       CommandResult.text("@#{user.name} #{reply}")
