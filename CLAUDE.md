@@ -9,7 +9,7 @@ Full docs: `docs/architecture.md` | Agent guide: `docs/agents.md`
 - **Never commit automatically.** Always ask the user before creating a git commit.
 - **Always run `make test` before committing.** All tests must pass before creating a commit.
 - **Never run `ruby lib/bot.rb` directly.** Use Docker in production; use `./bin/bot start/stop/restart` only for local non-Docker development.
-- **Back up `db/bot.db` on prod only when the deploy includes a new migration.** Use `make backup` (keeps last 5 timestamped snapshots on the prod host; override with `BACKUP_KEEP=N`). Code-only deploys don't need a backup.
+- **Back up `db/bot.db` on prod only when the deploy includes a new migration.** Run `make backup` — code-only deploys don't need it. See `Backing up the prod DB` below for details.
 - Always update all documents on changes.
 
 ---
@@ -69,6 +69,24 @@ cp /path/to/settings.yml config/settings.yml
 cp .env.example .env   # edit DEPLOY_HOST and MUSIC_PATH as needed
 docker compose up -d --build
 docker compose logs -f
+```
+
+## Backing up the prod DB
+
+```bash
+make backup                    # keeps 5 newest snapshots on prod host (default)
+make backup BACKUP_KEEP=10     # keep 10 newest
+```
+
+Runs [bin/backup.sh](bin/backup.sh) remotely via `ssh bash -exs`. Uses SQLite's online backup API (`sqlite3 db/bot.db ".backup db/bot.db.bak-<utc_ts>"`), so the snapshot is consistent **even in WAL mode under concurrent writes** — a plain `cp` would miss writes still sitting in the `-wal` file. The resulting `.bak` is a standalone SQLite DB; no `-wal` or `-shm` sidecars needed. After writing, it prunes older snapshots so only the most recent N remain.
+
+**When to run:** before a deploy that includes a new migration under `db/migrate/`. Code-only deploys don't touch schema or data, so no backup.
+
+**Restoring** (if a migration or deploy goes bad):
+```bash
+ssh $DEPLOY_HOST 'cd ~/bot && docker compose down && \
+  cp db/bot.db.bak-<ts> db/bot.db && \
+  git reset --hard <previous-sha> && docker compose up -d --build'
 ```
 
 ---
