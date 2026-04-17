@@ -15,11 +15,9 @@ require_relative '../lib/commands/base'
 require_relative '../lib/chat_context'
 require_relative '../lib/commands/gpt_helpers'
 require_relative '../lib/commands/gpt_chat'
-require_relative '../lib/commands/reply_you'
 
 # --- Global logger stubs ---
 LOGGER       = Logger.new(IO::NULL) unless defined?(LOGGER)
-AGENT_LOGGER = Logger.new(IO::NULL) unless defined?(AGENT_LOGGER)
 
 # ==========================================================================
 # FakeGptMaster — scripted replacement for GptMaster in Runner tests
@@ -44,12 +42,6 @@ class FakeGptMaster
   def self.resolve_setting(_name)
     { api_key: 'fake', api_type: 'anthropic', api_url: 'http://fake',
       model: 'fake', max_tokens: 100, thinking_budget: nil }
-  end
-
-  # Unused by Runner but required for GptHelpers
-  def self.chat(text, context: '', knowledge: '', setting: 'main', chat_id: nil, user_uid: nil, purpose: 'main_chat')
-    @@calls << { method: :chat, text: text, chat_id: chat_id, user_uid: user_uid, purpose: purpose }
-    @@responses.shift || 'fake chat reply'
   end
 
   def self.split_cache_break(content)
@@ -104,9 +96,7 @@ module AgentTestHelpers
       radio: { 'path' => '/music', 'host_path' => nil },
       telegram: { 'token' => '123456:ABCDEF' },
       chat_gpt: {
-        'agent_mode' => true,
         'agent_prompt' => "<%- if replied_to -%>RE: <%= replied_to %>\n<%- end -%><%- if image -%>[IMAGE]\n<%- end -%><%- if phrase -%>PHRASE: <%= phrase %>\n<%- end -%>{REQUEST} | {CONTEXT} | {KNOWLEDGE}",
-        'prompt' => '{REQUEST}',
         'context_messages_size' => 10,
         'providers' => { 'anthropic' => { 'api_key' => 'fake', 'api_type' => 'anthropic' } },
         'settings' => { 'agent' => { 'provider' => 'anthropic', 'model' => 'fake', 'max_tokens' => 100 } }
@@ -129,7 +119,7 @@ module AgentTestHelpers
     CommandContext.new(
       bot: bot, message: message, user: user,
       chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      reply_master: OpenStruct.new,
       cmd: cmd
     )
   end
@@ -620,7 +610,7 @@ class GptChatTest < BotTest
     ctx = CommandContext.new(
       bot: bot, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      reply_master: OpenStruct.new,
       cmd: "бот что это"
     )
     command = Commands::GptChat.new(ctx)
@@ -647,7 +637,7 @@ class GptChatTest < BotTest
     ctx = CommandContext.new(
       bot: bot, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      reply_master: OpenStruct.new,
       cmd: "бот что"
     )
     command = Commands::GptChat.new(ctx)
@@ -681,22 +671,15 @@ class GptChatExecuteTest < BotTest
     super
   end
 
-  # In agent mode, reply_pattern_only is skipped — agent handles all messages
-  # (production bug: "бот ты причинно-следственная язь" returned canned "язь" reply
-  #  because reply_pattern_only regex matched "язь" before agent could run)
-  def test_agent_mode_skips_reply_pattern
-    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => true))
-
-    reply_master = OpenStruct.new
-    reply_master.define_singleton_method(:reply_pattern_only) { |_| 'canned язь reply' }
-
+  # "бот ты ..." phrases go to the agent — not to a canned pattern-based response
+  def test_phrase_goes_to_agent
     FakeGptMaster.enqueue(anthropic_text('agent reply about язь'))
 
     msg = OpenStruct.new(text: "бот ты причинно-следственная язь", message_id: 1, reply_to_message: nil)
     ctx = CommandContext.new(
       bot: nil, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: reply_master,
+      reply_master: OpenStruct.new,
       cmd: "бот ты причинно-следственная язь"
     )
     result = Commands::GptChat.new(ctx).execute
@@ -704,20 +687,15 @@ class GptChatExecuteTest < BotTest
     assert_equal 'agent reply about язь', result.payload
   end
 
-  # In agent mode, keyword-matching messages also go to agent (not just "бот ты ..." phrases)
-  def test_agent_mode_skips_reply_pattern_for_keyword
-    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => true))
-
-    reply_master = OpenStruct.new
-    reply_master.define_singleton_method(:reply_pattern_only) { |_| 'canned keyword reply' }
-
+  # Keyword-matching messages also go to agent
+  def test_keyword_message_goes_to_agent
     FakeGptMaster.enqueue(anthropic_text('agent reply'))
 
     msg = OpenStruct.new(text: "бот расскажи про язь", message_id: 1, reply_to_message: nil)
     ctx = CommandContext.new(
       bot: nil, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: reply_master,
+      reply_master: OpenStruct.new,
       cmd: "бот расскажи про язь"
     )
     result = Commands::GptChat.new(ctx).execute
@@ -725,53 +703,10 @@ class GptChatExecuteTest < BotTest
     assert_equal 'agent reply', result.payload
   end
 
-  # Without agent mode, reply_pattern_only still works as before
-  def test_non_agent_mode_uses_reply_pattern
-    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => false))
-
-    reply_master = OpenStruct.new
-    reply_master.define_singleton_method(:reply_pattern_only) { |_| 'canned reply' }
-
-    msg = OpenStruct.new(text: "бот язь", message_id: 1, reply_to_message: nil)
-    ctx = CommandContext.new(
-      bot: nil, message: msg, user: @user,
-      chat_id: 100, radio: nil,
-      reply_master: reply_master,
-      cmd: "бот язь"
-    )
-    result = Commands::GptChat.new(ctx).execute
-    assert_equal :text, result.type
-    assert_equal 'canned reply', result.payload
-  end
-
-  # In non-agent mode, "бот ты X" with matching reply pattern goes to GPT (not canned reply)
-  # because maybe_save_phrase saved the phrase — the !phrase guard skips the quick reply
-  def test_non_agent_mode_phrase_skips_reply_pattern
-    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => false))
-
-    reply_master = OpenStruct.new
-    reply_master.define_singleton_method(:reply_pattern_only) { |_| 'canned язь reply' }
-
-    FakeGptMaster.enqueue('gpt reply about язь')
-
-    msg = OpenStruct.new(text: "бот ты причинно-следственная язь", message_id: 1, reply_to_message: nil)
-    ctx = CommandContext.new(
-      bot: nil, message: msg, user: @user,
-      chat_id: 100, radio: nil,
-      reply_master: reply_master,
-      cmd: "бот ты причинно-следственная язь"
-    )
-    result = Commands::GptChat.new(ctx).execute
-    assert_equal :text, result.type
-    assert_equal 'gpt reply about язь', result.payload
-  end
-
   # Photo with caption "бот что это" — agent receives the image from the current message
   # (production bug: photo messages were dropped because message.text is nil for photos,
   #  and even after fixing that, only reply_to photos were extracted, not current message photos)
   def test_photo_with_caption_sends_image_to_agent
-    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => true))
-
     photo = OpenStruct.new(file_id: 'photo123')
     file_obj = OpenStruct.new(file_path: 'photos/file_0.jpg')
     api = Object.new
@@ -788,7 +723,7 @@ class GptChatExecuteTest < BotTest
       ctx = CommandContext.new(
         bot: bot, message: msg, user: @user,
         chat_id: 100, radio: nil,
-        reply_master: OpenStruct.new(reply_pattern_only: nil),
+        reply_master: OpenStruct.new,
         cmd: "бот что это"
       )
       result = Commands::GptChat.new(ctx).execute
@@ -807,14 +742,12 @@ class GptChatExecuteTest < BotTest
   # Photo with caption but no "бот" prefix — not matched, no execute
   # (message_responder uses caption as text fallback, but GptChat still needs pattern match)
   def test_photo_without_bot_prefix_no_match
-    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => true))
-
     msg = OpenStruct.new(text: nil, caption: "просто фото", message_id: 1,
                          reply_to_message: nil, photo: [OpenStruct.new(file_id: 'x')])
     ctx = CommandContext.new(
       bot: nil, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      reply_master: OpenStruct.new,
       cmd: "просто фото"
     )
     refute Commands::GptChat.new(ctx).match?
@@ -824,49 +757,7 @@ class GptChatExecuteTest < BotTest
 
   def default_chat_gpt
     {
-      'agent_mode' => true,
       'agent_prompt' => "<%- if replied_to -%>RE: <%= replied_to %>\n<%- end -%><%- if image -%>[IMAGE]\n<%- end -%><%- if phrase -%>PHRASE: <%= phrase %>\n<%- end -%>{REQUEST} | {CONTEXT} | {KNOWLEDGE}",
-      'prompt' => '{REQUEST}',
-      'context_messages_size' => 10,
-      'providers' => { 'anthropic' => { 'api_key' => 'fake', 'api_type' => 'anthropic' } },
-      'settings' => { 'agent' => { 'provider' => 'anthropic', 'model' => 'fake', 'max_tokens' => 100 } }
-    }
-  end
-end
-
-# ==========================================================================
-# ReplyYouTest
-# ==========================================================================
-class ReplyYouTest < BotTest
-  include AgentTestHelpers
-  include Fixtures::Users
-
-  def setup
-    super
-    @user = member_user
-  end
-
-  # In agent mode, ReplyYou skips so GptChat handles "бот ты ..." messages
-  def test_skips_in_agent_mode
-    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => true))
-    ctx = build_ctx(cmd: "бот ты дурак", user: @user)
-    refute Commands::ReplyYou.new(ctx).match?
-  end
-
-  # Without agent mode, ReplyYou matches "бот ты ..." normally
-  def test_matches_without_agent_mode
-    stub_settings!(chat_gpt: default_chat_gpt.merge('agent_mode' => false))
-    ctx = build_ctx(cmd: "бот ты дурак", user: @user)
-    assert Commands::ReplyYou.new(ctx).match?
-  end
-
-  private
-
-  def default_chat_gpt
-    {
-      'agent_mode' => false,
-      'agent_prompt' => '{REQUEST}',
-      'prompt' => '{REQUEST}',
       'context_messages_size' => 10,
       'providers' => { 'anthropic' => { 'api_key' => 'fake', 'api_type' => 'anthropic' } },
       'settings' => { 'agent' => { 'provider' => 'anthropic', 'model' => 'fake', 'max_tokens' => 100 } }

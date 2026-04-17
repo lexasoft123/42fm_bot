@@ -97,7 +97,6 @@ bin/bot
 │   │   ├── news.rb
 │   │   ├── translate.rb       # GPT-based translation (no Yandex)
 │   │   ├── dice.rb
-│   │   ├── reply_you.rb
 │   │   ├── phrase_top.rb
 │   │   ├── gif_search.rb
 │   │   ├── google_search.rb
@@ -241,10 +240,11 @@ ActiveRecord model for the music library. Populated by `MusicScanner` from audio
 Reads audio file tags via `wahwah` (pure Ruby, no native deps), populates the `songs` table. Idempotent: updates existing records, creates new ones, removes orphans (by `updated_at` timestamp). Falls back to parsing artist/title from filepath if tags are empty. Run via `bundle exec rake music:scan`.
 
 ### GptMaster — `lib/gpt_master.rb`
-HTTP client (HTTParty) supporting both Anthropic and OpenAI-compatible APIs. Provider selected via `settings.yml` `chat_gpt.provider`. Two class-method interfaces:
+HTTP client (HTTParty) supporting both Anthropic and OpenAI-compatible APIs. Provider selected via `settings.yml` `chat_gpt.provider`. One class-method interface:
 
-- `GptMaster.chat(text, context:, knowledge:, setting:, chat_id:, purpose:)` — uses the prompt template from `settings.yml` (`{REQUEST}` / `{CONTEXT}` / `{KNOWLEDGE}` substitution). Splits the template on `{CACHE_BREAK}` — everything before becomes a cached system prompt, everything after becomes the user message. Used by chat commands.
-- `GptMaster.ask(text, prompt:, setting:, chat_id:, purpose:)` — caller supplies prompt template (`{REQUEST}` only). Used for one-off tasks like translation and knowledge extraction. No context, no cache split.
+- `GptMaster.ask(text, prompt:, setting:, chat_id:, purpose:)` — caller supplies prompt template (`{REQUEST}` only). Used for one-off tasks like translation, knowledge extraction/compaction, suno lyrics/tags/parse, and image prompt generation. No context, no cache split.
+
+Chat commands go through `Agent::Runner` directly (which instantiates `GptMaster` with `setting: 'agent'`, `system_prompt:`, and tools); there is no `GptMaster.chat` class method anymore.
 
 **Anthropic specifics:** uses `x-api-key` + `anthropic-version` headers, requires `max_tokens`, optionally enables extended thinking via `thinking_budget`. Extracts the `text` block from the `content` array (skipping thinking blocks). When a `system_prompt:` is supplied, it is sent as a `system` array with `cache_control: { type: 'ephemeral' }` on its single text block. When `call_raw(tools:)` is invoked, `cache_control` is attached to the **last** tool definition — caching the entire tools array as one prefix segment.
 **OpenAI/DeepSeek specifics:** uses `Authorization: Bearer`, passes `thinking: {type: 'enabled'}` for reasoning models. `system_prompt:` is converted into a leading `{role: 'system'}` message. No explicit cache markers (these providers auto-cache).
@@ -274,7 +274,7 @@ Auto-extraction is triggered by `MessageResponder#maybe_extract_knowledge` every
 Auto-compaction is triggered by `maybe_trigger_compact` after each extraction batch. Uses an adaptive threshold: if the last compaction found only small clusters (avg ≤ 2 entries), the effective threshold scales up to 3× `compact_at` before the next run. Threshold settings: `knowledge.compact_at` (entry count trigger, default 100), `knowledge.compact_threshold` (cosine similarity, default 0.85). Logs to `log/knowledge_compact.log`.
 
 ### Agent Mode — `lib/agent/`
-When `chat_gpt.agent_mode: true`, `GptChat` uses `Agent::Runner` instead of `GptMaster.chat`. The runner implements an agentic tool-use loop:
+`GptChat` and `GptQuestion` always route through `Agent::Runner`. The runner implements an agentic tool-use loop:
 
 1. Send user message + tools definitions to LLM
 2. If LLM returns tool calls → execute them, append results, repeat
@@ -291,8 +291,6 @@ When `chat_gpt.agent_mode: true`, `GptChat` uses `Agent::Runner` instead of `Gpt
 - OpenAI: `tools: [{type: "function", function: {...}}]`, response `tool_calls: [...]`, results as `{role: "tool"}`
 
 Admin-only tools are filtered from definitions AND checked at execution time (denial messages pulled from `Settings.replies['admin_denied']`). Tool results are truncated to 2000 chars.
-
-Toggle off with `chat_gpt.agent_mode: false` to revert to simple `GptMaster.chat` path.
 
 **Vision support:** When a user replies to a photo with a bot-addressed message (e.g. "бот что тут?"), `GptChat` downloads the photo via Telegram API, base64-encodes it, and passes it to `Agent::Runner`. The runner builds a multi-modal message with an `image` content block for the Anthropic API. Falls back to text-only if the download fails or there's no photo.
 
@@ -476,7 +474,7 @@ chat_gpt:
       api_type: openai
       api_url: https://api.deepseek.com/v1/chat/completions
   settings:
-    main:                         # used for GptMaster.chat / .ask
+    main:                         # used for GptMaster.ask (translate, knowledge, suno, image prompt)
       provider: anthropic
       model: claude-sonnet-4-6
       max_tokens: 16000
@@ -499,10 +497,8 @@ chat_gpt:
       output: 75
       cache_read: 1.50
       cache_write: 18.75
-  agent_mode: true                # false to disable agent tool-calling
   context_messages_size: 30
-  prompt: "...{CACHE_BREAK}...{KNOWLEDGE}...{CONTEXT}...{REQUEST}..."
-  agent_prompt: "..."             # optional, falls back to prompt; {CACHE_BREAK} also supported
+  agent_prompt: "...{CACHE_BREAK}...{KNOWLEDGE}...{CONTEXT}...{REQUEST}..."
 knowledge:
   top_k: 3            # facts to inject per GPT call
   extract_every: 50   # auto-extract after every N user messages per chat
@@ -550,8 +546,11 @@ All output is unified in a single log file configured via `settings.yml`:
 | App logger (`LOGGER`) | `log/bot.log` |
 | Telegram client | `log/bot.log` |
 | ActiveRecord SQL | `log/bot.log` |
+| Knowledge compaction (`COMPACT_LOGGER`) | `log/knowledge_compact.log` |
 
-`AppConfigurator#setup_logging` runs first in `configure`, builds the logger from settings, and passes it to `DatabaseConnector`. The global `LOGGER` constant is assigned in `bot.rb` after `configure` returns.
+`AppConfigurator#setup_logging` runs first in `configure`, builds the loggers from settings, and passes the main logger to `DatabaseConnector`. The global `LOGGER` and `COMPACT_LOGGER` constants are assigned in `bot.rb` after `configure` returns.
+
+**Chat-id prefix convention.** Every per-message / per-chat / per-task log line is prefixed with `[chat=<id>]` so one grep reconstructs the full timeline for a single chat (e.g. `grep 'chat=-1001273623296' log/bot.log`). Agent turns carry an additional `[AGENT]` tag. Generic / singleton services without chat context (radio socket, FluxClient, SunoClient, Gogolmogol, Polly, etc.) intentionally log without the prefix — their per-call context is already surrounded by chat-tagged lines from the caller.
 
 Log rotation: size-based — rotates at `max_size_mb`, keeps `keep_files` old files (e.g. `bot.log.0`, `bot.log.1`). The `log/` directory is created automatically at startup.
 

@@ -11,7 +11,6 @@ begin
 
   token = Settings.telegram['token']
   LOGGER         = config.logger
-  AGENT_LOGGER   = config.agent_logger
   COMPACT_LOGGER = config.compact_logger
   logger = LOGGER
 
@@ -29,12 +28,13 @@ begin
         next unless message.from
         options = { bot: bot, message: message, radio: @radio }
         msg_text = message.text || message.caption
-        logger.debug "@#{message.from.username}: #{msg_text} chat: #{message.chat.id}"
-        logger.info "chat_seen: id=#{message.chat.id} title=#{message.chat.title.inspect} type=#{message.chat.type}"
-        if Settings.auth['chats'].any? { |c| c['id'] == message.chat.id }
+        chat_id = message.chat.id
+        logger.debug "[chat=#{chat_id}] @#{message.from.username}: #{msg_text}"
+        logger.debug "[chat=#{chat_id}] chat_seen: title=#{message.chat.title.inspect} type=#{message.chat.type}"
+        if Settings.auth['chats'].any? { |c| c['id'] == chat_id }
           MessageResponder.new(options).respond
         else
-          logger.warn "unauthorized chat id: #{message.chat.id}"
+          logger.warn "[chat=#{chat_id}] unauthorized chat"
         end
       end
     end

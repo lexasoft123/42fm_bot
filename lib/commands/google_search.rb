@@ -14,7 +14,7 @@ module Commands
       query = cmd.gsub(/(бот|уважаемый\sбот|жзяцля|.*гугли|найди|ищи|искать)\s*/, '')
       res = Gogolmogol.new(query).search!
       if res && res =~ /[.](jpg|jpeg|gif|png|tif|bmp)/
-        LOGGER.debug "found picture: #{res}"
+        LOGGER.debug "[chat=#{chat_id}] found picture: #{res}"
         CommandResult.image(res)
       else
         CommandResult.text(res)

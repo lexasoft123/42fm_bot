@@ -24,7 +24,7 @@ docker compose logs -f         # tail logs
 docker compose down            # stop
 ```
 
-Logs are bind-mounted to `./log/bot.log` on the host.
+Logs are bind-mounted to `./log/bot.log` on the host — everything app-level goes in this single file. Per-chat lines are prefixed `[chat=<id>]` (agent turns add `[AGENT]`), so a single chat's timeline is greppable with `grep 'chat=-1001273...' log/bot.log`.
 
 ## Running the Bot (local, non-Docker)
 
@@ -180,11 +180,11 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - Knowledge auto-compaction (`KnowledgeBase.compact!`) clusters near-dupes via stored embeddings (no API calls) and LLM-merges each cluster; triggered as a `knowledge_compact` background task when count >= adaptive threshold (`compact_at` × factor based on last run's avg cluster size); logs to `log/knowledge_compact.log`; history in `knowledge_compact_log` table
 - `бот сожми знания` (admin only) triggers compaction immediately for the current chat
 - `бот найди/ищи/пошукай` → Google search; bare `бот <text>` → GPT chat
-- Agent mode (`chat_gpt.agent_mode: true`) lets GPT call bot tools (radio, weather, search, etc.) autonomously; toggle off to revert to simple GPT. Agent supports vision — replying to a photo with "бот ..." sends the image to Claude for recognition.
+- Agent mode is the only mode: `GptChat` / `GptQuestion` always route through `Agent::Runner`, which lets GPT call bot tools (radio, weather, search, etc.) autonomously. Agent supports vision — replying to a photo with "бот ..." sends the image to Claude for recognition.
 - `GptChat` must be last `бот`-prefixed command in registry — it matches `бот <anything>`
 - `chat_gpt.providers` holds API credentials; `chat_gpt.settings` holds named configs (`main`, `agent`, `embedder`) referencing providers
-- `GptMaster.new(messages, setting: 'main', chat_id:, purpose:, system_prompt:)` resolves provider + model from settings; class methods `.chat`/`.ask` default to `setting: 'main'`; `chat_id` + `purpose` feed the `api_usage` table (telemetry is fire-and-forget — errors logged, never propagated)
-- **Prompt caching:** the `prompt` and `agent_prompt` templates in `settings.common.yml` contain a `{CACHE_BREAK}` marker. Everything before it is sent as the Anthropic `system` param with `cache_control: { type: 'ephemeral' }`; everything after is the dynamic user message. Agent tools also get `cache_control` on the last tool in the array. Second+ calls within 5 min hit the cache (`cache_read_tokens > 0`, much cheaper input). OpenAI-compatible providers auto-cache; the split is harmless for them.
+- `GptMaster.new(messages, setting: 'main', chat_id:, purpose:, system_prompt:)` resolves provider + model from settings; class method `.ask` defaults to `setting: 'main'` (used by translate, knowledge, suno lyrics, image prompt); `chat_id` + `purpose` feed the `api_usage` table (telemetry is fire-and-forget — errors logged, never propagated)
+- **Prompt caching:** the `agent_prompt` template in `settings.common.yml` contains a `{CACHE_BREAK}` marker. Everything before it is sent as the Anthropic `system` param with `cache_control: { type: 'ephemeral' }`; everything after is the dynamic user message. Agent tools also get `cache_control` on the last tool in the array. Second+ calls within 5 min hit the cache (`cache_read_tokens > 0`, much cheaper input). OpenAI-compatible providers auto-cache; the split is harmless for them.
 - `chat_gpt.pricing` (in `settings.common.yml`) maps exact model id → `input`/`output`/`cache_read`/`cache_write` in USD per 1M tokens. `ApiUsage.compute_cost(model, usage)` returns cents as `BigDecimal`. Unknown models → row with `cost_cents = 0` + warn log
 - `бот затраты` / `бот расходы` / `бот cost` (admin-only) prints a Markdown digest of API costs broken down by purpose for today / 7d / 30d, plus top-5 spenders per window in the current chat, and global totals
 - `TaskRunner` poller thread starts inside `Telegram::Bot::Client.run` block, reuses `bot.api` — no second bot instance

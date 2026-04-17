@@ -37,7 +37,7 @@ Agent::ToolRegistry.register(
           media << { type: media_type, media: "attach://#{attach_name}" }
           temp_files << { file: tmp, name: attach_name, mime: content_type }
         rescue => e
-          LOGGER.warn "google_search: skipping #{r[:link]}: #{e.message}"
+          LOGGER.warn "[chat=#{ctx[:chat_id]}] google_search: skipping #{r[:link]}: #{e.message}"
         end
       end
 
@@ -58,7 +58,7 @@ Agent::ToolRegistry.register(
           "Отправил #{media.size} картинок в чат"
         end
       rescue => e
-        LOGGER.error "google_search send failed: #{e.message}"
+        LOGGER.error "[chat=#{ctx[:chat_id]}] google_search send failed: #{e.message}"
         results.map { |r| r[:link] }.join("\n")
       ensure
         temp_files.each { |tf| tf[:file].close; tf[:file].unlink rescue nil }

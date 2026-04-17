@@ -18,26 +18,16 @@ module Commands
       end
 
       phrase = maybe_save_phrase(text)
-
-      unless Settings.chat_gpt['agent_mode']
-        quick = reply_master.reply_pattern_only(text)
-        return CommandResult.text(quick) if quick && !phrase
-      end
       replied_to = extract_replied_text
       replied_image = extract_image || extract_replied_image
 
-      reply = if Settings.chat_gpt['agent_mode']
-        Agent::Runner.new(
-          text: text, context: get_chat_context,
-          knowledge: get_relevant_knowledge(text),
-          radio: radio, chat_id: chat_id, user: user, bot: bot,
-          replied_to: replied_to, image: replied_image,
-          phrase: phrase
-        ).run
-      else
-        GptMaster.chat(text, context: get_chat_context, knowledge: get_relevant_knowledge(text),
-                       chat_id: chat_id, user_uid: user.uid, purpose: 'main_chat')
-      end
+      reply = Agent::Runner.new(
+        text: text, context: get_chat_context,
+        knowledge: get_relevant_knowledge(text),
+        radio: radio, chat_id: chat_id, user: user, bot: bot,
+        replied_to: replied_to, image: replied_image,
+        phrase: phrase
+      ).run
       save_bot_reply(reply)
       CommandResult.text(reply, reply_to_message_id: message.message_id)
     end
@@ -86,10 +76,10 @@ module Commands
       response = HTTParty.get(url, timeout: 30)
       return nil unless response.code == 200
 
-      LOGGER.debug "#{self.class.name}#download_photo: downloaded #{response.body.bytesize} bytes"
+      LOGGER.debug "[chat=#{chat_id}] #{self.class.name}#download_photo: downloaded #{response.body.bytesize} bytes"
       { data: Base64.strict_encode64(response.body), media_type: 'image/jpeg' }
     rescue => e
-      LOGGER.warn "#{self.class.name}#download_photo failed: #{e.class}: #{e.message}"
+      LOGGER.warn "[chat=#{chat_id}] #{self.class.name}#download_photo failed: #{e.class}: #{e.message}"
       nil
     end
   end

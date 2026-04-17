@@ -28,7 +28,6 @@ module Commands
     HoroscopeGeneral,
     News,
     Dice,
-    ReplyYou,
     PhraseTop,
     TaskQueue,
     CostReport,

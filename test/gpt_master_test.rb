@@ -3,7 +3,6 @@ require_relative 'test_helper'
 # Stub Settings before loading gpt_master
 module Settings
   @chat_gpt = {
-    'prompt' => "STATIC PREFIX\n{CACHE_BREAK}\nKnowledge: {KNOWLEDGE}\nContext: {CONTEXT}\nRequest: {REQUEST}",
     'providers' => {
       'anthropic' => { 'api_key' => 'k', 'api_type' => 'anthropic' },
       'openai'    => { 'api_key' => 'k', 'api_type' => 'openai' },
@@ -306,31 +305,6 @@ class GptMasterBodyBuildingTest < BotTest
 end
 
 class GptMasterClassMethodsTest < BotTest
-  def test_chat_splits_on_cache_break_and_passes_system
-    captured = nil
-    HTTParty.define_singleton_method(:post) do |_url, opts|
-      captured = JSON.parse(opts[:body])
-      FakeResponse.new(200,
-        'content' => [{ 'type' => 'text', 'text' => 'k' }],
-        'usage' => { 'input_tokens' => 1, 'output_tokens' => 1,
-                     'cache_creation_input_tokens' => 0, 'cache_read_input_tokens' => 0 })
-    end
-    begin
-      GptMaster.chat('hello', context: 'ctx', knowledge: 'kb', chat_id: -5, purpose: 'main_chat')
-    ensure
-      HTTParty.singleton_class.remove_method(:post) rescue nil
-    end
-    # System should contain "STATIC PREFIX" (before marker); user content should contain filled template
-    assert_equal 'STATIC PREFIX', captured['system'].first['text']
-    user = captured['messages'].first['content']
-    assert_includes user, 'Knowledge: kb'
-    assert_includes user, 'Context: ctx'
-    assert_includes user, 'Request: hello'
-    # And telemetry row includes chat_id + purpose
-    assert_equal -5, ApiUsage.first.chat_id
-    assert_equal 'main_chat', ApiUsage.first.purpose
-  end
-
   def test_ask_does_not_split_cache_break
     captured = nil
     HTTParty.define_singleton_method(:post) do |_url, opts|

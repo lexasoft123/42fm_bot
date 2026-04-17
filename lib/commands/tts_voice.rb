@@ -20,7 +20,7 @@ module Commands
       path = TtsService.speak(text, voice: voice_id, minus: minus, track_id: track_id)
       CommandResult.voice(path)
     rescue => e
-      LOGGER.error "#{self.class.name} failed: #{e.message}"
+      LOGGER.error "[chat=#{chat_id}] #{self.class.name} failed: #{e.message}"
       CommandResult.text('Не смог зачитать :(')
     end
   end

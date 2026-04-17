@@ -21,10 +21,6 @@ class AppConfigurator
     @logger
   end
 
-  def agent_logger
-    @agent_logger
-  end
-
   def compact_logger
     @compact_logger
   end
@@ -41,7 +37,6 @@ class AppConfigurator
     FileUtils.mkdir_p(log_dir)
 
     @logger         = make_logger(path, keep_files, max_size, level)
-    @agent_logger   = make_logger(File.join(log_dir, 'agent.log'), keep_files, max_size, Logger::DEBUG)
     @compact_logger = make_logger(File.join(log_dir, 'knowledge_compact.log'), keep_files, max_size, Logger::DEBUG)
   end
 

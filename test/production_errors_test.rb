@@ -24,7 +24,6 @@ require_relative '../lib/reply_markup_formatter'
 require_relative '../lib/message_sender'
 
 LOGGER       = Logger.new(IO::NULL) unless defined?(LOGGER)
-AGENT_LOGGER = Logger.new(IO::NULL) unless defined?(AGENT_LOGGER)
 
 # ==========================================================================
 # Helpers
@@ -35,9 +34,7 @@ module ProdTestHelpers
       radio: { 'path' => '/music', 'host_path' => nil },
       telegram: { 'token' => '123456:ABCDEF' },
       chat_gpt: {
-        'agent_mode' => true,
         'agent_prompt' => "{REQUEST} | {CONTEXT} | {KNOWLEDGE}",
-        'prompt' => '{REQUEST}',
         'context_messages_size' => 10,
         'providers' => { 'anthropic' => { 'api_key' => 'fake', 'api_type' => 'anthropic' } },
         'settings' => { 'agent' => { 'provider' => 'anthropic', 'model' => 'fake', 'max_tokens' => 100 } }
@@ -582,7 +579,7 @@ class ExtractRepliedImageTest < BotTest
     ctx = CommandContext.new(
       bot: nil, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      reply_master: OpenStruct.new,
       cmd: "бот что"
     )
     command = Commands::GptChat.new(ctx)
@@ -596,7 +593,7 @@ class ExtractRepliedImageTest < BotTest
     ctx = CommandContext.new(
       bot: nil, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      reply_master: OpenStruct.new,
       cmd: "бот что"
     )
     command = Commands::GptChat.new(ctx)
@@ -609,7 +606,7 @@ class ExtractRepliedImageTest < BotTest
     ctx = CommandContext.new(
       bot: nil, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      reply_master: OpenStruct.new,
       cmd: "бот что"
     )
     command = Commands::GptChat.new(ctx)
@@ -631,7 +628,7 @@ class ExtractRepliedImageTest < BotTest
     ctx = CommandContext.new(
       bot: bot, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      reply_master: OpenStruct.new,
       cmd: "бот что"
     )
     command = Commands::GptChat.new(ctx)
@@ -653,7 +650,7 @@ class ExtractRepliedImageTest < BotTest
     ctx = CommandContext.new(
       bot: bot, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      reply_master: OpenStruct.new,
       cmd: "бот что"
     )
     command = Commands::GptChat.new(ctx)
@@ -822,7 +819,7 @@ class GptHelpersWrapperTest < BotTest
     ctx = CommandContext.new(
       bot: nil, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      reply_master: OpenStruct.new,
       cmd: "бот привет"
     )
     command = Commands::GptChat.new(ctx)
@@ -841,7 +838,7 @@ class GptHelpersWrapperTest < BotTest
     ctx = CommandContext.new(
       bot: nil, message: msg, user: @user,
       chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new(reply_pattern_only: nil),
+      reply_master: OpenStruct.new,
       cmd: "бот привет"
     )
     command = Commands::GptChat.new(ctx)

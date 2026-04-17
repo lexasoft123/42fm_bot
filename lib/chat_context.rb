@@ -16,7 +16,7 @@ module ChatContext
       end
     }.to_json
   rescue => e
-    LOGGER.warn "#{self.class.name}#get_chat_context: #{e.message}"
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name}#get_chat_context: #{e.message}"
     ''
   end
 
@@ -28,7 +28,7 @@ module ChatContext
     return '' if facts.empty?
     facts.map { |k| { topic: k.topic, fact: k.content } }.to_json
   rescue => e
-    LOGGER.warn "#{self.class.name}#get_relevant_knowledge: #{e.message}"
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name}#get_relevant_knowledge: #{e.message}"
     ''
   end
 end

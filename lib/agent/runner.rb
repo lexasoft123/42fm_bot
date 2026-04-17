@@ -25,7 +25,7 @@ module Agent
       messages = build_initial_messages(user_content)
       tools    = ToolRegistry.definitions_for(user_role: @user.role, api_type: @api_type)
 
-      AGENT_LOGGER.info "START chat=#{@chat_id} user=#{@user.name} (#{@user.role})\nREQUEST: #{@text}"
+      alog :info, "START user=#{@user.name} (#{@user.role})\nREQUEST: #{@text}"
 
       MAX_ITERATIONS.times do |i|
         raw = new_gpt(messages, system_prompt).call_raw(tools: tools)
@@ -35,29 +35,31 @@ module Agent
 
         if tool_calls.empty?
           text = extract_text(raw) || 'жпт не жпт'
-          AGENT_LOGGER.info "DONE (#{i + 1} iteration#{i > 0 ? 's' : ''}, no tools)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
+          alog :info, "DONE (#{i + 1} iteration#{i > 0 ? 's' : ''}, no tools)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
           return text
         end
 
-        AGENT_LOGGER.info "iteration #{i + 1}: #{tool_calls.map { |t| "#{t[:name]}(#{t[:input].to_json})" }.join(', ')}"
+        alog :info, "iteration #{i + 1}: #{tool_calls.map { |t| "#{t[:name]}(#{t[:input].to_json})" }.join(', ')}"
         messages << build_assistant_message(raw)
 
         tool_calls.each do |tc|
-          LOGGER.debug "agent tool: #{tc[:name]}(#{tc[:input].to_json})"
           result = execute_tool(tc[:name], tc[:input])
-          AGENT_LOGGER.info "  #{tc[:name]} → #{result[0..300]}#{result.length > 300 ? '...' : ''}"
-          LOGGER.debug "agent result: #{result[0..300]}#{result.length > 300 ? '...' : ''}"
+          alog :info, "  #{tc[:name]} → #{result[0..300]}#{result.length > 300 ? '...' : ''}"
           messages << build_tool_result_message(tc[:id], result)
         end
       end
 
       # Safety: final call without tools to force a text response
       text = new_gpt(messages, system_prompt).call || 'жпт не жпт'
-      AGENT_LOGGER.info "DONE (#{MAX_ITERATIONS} iterations, forced final)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
+      alog :info, "DONE (#{MAX_ITERATIONS} iterations, forced final)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
       text
     end
 
     private
+
+    def alog(level, msg)
+      LOGGER.send(level, "[chat=#{@chat_id}] [AGENT] #{msg}")
+    end
 
     def new_gpt(messages, system_prompt)
       GptMaster.new(messages, setting: @setting,
@@ -67,7 +69,7 @@ module Agent
 
     # Render prompt template, split on CACHE_BREAK_MARKER, return [system_prompt, user_content].
     def build_initial_content
-      prompt_template = Settings.chat_gpt['agent_prompt'] || Settings.chat_gpt['prompt']
+      prompt_template = Settings.chat_gpt['agent_prompt']
       replied_to = @replied_to
       image      = @image
       phrase     = @phrase
@@ -93,7 +95,7 @@ module Agent
     def execute_tool(name, input)
       tool = ToolRegistry.find(name)
       unless tool
-        LOGGER.warn "#{self.class.name}: unknown tool #{name}"
+        alog :warn, "unknown tool #{name}"
         return "Ошибка: неизвестный инструмент #{name}"
       end
 
@@ -105,8 +107,7 @@ module Agent
       result = tool.handler.call(input, @tool_ctx)
       truncate(result.to_s)
     rescue => e
-      LOGGER.error "#{self.class.name} tool #{name} error: #{e.class}: #{e.message}"
-      AGENT_LOGGER.error "  #{name} ERROR: #{e.class}: #{e.message}"
+      alog :error, "tool #{name} error: #{e.class}: #{e.message}"
       "идите нахуй"
     end
 

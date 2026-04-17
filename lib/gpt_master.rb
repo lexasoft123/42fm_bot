@@ -30,7 +30,7 @@ class GptMaster
 
   def call
     body = build_body
-    LOGGER.debug("#{self.class.name}#call [#{@model}]: request #{@messages.map { |m| m[:content].to_s.length }.sum} chars")
+    LOGGER.debug("#{tag}#call [#{@model}]: request #{@messages.map { |m| m[:content].to_s.length }.sum} chars")
 
     retries = 0
     loop do
@@ -38,15 +38,15 @@ class GptMaster
       if response.code == 200
         record_usage(response)
         result = extract_content(response)
-        LOGGER.debug("#{self.class.name}#call: reply #{result.to_s.length} chars")
+        LOGGER.debug("#{tag}#call: reply #{result.to_s.length} chars")
         return result
       elsif response.code == 529 && retries < MAX_RETRIES
         retries += 1
         delay = RETRY_DELAYS[retries - 1]
-        LOGGER.warn "#{self.class.name}#call: overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
+        LOGGER.warn "#{tag}#call: overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
         sleep delay
       else
-        LOGGER.error "#{self.class.name}#call: #{response.code} #{response.parsed_response&.dig('error', 'message') || response.body}"
+        LOGGER.error "#{tag}#call: #{response.code} #{response.parsed_response&.dig('error', 'message') || response.body}"
         return 'жпт не жпт'
       end
     end
@@ -55,39 +55,28 @@ class GptMaster
   def call_raw(tools: [])
     body = build_body
     body[:tools] = attach_tool_cache_control(tools)
-    LOGGER.debug("#{self.class.name}#call_raw [#{@model}]: #{tools.size} tools")
+    LOGGER.debug("#{tag}#call_raw [#{@model}]: #{tools.size} tools")
 
     retries = 0
     loop do
       response = HTTParty.post(@api_url, body: body.to_json, headers: headers, timeout: 300)
       if response.code == 200
         record_usage(response)
-        LOGGER.debug("#{self.class.name}#call_raw: stop_reason=#{response['stop_reason'] || response.dig('choices', 0, 'finish_reason')}")
+        LOGGER.debug("#{tag}#call_raw: stop_reason=#{response['stop_reason'] || response.dig('choices', 0, 'finish_reason')}")
         return response.parsed_response
       elsif response.code == 529 && retries < MAX_RETRIES
         retries += 1
         delay = RETRY_DELAYS[retries - 1]
-        LOGGER.warn "#{self.class.name}#call_raw: overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
+        LOGGER.warn "#{tag}#call_raw: overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
         sleep delay
       else
-        LOGGER.error "#{self.class.name}#call_raw: #{response.code} #{response.parsed_response&.dig('error', 'message') || response.body}"
+        LOGGER.error "#{tag}#call_raw: #{response.code} #{response.parsed_response&.dig('error', 'message') || response.body}"
         return nil
       end
     end
   end
 
   class << self
-    def chat(text, context: '', knowledge: '', setting: 'main', chat_id: nil, user_uid: nil, purpose: 'main_chat')
-      content = Settings.chat_gpt['prompt']
-        .gsub('{REQUEST}', text)
-        .gsub('{CONTEXT}', context)
-        .gsub('{KNOWLEDGE}', knowledge)
-      system_prompt, user_content = split_cache_break(content)
-      new([{ role: 'user', content: user_content }],
-          setting: setting, chat_id: chat_id, user_uid: user_uid,
-          purpose: purpose, system_prompt: system_prompt).call
-    end
-
     def ask(text, prompt:, setting: 'main', chat_id: nil, user_uid: nil, purpose: 'ask')
       content = prompt.gsub('{REQUEST}', text)
       new([{ role: 'user', content: content }],
@@ -206,15 +195,19 @@ class GptMaster
     return unless usage
     cost = ApiUsage.compute_cost(@model, usage) rescue BigDecimal('0')
     LOGGER.info format(
-      "%s usage [%s]: in=%d out=%d cache_r=%d cache_w=%d cost=$%.4f purpose=%s chat=%s user=%s",
-      self.class.name, @model,
+      "%s usage [%s]: in=%d out=%d cache_r=%d cache_w=%d cost=$%.4f purpose=%s user=%s",
+      tag, @model,
       usage[:input], usage[:output], usage[:cache_read], usage[:cache_write],
-      (cost / 100.0).to_f, @purpose || '-', @chat_id || '-', @user_uid || '-'
+      (cost / 100.0).to_f, @purpose || '-', @user_uid || '-'
     )
     ApiUsage.record(model: @model, purpose: @purpose || 'unknown', usage: usage,
                     chat_id: @chat_id, user_uid: @user_uid)
   rescue => e
-    LOGGER.warn "#{self.class.name}: telemetry failed: #{e.class}: #{e.message}"
+    LOGGER.warn "#{tag} telemetry failed: #{e.class}: #{e.message}"
+  end
+
+  def tag
+    "[chat=#{@chat_id || '-'}] #{self.class.name}"
   end
 
   def extract_usage(response)

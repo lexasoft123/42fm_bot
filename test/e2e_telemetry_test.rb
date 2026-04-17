@@ -10,9 +10,7 @@ require_relative '../lib/settings'
 Settings.instance_variable_set(:@_settings, OpenStruct.new(
   telegram: { 'token' => '123:abc' },
   chat_gpt: {
-    'agent_mode'  => true,
     'agent_prompt' => "STATIC PREFIX BLAH\n{CACHE_BREAK}\nKnowledge: {KNOWLEDGE}\nContext: {CONTEXT}\nRequest: {REQUEST}",
-    'prompt'       => "MAIN STATIC\n{CACHE_BREAK}\nK: {KNOWLEDGE}\nC: {CONTEXT}\nQ: {REQUEST}",
     'providers' => { 'anthropic' => { 'api_key' => 'k', 'api_type' => 'anthropic' } },
     'settings'  => {
       'main'  => { 'provider' => 'anthropic', 'model' => 'claude-sonnet-4-6', 'max_tokens' => 100 },
@@ -25,7 +23,6 @@ Settings.instance_variable_set(:@_settings, OpenStruct.new(
 ))
 
 LOGGER = Logger.new(IO::NULL) unless defined?(LOGGER)
-AGENT_LOGGER = Logger.new(IO::NULL) unless defined?(AGENT_LOGGER)
 
 require 'httparty'
 require_relative '../models/api_usage'
@@ -126,32 +123,6 @@ class E2EAgentCachingTest < BotTest
     user = captured['messages'].first['content']
     refute_includes user, 'STATIC PREFIX'
     assert_includes user, 'Request: hi'
-  end
-end
-
-class E2ENonAgentChatTest < BotTest
-  def test_gpt_master_chat_records_with_main_chat_purpose_and_caches_system
-    captured = nil
-    HTTParty.define_singleton_method(:post) do |_url, opts|
-      captured = JSON.parse(opts[:body])
-      FakeResponse2.new(anthropic_body('yo', {
-        'input_tokens' => 5, 'output_tokens' => 3,
-        'cache_creation_input_tokens' => 200, 'cache_read_input_tokens' => 0,
-      }))
-    end
-    begin
-      result = GptMaster.chat('hello', context: 'C', knowledge: 'K', chat_id: -42, purpose: 'main_chat')
-      assert_equal 'yo', result
-    ensure
-      HTTParty.singleton_class.remove_method(:post)
-    end
-    assert_equal 1, ApiUsage.count
-    row = ApiUsage.first
-    assert_equal -42, row.chat_id
-    assert_equal 'main_chat', row.purpose
-    # Cache split
-    assert_equal 'ephemeral', captured['system'].first['cache_control']['type']
-    assert_includes captured['system'].first['text'], 'MAIN STATIC'
   end
 end
 
