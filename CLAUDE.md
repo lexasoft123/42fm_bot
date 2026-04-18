@@ -182,7 +182,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - Embeddings deduplication threshold is 0.92 cosine similarity — near-duplicate facts are not stored
 - Knowledge auto-compaction (`KnowledgeBase.compact!`) clusters near-dupes via stored embeddings (no API calls) and LLM-merges each cluster; triggered as a `knowledge_compact` background task when count >= adaptive threshold (`compact_at` × factor based on last run's avg cluster size); logs to `log/knowledge_compact.log`; history in `knowledge_compact_log` table
 - `бот сожми знания` (admin only) triggers compaction immediately for the current chat
-- `бот найди/ищи/пошукай` → Google search; bare `бот <text>` → GPT chat
+- All `бот <text>` requests — including search, images, gifs, horoscope — route through `GptChat` → `Agent::Runner`. The agent's `google_search` / `horoscope` / `generate_image` tools handle those intents and can compose multiple tools in one turn (e.g. "бот найди новости и нарисуй" → `google_search` then `generate_image`). There are no direct-dispatch commands for search or horoscope anymore.
 - Agent mode is the only mode: `GptChat` / `GptQuestion` always route through `Agent::Runner`, which lets GPT call bot tools (radio, weather, search, etc.) autonomously. Agent supports vision — replying to a photo with "бот ..." sends the image to Claude for recognition.
 - `GptChat` must be last `бот`-prefixed command in registry — it matches `бот <anything>`
 - `chat_gpt.providers` holds API credentials; `chat_gpt.settings` holds named configs (`main`, `agent`, `embedder`) referencing providers

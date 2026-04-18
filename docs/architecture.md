@@ -92,14 +92,10 @@ bin/bot
 │   │   ├── meta.rb
 │   │   ├── help.rb
 │   │   ├── gpt_chat.rb
-│   │   ├── horoscope_sign.rb
-│   │   ├── horoscope_general.rb
 │   │   ├── news.rb
 │   │   ├── translate.rb       # GPT-based translation (no Yandex)
 │   │   ├── dice.rb
 │   │   ├── phrase_top.rb
-│   │   ├── gif_search.rb
-│   │   ├── google_search.rb
 │   │   ├── knowledge_add.rb
 │   │   ├── knowledge_list.rb
 │   │   ├── knowledge_delete.rb
@@ -433,12 +429,15 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 ### Info / Entertainment
 | Command | Description |
 |---------|-------------|
-| `бот гороскоп [sign]` | Zodiac horoscope |
-| `бот вещай [sign]` | Erotic horoscope |
 | `бот топ` | User phrase leaderboard |
-| `бот чо нового / новости` | Latest news |
-| `бот найди/ищи/пошукай [фото] [query]` | Google image/GIF search (explicit keyword required) |
+| `бот чо нового / новости` | Latest news (RSS) |
 | `!помощь / !help` | Command list |
+
+Horoscopes, Google search, image search, gif search — no direct command.
+The agent (via `бот <anything>` → `GptChat`) handles them through its
+`horoscope`, `google_search`, and `generate_image` tools and can compose
+multiple tools in a single turn (e.g. "бот найди новости и нарисуй" →
+`google_search` then `generate_image`).
 
 ---
 
