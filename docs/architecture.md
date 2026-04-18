@@ -74,7 +74,7 @@ bin/bot
 │   ├── commands/
 │   │   ├── base.rb            # Base class: ctx accessors, helpers
 │   │   ├── registry.rb        # Ordered array of command classes
-│   │   ├── gpt_helpers.rb     # get_chat_context, save_bot_reply, get_relevant_knowledge
+│   │   ├── gpt_helpers.rb     # get_chat_context (thread-aware), get_relevant_knowledge
 │   │   ├── tts_voice.rb
 │   │   ├── bober_voice.rb
 │   │   ├── order_block.rb
@@ -208,7 +208,7 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 | Table | Key Columns |
 |-------|-------------|
 | `users` | `uid` (Telegram ID), `name`, `first_name`, `last_name`, `role` (`new`/`member`/`admin`), `last_order` |
-| `messages` | `user_uid` (nullable — nil for bot replies), `chat_id`, `body`, `role` (`user`/`bot`) |
+| `messages` | `user_uid` (nullable — nil for bot replies), `chat_id`, `body`, `role` (`user`/`bot`), `message_id` (Telegram per-chat id, nullable on legacy rows), `reply_to_message_id`, `message_thread_id` (forum topic), `forwarded` (bool, default false), `edited_at` |
 | `phrases` | `user_id`, `content` (unique) — user-submitted catchphrases |
 | `knowledge` | `topic`, `content`, `embedding` (JSON float array), `source` (`manual`/`auto`), `chat_id` (bigint, indexed) |
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
@@ -254,10 +254,11 @@ Chat commands go through `Agent::Runner` directly (which instantiates `GptMaster
 **Pricing:** `Settings.chat_gpt['pricing']` is a hash keyed by exact model id with `input`/`output`/`cache_read`/`cache_write` prices in USD per 1M tokens. Unknown models are logged and persisted with `cost_cents = 0`.
 
 ### GptHelpers — `lib/commands/gpt_helpers.rb`
-Mixed into GPT commands. Delegates to `ChatContext` module (via `include ChatContext` + `super`), auto-passing `chat_id` from the command context:
-- `get_chat_context` — delegates to `ChatContext#get_chat_context(chat_id)`
-- `save_bot_reply(text)` — stores bot reply in `messages` with `role: 'bot'`, `user_uid: nil`
+Mixed into GPT commands. Delegates to `ChatContext` module (via `include ChatContext` + `super`), auto-passing `chat_id` and the current `message_thread_id` from the command context:
+- `get_chat_context` — delegates to `ChatContext#get_chat_context(chat_id, thread_id: message.message_thread_id)`
 - `get_relevant_knowledge(query)` — delegates to `ChatContext#get_relevant_knowledge(query, chat_id)`
+
+Bot-reply persistence is no longer a command-level concern. Commands signal with `CommandResult.text(..., persist_as_bot_reply: true)`; `MessageResponder#deliver` creates the `messages` row after `MessageSender#send` returns, capturing Telegram's `message_id` and the originating `message_thread_id`.
 
 ### EmbeddingService — `lib/embedding_service.rb`
 Calls an OpenAI-compatible embeddings API (`embeddings.api_url`) to produce float vectors for text. Returns `nil` on failure. Used by `KnowledgeBase`.
@@ -284,7 +285,7 @@ Auto-compaction is triggered by `maybe_trigger_compact` after each extraction ba
 **Components:**
 - `Agent::ToolRegistry` — central registry; tools register via `ToolRegistry.register(name:, description:, parameters:, handler:, admin_only:)`
 - `Agent::Runner` — orchestrates the loop, handles provider differences (Anthropic vs OpenAI tool-calling formats), supports vision (multi-modal messages with images)
-- `lib/agent/tools/*.rb` — tool definitions (radio×8, weather, google_search, knowledge×3, horoscope, compose_song, generate_image)
+- `lib/agent/tools/*.rb` — tool definitions (radio×8, weather, google_search, knowledge×3, horoscope, compose_song, generate_image, load_messages)
 
 **Tool-calling formats:**
 - Anthropic: `tools: [{name, description, input_schema}]`, response `content: [{type: "tool_use"}]`, results as `{type: "tool_result"}`
@@ -313,9 +314,10 @@ Generic DB-backed persistent task system for long-running operations. A poller t
 - `KnowledgeCompactHandler` (`knowledge_compact`) — calls `KnowledgeBase.compact!` for the task's chat; logs to `log/knowledge_compact.log`; enqueued automatically by `maybe_trigger_compact` when entry count crosses the adaptive threshold.
 
 ### ChatContext — `lib/chat_context.rb`
-Single source of truth for chat context and knowledge lookup. Included by task handlers (directly) and by `GptHelpers` (which delegates with auto-passed `chat_id`). Provides:
-- `get_chat_context(chat_id)` — fetches recent messages (user names + bot replies) as JSON; rescues to `''` on error
+Single source of truth for chat context and knowledge lookup. Included by task handlers (directly) and by `GptHelpers` (which delegates with auto-passed `chat_id` + current `message_thread_id`). Provides:
+- `get_chat_context(chat_id, thread_id: nil)` — fetches the last N messages as a JSON array. Each entry is `{id, who, msg}` with optional `reply_to`, `thread`, `fwd`, `edited`. When `thread_id` is set, scopes the query to the same forum topic. When any in-window `reply_to` points to a `message_id` that isn't in the window, the helper fetches that one row from DB and prepends it (one-hop out-of-window backfill). Rescues to `''` on error.
 - `get_relevant_knowledge(query, chat_id)` — embeds query, retrieves top-K knowledge facts as JSON; rescues to `''` on error
+- `ChatContext.serialize_msg(row)` — module method shared by `get_chat_context` and the `load_messages` agent tool to produce the `{id, reply_to, thread, fwd, edited, who, msg}` hash from a row.
 
 ### SunoClient — `lib/suno_client.rb`
 HTTP client for the Suno AI song generation API (`sunoapi.org`), using V5 model. Key methods:

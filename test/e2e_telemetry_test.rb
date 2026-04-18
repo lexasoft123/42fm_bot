@@ -66,7 +66,7 @@ class E2EAgentCachingTest < BotTest
     Agent::Runner.new(
       text: 'hi', context: context, knowledge: knowledge,
       radio: nil, chat_id: -555, user: @user, bot: nil,
-      replied_to: nil, image: nil, phrase: nil
+      image: nil, phrase: nil
     ).run
   end
 

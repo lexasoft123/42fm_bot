@@ -15,8 +15,7 @@ module Commands
         knowledge: get_relevant_knowledge(text),
         radio: radio, chat_id: chat_id, user: user, bot: bot
       ).run
-      save_bot_reply(reply)
-      CommandResult.text("@#{user.name} #{reply}")
+      CommandResult.text("@#{user.name} #{reply}", persist_as_bot_reply: true)
     end
   end
 end

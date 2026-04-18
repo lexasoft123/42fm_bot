@@ -151,7 +151,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | Table | Columns |
 |-------|---------|
 | `users` | `uid`, `name`, `first_name`, `last_name`, `role` (`new`/`member`/`admin`), `last_order` |
-| `messages` | `user_uid` (nullable), `chat_id`, `body`, `role` (`user`/`bot`) |
+| `messages` | `user_uid` (nullable), `chat_id`, `body`, `role` (`user`/`bot`), `message_id` (Telegram per-chat id, nullable for legacy rows), `reply_to_message_id` (nullable), `message_thread_id` (forum topic, nullable), `forwarded` (bool), `edited_at` (nullable) |
 | `phrases` | `user_id`, `content` |
 | `knowledge` | `topic`, `content`, `embedding` (JSON), `source` (`manual`/`auto`), `chat_id` |
 | `knowledge_compact_log` | `chat_id`, `merged`, `removed`, `kept`, `threshold`, `created_at` — one row per compaction run |
@@ -172,7 +172,10 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - In Docker, `restart: unless-stopped` handles crashes; the bot's own rescue/retry loop also retries within the process. The `daemons` gem is only used for local non-Docker runs via `./bin/bot`.
 - `network_mode: host` is required so the container can reach Liquidsoap on `localhost:1234` (the radio telnet interface). Without it, `localhost` resolves to the container itself and the connection is refused. Since the bot exposes no inbound ports, host networking has no downside here.
 - SOCKS proxy (if enabled) patches `Net::HTTP` globally via `socksify` — applies to all outbound HTTP
-- GPT bot replies are stored in `messages` with `role: 'bot'`, `user_uid: nil`
+- GPT bot replies are stored in `messages` with `role: 'bot'`, `user_uid: nil`. Persistence happens in `MessageResponder#deliver` **after** `MessageSender#send` returns, so Telegram's `message_id` is captured for the row. Commands opt in via `CommandResult.text(..., persist_as_bot_reply: true)`.
+- Chat context JSON (`get_chat_context`) carries `id` (Telegram `message_id`), optional `reply_to`, `thread`, `fwd`, `edited`. When a reply target falls outside the 50-msg window, the helper fetches that one row from DB and prepends it. The `load_messages` agent tool lets the agent pull a wider window around any anchor `message_id`.
+- Forum topics: if the triggering message has `message_thread_id`, the bot's reply is sent with the same `message_thread_id` (lands in the user's topic, not General), and context is scoped to same-thread messages.
+- Edited messages: Telegram delivers edits via the same `Message` class with `edit_date` set. `save_message` updates the existing row in place (body + `edited_at`) and `respond` short-circuits dispatch — edits don't re-fire commands.
 - `Settings` deep-merges `settings.common.yml` (defaults) + `settings.yml` (secrets/overrides); add new top-level groups to `REQUIRED_KEYS` in `lib/settings.rb`
 - To change prompts, models, or non-secret config — edit `config/settings.common.yml` (committed). For API keys — edit `config/settings.yml` (gitignored)
 - Knowledge auto-extraction runs in a background Thread every `knowledge.extract_every` messages per chat

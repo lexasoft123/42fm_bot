@@ -96,7 +96,7 @@ module AgentTestHelpers
       radio: { 'path' => '/music', 'host_path' => nil },
       telegram: { 'token' => '123456:ABCDEF' },
       chat_gpt: {
-        'agent_prompt' => "<%- if replied_to -%>RE: <%= replied_to %>\n<%- end -%><%- if image -%>[IMAGE]\n<%- end -%><%- if phrase -%>PHRASE: <%= phrase %>\n<%- end -%>{REQUEST} | {CONTEXT} | {KNOWLEDGE}",
+        'agent_prompt' => "<%- if image -%>[IMAGE]\n<%- end -%><%- if phrase -%>PHRASE: <%= phrase %>\n<%- end -%>{REQUEST} | {CONTEXT} | {KNOWLEDGE}",
         'context_messages_size' => 10,
         'providers' => { 'anthropic' => { 'api_key' => 'fake', 'api_type' => 'anthropic' } },
         'settings' => { 'agent' => { 'provider' => 'anthropic', 'model' => 'fake', 'max_tokens' => 100 } }
@@ -109,13 +109,13 @@ module AgentTestHelpers
   def build_runner(text:, user:, **opts)
     defaults = {
       context: '[]', knowledge: '', radio: nil,
-      chat_id: 100, bot: nil, replied_to: nil, image: nil, phrase: nil
+      chat_id: 100, bot: nil, image: nil, phrase: nil
     }
     Agent::Runner.new(**defaults.merge(opts).merge(text: text, user: user))
   end
 
   def build_ctx(cmd:, user:, message: nil, bot: nil)
-    message ||= OpenStruct.new(text: cmd, message_id: 1, reply_to_message: nil)
+    message ||= OpenStruct.new(text: cmd, message_id: 1, reply_to_message: nil, message_thread_id: nil)
     CommandContext.new(
       bot: bot, message: message, user: user,
       chat_id: 100, radio: nil,
@@ -417,15 +417,6 @@ class RunnerTest < BotTest
     assert_match(/PHRASE: жирный хомяк/, content)
   end
 
-  # replied_to parameter is rendered into the prompt via ERB
-  def test_build_messages_with_replied_to
-    FakeGptMaster.enqueue(anthropic_text('ok'))
-    build_runner(text: 'agree', user: @user, replied_to: 'some earlier message').run
-    first_call = FakeGptMaster.calls.first
-    content = first_call[:messages].first[:content]
-    assert_match(/RE: some earlier message/, content)
-  end
-
   # Runner threads chat_id and purpose='agent' into every GptMaster call
   def test_runner_passes_chat_id_and_purpose_agent
     FakeGptMaster.enqueue(anthropic_text('ok'))
@@ -549,34 +540,6 @@ class GptChatTest < BotTest
     result = command.send(:maybe_save_phrase, "как дела")
     assert_nil result
     assert_equal 0, Phrase.count
-  end
-
-  # --- extract_replied_text ---
-
-  # Extracts text from the replied-to message
-  def test_extract_replied_text_from_text
-    reply_msg = OpenStruct.new(text: 'hello world', caption: nil)
-    msg = OpenStruct.new(text: 'бот что', message_id: 1, reply_to_message: reply_msg)
-    ctx = build_ctx(cmd: "бот что", user: @user, message: msg)
-    command = Commands::GptChat.new(ctx)
-    assert_equal 'hello world', command.send(:extract_replied_text)
-  end
-
-  # Falls back to caption when replied-to message has no text (e.g. photo with caption)
-  def test_extract_replied_text_from_caption
-    reply_msg = OpenStruct.new(text: nil, caption: 'photo caption')
-    msg = OpenStruct.new(text: 'бот что', message_id: 1, reply_to_message: reply_msg)
-    ctx = build_ctx(cmd: "бот что", user: @user, message: msg)
-    command = Commands::GptChat.new(ctx)
-    assert_equal 'photo caption', command.send(:extract_replied_text)
-  end
-
-  # Returns nil when message is not a reply
-  def test_extract_replied_text_nil_without_reply
-    msg = OpenStruct.new(text: 'бот что', message_id: 1, reply_to_message: nil)
-    ctx = build_ctx(cmd: "бот что", user: @user, message: msg)
-    command = Commands::GptChat.new(ctx)
-    assert_nil command.send(:extract_replied_text)
   end
 
   # --- extract_image (current message photo) ---
@@ -757,7 +720,7 @@ class GptChatExecuteTest < BotTest
 
   def default_chat_gpt
     {
-      'agent_prompt' => "<%- if replied_to -%>RE: <%= replied_to %>\n<%- end -%><%- if image -%>[IMAGE]\n<%- end -%><%- if phrase -%>PHRASE: <%= phrase %>\n<%- end -%>{REQUEST} | {CONTEXT} | {KNOWLEDGE}",
+      'agent_prompt' => "<%- if image -%>[IMAGE]\n<%- end -%><%- if phrase -%>PHRASE: <%= phrase %>\n<%- end -%>{REQUEST} | {CONTEXT} | {KNOWLEDGE}",
       'context_messages_size' => 10,
       'providers' => { 'anthropic' => { 'api_key' => 'fake', 'api_type' => 'anthropic' } },
       'settings' => { 'agent' => { 'provider' => 'anthropic', 'model' => 'fake', 'max_tokens' => 100 } }

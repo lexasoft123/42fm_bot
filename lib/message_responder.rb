@@ -79,6 +79,7 @@ class MessageResponder
   def respond
     save_message
 
+    return if message.edit_date
     return if message.date + 30 < Time.now.to_i
     process_voice_message if message.voice
 
@@ -125,7 +126,21 @@ class MessageResponder
   def deliver(result)
     return unless result
     case result.type
-    when :text    then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload, reply_to_message_id: result.meta[:reply_to_message_id]).send if result.payload
+    when :text
+      return unless result.payload
+      sent_id = MessageSender.new(
+        bot: @bot, chat: message.chat, text: result.payload,
+        reply_to_message_id: result.meta[:reply_to_message_id],
+        message_thread_id: @message.message_thread_id
+      ).send
+      if result.meta[:persist_as_bot_reply]
+        Message.create(
+          role: 'bot', chat_id: @chat_id, body: result.payload,
+          message_id: sent_id,
+          reply_to_message_id: result.meta[:reply_to_message_id],
+          message_thread_id: @message.message_thread_id
+        )
+      end
     when :sticker then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_sticker
     when :image   then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_image
     when :voice
@@ -144,8 +159,24 @@ class MessageResponder
   def save_message
     body = message.text || message.caption
     return unless body
-    Message.create(user_uid: @user.uid, chat_id: @chat_id, body: body)
-    maybe_extract_knowledge
+
+    if message.edit_date
+      existing = Message.find_by(chat_id: @chat_id, message_id: message.message_id)
+      if existing
+        existing.update(body: body, edited_at: Time.at(message.edit_date))
+        return
+      end
+    end
+
+    Message.create(
+      user_uid: @user.uid, chat_id: @chat_id, body: body,
+      message_id: message.message_id,
+      reply_to_message_id: message.reply_to_message&.message_id,
+      message_thread_id: message.message_thread_id,
+      forwarded: !message.forward_origin.nil?,
+      edited_at: (message.edit_date ? Time.at(message.edit_date) : nil)
+    )
+    maybe_extract_knowledge unless message.edit_date
   end
 
   def maybe_extract_knowledge

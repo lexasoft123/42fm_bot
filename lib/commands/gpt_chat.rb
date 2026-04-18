@@ -18,18 +18,15 @@ module Commands
       end
 
       phrase = maybe_save_phrase(text)
-      replied_to = extract_replied_text
       replied_image = extract_image || extract_replied_image
 
       reply = Agent::Runner.new(
         text: text, context: get_chat_context,
         knowledge: get_relevant_knowledge(text),
         radio: radio, chat_id: chat_id, user: user, bot: bot,
-        replied_to: replied_to, image: replied_image,
-        phrase: phrase
+        image: replied_image, phrase: phrase
       ).run
-      save_bot_reply(reply)
-      CommandResult.text(reply, reply_to_message_id: message.message_id)
+      CommandResult.text(reply, reply_to_message_id: message.message_id, persist_as_bot_reply: true)
     end
 
     private
@@ -46,11 +43,6 @@ module Commands
       Phrase.create(user: user, content: content)
       random = Phrase.order("random()").first
       random&.content
-    end
-
-    def extract_replied_text
-      return nil unless message.reply_to_message
-      message.reply_to_message.text || message.reply_to_message.caption
     end
 
     def extract_image

@@ -5,11 +5,10 @@ module Agent
     MAX_ITERATIONS = 5
     MAX_TOOL_RESULT_LENGTH = 2000
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, replied_to: nil, image: nil, phrase: nil)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, image: nil, phrase: nil)
       @text      = text
       @context   = context
       @knowledge = knowledge
-      @replied_to = replied_to
       @image     = image
       @phrase    = phrase
       @radio     = radio
@@ -70,7 +69,6 @@ module Agent
     # Render prompt template, split on CACHE_BREAK_MARKER, return [system_prompt, user_content].
     def build_initial_content
       prompt_template = Settings.chat_gpt['agent_prompt']
-      replied_to = @replied_to
       image      = @image
       phrase     = @phrase
       content = prompt_template

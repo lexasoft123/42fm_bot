@@ -15,17 +15,21 @@ class MessageSender
     @chat = options[:chat]
     @answers = options[:answers]
     @reply_to_message_id = options[:reply_to_message_id]
+    @message_thread_id = options[:message_thread_id]
     @logger = LOGGER
   end
 
   def send
     bot.api.sendChatAction(chat_id: chat.id, action: 'typing')
 
+    first_id = nil
     split_text(text).each do |chunk|
-      send_chunk(chunk)
+      resp = send_chunk(chunk)
+      first_id ||= extract_message_id(resp)
     end
 
     logger.debug "#{self.class.name}#send: '#{text.slice(0, 80)}' to #{chat.title}"
+    first_id
   end
 
   def send_sticker
@@ -68,6 +72,7 @@ class MessageSender
   def send_chunk(chunk)
     params = { chat_id: chat.id, text: sanitize_markdown(chunk), parse_mode: 'Markdown' }
     params[:reply_to_message_id] = @reply_to_message_id if @reply_to_message_id
+    params[:message_thread_id]   = @message_thread_id   if @message_thread_id
     params[:reply_markup] = reply_markup if reply_markup
 
     begin
@@ -78,6 +83,13 @@ class MessageSender
       params.delete(:parse_mode)
       bot.api.sendMessage(params)
     end
+  end
+
+  def extract_message_id(resp)
+    return nil unless resp
+    return resp.message_id if resp.respond_to?(:message_id)
+    return nil unless resp.is_a?(Hash)
+    resp.dig('result', 'message_id') || resp['message_id']
   end
 
   def split_text(text)

@@ -1,20 +1,26 @@
 module ChatContext
-  def get_chat_context(chat_id)
-    rows = Message.left_outer_joins(:user)
-      .select('users.name, users.first_name, users.last_name, messages.body, messages.role')
-      .where(chat_id: chat_id)
+  SELECT_COLS = 'messages.id, messages.message_id, messages.reply_to_message_id, ' \
+                'messages.message_thread_id, messages.forwarded, messages.edited_at, ' \
+                'messages.role, messages.body, ' \
+                'users.name, users.first_name, users.last_name'.freeze
+
+  def get_chat_context(chat_id, thread_id: nil)
+    scope = Message.left_outer_joins(:user).select(ChatContext::SELECT_COLS).where(chat_id: chat_id)
+    scope = scope.where(message_thread_id: thread_id) if thread_id
+
+    rows = scope
       .order('messages.created_at DESC')
       .limit(Settings.chat_gpt['context_messages_size'])
       .reverse
-    rows.map { |r|
-      if r.role == 'bot'
-        { who: 'Жзяцля', msg: r.body }
-      else
-        full_name = [r.first_name, r.last_name].compact.join(' ')
-        name = full_name.empty? ? r.name : "#{r.name} (#{full_name})"
-        { who: name, msg: r.body }
-      end
-    }.to_json
+      .to_a
+
+    present = rows.map(&:message_id).compact.to_set
+    missing = rows.map(&:reply_to_message_id).compact.reject { |id| present.include?(id) }.uniq
+
+    backfill = missing.empty? ? [] : Message.left_outer_joins(:user).select(ChatContext::SELECT_COLS)
+      .where(chat_id: chat_id, message_id: missing).to_a
+
+    (backfill + rows).map { |r| ChatContext.serialize_msg(r) }.to_json
   rescue => e
     LOGGER.warn "[chat=#{chat_id}] #{self.class.name}#get_chat_context: #{e.message}"
     ''
@@ -30,5 +36,22 @@ module ChatContext
   rescue => e
     LOGGER.warn "[chat=#{chat_id}] #{self.class.name}#get_relevant_knowledge: #{e.message}"
     ''
+  end
+
+  def self.serialize_msg(r)
+    h = {}
+    h[:id] = r.message_id if r.message_id
+    h[:reply_to] = r.reply_to_message_id if r.reply_to_message_id
+    h[:thread] = r.message_thread_id if r.message_thread_id
+    h[:fwd] = true if r.forwarded
+    h[:edited] = true if r.try(:edited_at)
+    if r.role == 'bot'
+      h[:who] = 'Жзяцля'
+    else
+      full_name = [r.first_name, r.last_name].compact.join(' ')
+      h[:who] = full_name.empty? ? r.name : "#{r.name} (#{full_name})"
+    end
+    h[:msg] = r.body
+    h
   end
 end

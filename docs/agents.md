@@ -217,7 +217,7 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 - **Radio TCP:** Lazy connect — first use opens the socket. Restart bot if radio server restarts.
 - **Daemons `:monitor => false`:** The bot has its own `rescue/retry` loop. Never set `:monitor => true` — it spawns a second bot process causing duplicate responses.
 - **SOCKS proxy:** Applied globally in `AppConfigurator#setup_proxy` via `socksify`. Affects all `Net::HTTP` including Telegram polling and GPT calls.
-- **Bot replies in context:** GPT chat commands store bot replies in `messages` with `role: 'bot'`, `user_uid: nil`. `get_chat_context` includes them formatted as `"Жзяцля: ..."`.
+- **Bot replies in context:** GPT chat commands signal persistence via `CommandResult.text(..., persist_as_bot_reply: true)`. `MessageResponder#deliver` writes the `messages` row **after** `MessageSender#send` returns, so Telegram's `message_id` is captured. `get_chat_context` serializes rows as JSON objects `{id, who, msg, [reply_to], [thread], [fwd], [edited]}`. When a `reply_to` target is outside the 50-msg window, it's fetched from DB and prepended. The `load_messages` agent tool lets the agent pull a window around any anchor id.
 - **Command order:** `FallbackReply` must always be last in `REGISTRY` — it matches almost anything.
 - **GptChat pattern is broad:** It can match most text — keep more specific commands above it in REGISTRY.
 - **Vision/Image recognition:** When a user replies to a photo with "бот ...", `GptChat` downloads the photo, base64-encodes it, and passes it to the agent as a multi-modal message. The agent can describe, analyze, and answer questions about images. Falls back to text-only if download fails.

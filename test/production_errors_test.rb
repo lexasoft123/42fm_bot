@@ -33,6 +33,8 @@ module ProdTestHelpers
     Settings.instance_variable_set(:@_settings, OpenStruct.new(
       radio: { 'path' => '/music', 'host_path' => nil },
       telegram: { 'token' => '123456:ABCDEF' },
+      google: [],
+      auth: { 'chats' => [] },
       chat_gpt: {
         'agent_prompt' => "{REQUEST} | {CONTEXT} | {KNOWLEDGE}",
         'context_messages_size' => 10,
@@ -832,22 +834,60 @@ class GptHelpersWrapperTest < BotTest
     refute_includes bodies, 'other chat'
   end
 
-  # GptHelpers#save_bot_reply creates message with correct chat_id
-  def test_save_bot_reply_uses_chat_id
-    msg = OpenStruct.new(text: 'бот привет', message_id: 1, reply_to_message: nil)
-    ctx = CommandContext.new(
-      bot: nil, message: msg, user: @user,
-      chat_id: 100, radio: nil,
-      reply_master: OpenStruct.new,
-      cmd: "бот привет"
-    )
-    command = Commands::GptChat.new(ctx)
-    command.send(:save_bot_reply, 'test reply')
+  # MessageResponder#deliver persists bot reply with Telegram message_id
+  def test_deliver_persists_bot_reply_with_message_id
+    require_relative '../lib/message_responder'
 
-    saved = Message.last
-    assert_equal 'bot', saved.role
+    sent_params = nil
+    api = Class.new do
+      define_method(:sendChatAction) { |**_| }
+      define_method(:sendMessage) do |params|
+        sent_params = params
+        OpenStruct.new(message_id: 4242)
+      end
+    end.new
+    fake_bot = OpenStruct.new(api: api)
+    chat = OpenStruct.new(id: 100, title: 'test')
+    msg = OpenStruct.new(
+      text: 'бот привет', message_id: 7, reply_to_message: nil,
+      message_thread_id: nil, chat: chat, date: Time.now.to_i,
+      voice: nil, caption: nil, edit_date: nil,
+      forward_origin: nil,
+      from: OpenStruct.new(id: @user.uid, username: @user.name, first_name: 'u', last_name: nil)
+    )
+    responder = MessageResponder.new(bot: fake_bot, message: msg, radio: nil)
+    result = CommandResult.text('test reply', reply_to_message_id: 7, persist_as_bot_reply: true)
+    responder.send(:deliver, result)
+
+    saved = Message.where(role: 'bot').last
     assert_equal 100, saved.chat_id
     assert_equal 'test reply', saved.body
+    assert_equal 4242, saved.message_id
+    assert_equal 7, saved.reply_to_message_id
+    assert_equal 7, sent_params[:reply_to_message_id]
+  end
+
+  # save_message updates existing row in place on edit_date; no duplicate
+  def test_save_message_updates_existing_on_edit
+    require_relative '../lib/message_responder'
+
+    Message.create!(user_uid: @user.uid, chat_id: 100, body: 'original', message_id: 1000)
+    start_count = Message.count
+
+    edited = OpenStruct.new(
+      text: 'edited body', caption: nil, message_id: 1000,
+      reply_to_message: nil, message_thread_id: nil,
+      edit_date: Time.now.to_i, date: Time.now.to_i - 60,
+      forward_origin: nil, voice: nil, chat: OpenStruct.new(id: 100, title: 't'),
+      from: OpenStruct.new(id: @user.uid, username: @user.name, first_name: 'u', last_name: nil)
+    )
+    responder = MessageResponder.new(bot: nil, message: edited, radio: nil)
+    responder.send(:save_message)
+
+    assert_equal start_count, Message.count
+    row = Message.find_by(chat_id: 100, message_id: 1000)
+    assert_equal 'edited body', row.body
+    refute_nil row.edited_at
   end
 end
 

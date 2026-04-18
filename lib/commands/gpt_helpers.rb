@@ -8,15 +8,11 @@ module Commands
 
     # Convenience wrappers that pass chat_id from command context
     def get_chat_context
-      super(chat_id)
+      super(chat_id, thread_id: message.message_thread_id)
     end
 
     def get_relevant_knowledge(query)
       super(query, chat_id)
-    end
-
-    def save_bot_reply(text)
-      Message.create(role: 'bot', chat_id: chat_id, body: text)
     end
   end
 end
