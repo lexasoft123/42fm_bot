@@ -15,7 +15,11 @@ Agent::ToolRegistry.register(
       })
       doc = Nokogiri::HTML(response.body)
       doc.search('script, style, nav, header, footer, aside, [class*="cookie"], [class*="banner"]').remove
-      text = doc.text.gsub(/[ \t]+/, ' ').gsub(/\n{3,}/, "\n\n").strip
+      text = doc.text
+        .gsub(/[ \t]+/, ' ')        # collapse horizontal whitespace
+        .gsub(/^[ \t]*\n/, '')      # drop whitespace-only lines
+        .gsub(/\n{3,}/, "\n\n")     # cap consecutive newlines at 2
+        .strip
       text[0..1900]
     rescue => e
       "Не удалось загрузить страницу: #{e.message}"

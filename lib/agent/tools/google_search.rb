@@ -65,7 +65,11 @@ Agent::ToolRegistry.register(
       end
     else
       results.each_with_index.map { |r, i|
-        "#{i+1}. #{r[:title]}\n   #{r[:snippet]}\n   #{r[:link]}"
+        lines = ["#{i + 1}. #{r[:title]}"]
+        snippet = r[:snippet].to_s.gsub(/\s+/, ' ').strip
+        lines << "   #{snippet}" unless snippet.empty?
+        lines << "   #{r[:link]}"
+        lines.join("\n")
       }.join("\n\n")
     end
   }
