@@ -226,7 +226,7 @@ class SunoTaskHandler
 
     clips.each_with_index do |clip, i|
       filename = build_filename(performer, clip[:title] || title, i + 1, clips.size)
-      tmp = download_to_tempfile(clip[:audio_url], filename)
+      tmp = download_to_tempfile(clip[:audio_url], filename, chat_id: chat_id)
       next unless tmp
 
       temp_files << { file: tmp, name: filename }
@@ -238,7 +238,12 @@ class SunoTaskHandler
       media << entry
     end
 
-    return if media.empty?
+    if media.empty?
+      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_audio: no clips downloaded — skipping send"
+      return
+    end
+
+    LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: sendMediaGroup → #{media.size} clips (#{temp_files.sum { |tf| File.size(tf[:file].path) }} bytes total)"
 
     retries = 0
     result = begin
@@ -247,19 +252,28 @@ class SunoTaskHandler
       api.sendMediaGroup(**send_params)
     rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed => e
       retries += 1
-      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendMediaGroup retry #{retries}: #{e.class}"
-      sleep 3 and retry if retries <= 3
+      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendMediaGroup retry #{retries}: #{e.class}: #{e.message}"
+      if retries <= 3
+        sleep 3
+        retry
+      end
+      LOGGER.error "[chat=#{chat_id}] #{self.class.name} sendMediaGroup gave up after #{retries} retries"
+      nil
     ensure
       temp_files.each { |tf| tf[:file].close; tf[:file].unlink rescue nil }
     end
 
-    return unless params['lyrics']
-
     messages = result.is_a?(Hash) ? result['result'] : result
     msg_id = messages&.first&.respond_to?(:message_id) ? messages.first.message_id : messages&.first&.dig('message_id')
+    LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: sendMediaGroup ok, first_message_id=#{msg_id.inspect}"
+
+    return unless params['lyrics']
+
+    LOGGER.debug "[chat=#{chat_id}] #{self.class.name} send_audio: sending lyrics (#{params['lyrics'].to_s.length} chars, reply_to=#{msg_id.inspect})"
     api.sendMessage(chat_id: chat_id, text: params['lyrics'], reply_to_message_id: msg_id)
+    LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: lyrics sent"
   rescue => e
-    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_audio failed: #{e.class}: #{e.message}"
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_audio failed: #{e.class}: #{e.message} (#{e.backtrace&.first})"
   end
 
   def build_filename(performer, title, index, total)
@@ -269,17 +283,21 @@ class SunoTaskHandler
     "#{name}.mp3"
   end
 
-  def download_to_tempfile(url, filename)
+  def download_to_tempfile(url, filename, chat_id: nil)
     response = HTTParty.get(url, timeout: 60)
-    return nil unless response.code == 200
+    unless response.code == 200
+      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} download_to_tempfile: HTTP #{response.code} for #{url}"
+      return nil
+    end
 
     tmp = Tempfile.new(['suno_', '.mp3'], '/tmp')
     tmp.binmode
     tmp.write(response.body)
     tmp.rewind
+    LOGGER.debug "[chat=#{chat_id}] #{self.class.name} download_to_tempfile: #{response.body.bytesize} bytes → #{filename}"
     tmp
   rescue => e
-    LOGGER.warn "#{self.class.name} download failed: #{e.class}: #{e.message}"
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} download_to_tempfile failed: #{e.class}: #{e.message}"
     nil
   end
 end
