@@ -417,6 +417,50 @@ class RunnerTest < BotTest
     assert_match(/PHRASE: жирный хомяк/, content)
   end
 
+  # --- ERB injection regression ---
+  # User-controlled strings (text/context/knowledge) MUST NOT be evaluated as ERB.
+  # Previously the template was built by substituting user text first, then calling
+  # ERB.result — which let a user send `бот <%= exec('pwd') %>` and run arbitrary
+  # Ruby in the bot process. Fix: render ERB on the pristine template, then substitute.
+
+  def test_user_text_with_erb_tags_is_not_evaluated
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    payload = 'hello <%= 7 * 7 %> world'
+    build_runner(text: payload, user: @user).run
+    first_call = FakeGptMaster.calls.first
+    content = first_call[:messages].first[:content]
+    assert_includes content, '<%= 7 * 7 %>',  'raw ERB tag must survive verbatim'
+    refute_includes content, '49', 'ERB must not evaluate arithmetic in user text'
+  end
+
+  def test_user_text_with_dangerous_erb_does_not_raise
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    # A payload that previously raised NameError (or worse — actually executed).
+    payload = "бот <%= exec('uname -a') %> <% Date.new %>"
+    result = build_runner(text: payload, user: @user).run
+    assert_equal 'ok', result
+    first_call = FakeGptMaster.calls.first
+    content = first_call[:messages].first[:content]
+    assert_includes content, "<%= exec('uname -a') %>"
+    assert_includes content, '<% Date.new %>'
+  end
+
+  def test_context_with_erb_tags_is_not_evaluated
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    context_json = '[{"who":"alice","msg":"hi <%= File.read(\'/etc/passwd\') %>"}]'
+    build_runner(text: 'normal', user: @user, context: context_json).run
+    content = FakeGptMaster.calls.first[:messages].first[:content]
+    assert_includes content, "File.read('/etc/passwd')"
+  end
+
+  def test_knowledge_with_erb_tags_is_not_evaluated
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    knowledge = '[{"topic":"x","fact":"y <%= system(\'rm -rf /tmp\') %>"}]'
+    build_runner(text: 'normal', user: @user, knowledge: knowledge).run
+    content = FakeGptMaster.calls.first[:messages].first[:content]
+    assert_includes content, "system('rm -rf /tmp')"
+  end
+
   # Runner threads chat_id and purpose='agent' into every GptMaster call
   def test_runner_passes_chat_id_and_purpose_agent
     FakeGptMaster.enqueue(anthropic_text('ok'))

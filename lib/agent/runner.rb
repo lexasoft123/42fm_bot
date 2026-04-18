@@ -67,15 +67,16 @@ module Agent
     end
 
     # Render prompt template, split on CACHE_BREAK_MARKER, return [system_prompt, user_content].
+    # ERB is rendered on the pristine template; user-controlled strings (request/context/knowledge)
+    # are substituted *after* ERB evaluation so they can't be interpreted as template tags.
     def build_initial_content
-      prompt_template = Settings.chat_gpt['agent_prompt']
       image      = @image
       phrase     = @phrase
-      content = prompt_template
-        .gsub('{REQUEST}', @text)
-        .gsub('{CONTEXT}', @context)
-        .gsub('{KNOWLEDGE}', @knowledge)
-      content = ERB.new(content, trim_mode: '-').result(binding)
+      rendered = ERB.new(Settings.chat_gpt['agent_prompt'], trim_mode: '-').result(binding)
+      content = rendered
+        .gsub('{REQUEST}')   { @text.to_s }
+        .gsub('{CONTEXT}')   { @context.to_s }
+        .gsub('{KNOWLEDGE}') { @knowledge.to_s }
       GptMaster.split_cache_break(content)
     end
 
