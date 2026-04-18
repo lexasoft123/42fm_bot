@@ -25,6 +25,10 @@ class AppConfigurator
     @compact_logger
   end
 
+  def gpt_logger
+    @gpt_logger
+  end
+
   private
 
   def setup_logging
@@ -38,11 +42,22 @@ class AppConfigurator
 
     @logger         = make_logger(path, keep_files, max_size, level)
     @compact_logger = make_logger(File.join(log_dir, 'knowledge_compact.log'), keep_files, max_size, Logger::DEBUG)
+    @gpt_logger     = make_gpt_logger(File.join(log_dir, 'gpt.log'))
   end
 
   def make_logger(path, keep_files, max_size, level)
     l = Logger.new(path, keep_files, max_size)
     l.level = level
+    l
+  end
+
+  # NDJSON dump of every LLM request+response (GptMaster writes here).
+  # One JSON object per line, no logger metadata (timestamp is in the payload).
+  # Rotation: 5 files × 50MB = 250MB cap. Toggle via Settings.chat_gpt['debug_log'].
+  def make_gpt_logger(path)
+    l = Logger.new(path, 5, 50 * 1024 * 1024)
+    l.level = Logger::INFO
+    l.formatter = ->(_sev, _ts, _prog, msg) { "#{msg}\n" }
     l
   end
 

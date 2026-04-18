@@ -24,7 +24,10 @@ docker compose logs -f         # tail logs
 docker compose down            # stop
 ```
 
-Logs are bind-mounted to `./log/bot.log` on the host — everything app-level goes in this single file. Per-chat lines are prefixed `[chat=<id>]` (agent turns add `[AGENT]`), so a single chat's timeline is greppable with `grep 'chat=-1001273...' log/bot.log`.
+Logs are bind-mounted to `./log/` on the host. Three files:
+- **`bot.log`** — app output, one line per event. Per-chat lines are prefixed `[chat=<id>]` (agent turns add `[AGENT]`). A single chat's timeline is greppable with `grep 'chat=-1001273...' log/bot.log`.
+- **`gpt.log`** — NDJSON dump of every LLM request+response (system prompt, messages, tools, raw response, stop_reason, usage). One JSON object per line, rotation 5×50MB. Useful for reconstructing exactly what the model saw and said when debugging odd replies. Query with `jq`, e.g. `jq 'select(.chat==-1001273623296 and .purpose=="agent")' log/gpt.log`. Disable via `Settings.chat_gpt['debug_log'] = false`.
+- **`knowledge_compact.log`** — per-run knowledge-compaction traces.
 
 ## Running the Bot (local, non-Docker)
 

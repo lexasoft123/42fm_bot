@@ -1,4 +1,5 @@
 require 'httparty'
+require 'json'
 
 class GptMaster
   MAX_RETRIES = 3
@@ -38,7 +39,9 @@ class GptMaster
       if response.code == 200
         record_usage(response)
         result = extract_content(response)
-        LOGGER.debug("#{tag}#call: reply #{result.to_s.length} chars")
+        stop = response['stop_reason'] || response.dig('choices', 0, 'finish_reason')
+        LOGGER.debug("#{tag}#call: stop=#{stop} reply=#{result.to_s.length} chars")
+        dump_gpt(method: 'call', body: body, response: response.parsed_response, stop: stop)
         return result
       elsif response.code == 529 && retries < MAX_RETRIES
         retries += 1
@@ -62,7 +65,9 @@ class GptMaster
       response = HTTParty.post(@api_url, body: body.to_json, headers: headers, timeout: 300)
       if response.code == 200
         record_usage(response)
-        LOGGER.debug("#{tag}#call_raw: stop_reason=#{response['stop_reason'] || response.dig('choices', 0, 'finish_reason')}")
+        stop = response['stop_reason'] || response.dig('choices', 0, 'finish_reason')
+        LOGGER.debug("#{tag}#call_raw: stop_reason=#{stop}")
+        dump_gpt(method: 'call_raw', body: body, response: response.parsed_response, stop: stop)
         return response.parsed_response
       elsif response.code == 529 && retries < MAX_RETRIES
         retries += 1
@@ -208,6 +213,33 @@ class GptMaster
 
   def tag
     "[chat=#{@chat_id || '-'}] #{self.class.name}"
+  end
+
+  # NDJSON dump of the full request + response to GPT_LOGGER (log/gpt.log).
+  # Gated on Settings.chat_gpt['debug_log'] (default true). Safe no-op if
+  # GPT_LOGGER isn't set (e.g. during tests / standalone scripts).
+  def dump_gpt(method:, body:, response:, stop:)
+    return unless defined?(GPT_LOGGER) && GPT_LOGGER
+    return if Settings.chat_gpt.key?('debug_log') && !Settings.chat_gpt['debug_log']
+    usage = extract_usage(response) || {}
+    GPT_LOGGER.info JSON.dump(
+      ts:      Time.now.utc.iso8601,
+      chat:    @chat_id,
+      user:    @user_uid,
+      purpose: @purpose,
+      method:  method,
+      model:   @model,
+      stop:    stop,
+      usage:   usage,
+      request: {
+        system:   body[:system],
+        messages: body[:messages],
+        tools:    body[:tools]&.map { |t| t.is_a?(Hash) ? (t[:name] || t['name']) : t }
+      },
+      response: response
+    )
+  rescue => e
+    LOGGER.warn "#{tag} gpt dump failed: #{e.class}: #{e.message}"
   end
 
   def extract_usage(response)

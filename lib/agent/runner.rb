@@ -4,6 +4,7 @@ module Agent
   class Runner
     MAX_ITERATIONS = 5
     MAX_TOOL_RESULT_LENGTH = 2000
+    TOOL_RESULT_PREVIEW_CHARS = 600
 
     def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, image: nil, phrase: nil)
       @text      = text
@@ -30,28 +31,52 @@ module Agent
         raw = new_gpt(messages, system_prompt).call_raw(tools: tools)
         return 'жпт не жпт' unless raw
 
+        stop       = extract_stop_reason(raw)
         tool_calls = extract_tool_calls(raw)
 
         if tool_calls.empty?
           text = extract_text(raw) || 'жпт не жпт'
-          alog :info, "DONE (#{i + 1} iteration#{i > 0 ? 's' : ''}, no tools)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
+          alog :info, "DONE (#{i + 1} iteration#{i > 0 ? 's' : ''}, stop=#{stop}, no tools)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
           return text
         end
 
-        alog :info, "iteration #{i + 1}: #{tool_calls.map { |t| "#{t[:name]}(#{t[:input].to_json})" }.join(', ')}"
+        alog :info, "iteration #{i + 1} [stop=#{stop}]: #{tool_calls.map { |t| "#{t[:name]}(#{t[:input].to_json})" }.join(', ')}"
         messages << build_assistant_message(raw)
 
         tool_calls.each do |tc|
           result = execute_tool(tc[:name], tc[:input])
-          alog :info, "  #{tc[:name]} → #{result[0..300]}#{result.length > 300 ? '...' : ''}"
+          alog :info, "  #{tc[:name]} → #{result[0..TOOL_RESULT_PREVIEW_CHARS]}#{result.length > TOOL_RESULT_PREVIEW_CHARS ? '...' : ''}"
           messages << build_tool_result_message(tc[:id], result)
         end
       end
 
-      # Safety: final call without tools to force a text response
-      text = new_gpt(messages, system_prompt).call || 'жпт не жпт'
+      # Safety: MAX_ITERATIONS hit without the agent producing a final text response.
+      # Append an explicit instruction, then call without tools so the model must
+      # commit to text using whatever information it has already gathered.
+      alog :warn, "MAX_ITERATIONS (#{MAX_ITERATIONS}) reached, forcing no-tool finalizer"
+      messages << build_tool_budget_instruction
+      text = new_gpt(messages, system_prompt).call
+      if text.nil? || text.strip.empty?
+        alog :warn, "forced-final produced empty reply even with explicit instruction — falling back to stub"
+        text = 'жпт не жпт'
+      end
       alog :info, "DONE (#{MAX_ITERATIONS} iterations, forced final)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
       text
+    end
+
+    # Synthetic user turn appended before the forced-final call so the model
+    # stops fishing for more tools and commits to a text reply with whatever
+    # it has already gathered.
+    def build_tool_budget_instruction
+      msg = 'Лимит вызова инструментов исчерпан. Дай пользователю текстовый ответ ' \
+            'по-русски прямо сейчас, используя только уже собранную информацию. ' \
+            'Не вызывай больше инструменты. Если данных мало — ответь честно по ' \
+            'тому, что есть, добавив свою оценку или шутку.'
+      if anthropic?
+        { role: 'user', content: [{ type: 'text', text: msg }] }
+      else
+        { role: 'user', content: msg }
+      end
     end
 
     private
@@ -139,6 +164,14 @@ module Agent
         text_block&.dig('text')
       else
         raw.dig('choices', 0, 'message', 'content')
+      end
+    end
+
+    def extract_stop_reason(raw)
+      if anthropic?
+        raw['stop_reason']
+      else
+        raw.dig('choices', 0, 'finish_reason')
       end
     end
 
