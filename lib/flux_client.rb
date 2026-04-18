@@ -7,13 +7,22 @@ class FluxClient
     @model    = Settings.flux['model'] || 'flux-2-pro'
   end
 
-  # Submit image generation. Returns task_id string.
-  def submit(prompt:, width: 1024, height: 1024)
-    LOGGER.debug "#{self.class.name}: submitting prompt (#{prompt.length} chars) to #{@model}"
+  # Submit image generation or editing. Returns task_id string.
+  # When input_image is provided (base64, without data-URI prefix), flux-2-pro switches
+  # to image-edit mode and will size the output to match the input unless width/height forced.
+  def submit(prompt:, input_image: nil, width: 1024, height: 1024)
+    body = { prompt: prompt, safety_tolerance: 5, output_format: 'jpeg' }
+    if input_image
+      body[:input_image] = "data:image/jpeg;base64,#{input_image}"
+      # Omit explicit width/height — let FLUX keep the input dimensions.
+      LOGGER.debug "#{self.class.name}: submitting edit (prompt #{prompt.length} chars, image #{input_image.bytesize} b64-bytes) to #{@model}"
+    else
+      body[:width] = width
+      body[:height] = height
+      LOGGER.debug "#{self.class.name}: submitting prompt (#{prompt.length} chars) to #{@model}"
+    end
     resp = HTTParty.post("#{@base_url}/v1/#{@model}",
-      body: { prompt: prompt, width: width, height: height,
-              safety_tolerance: 5, output_format: 'jpeg' }.to_json,
-      headers: headers, timeout: 30)
+      body: body.to_json, headers: headers, timeout: 60)
     raise "Flux submit failed: #{resp.code} #{resp.body}" unless resp.code == 200
     resp.parsed_response['id'] || raise("No id in response")
   end

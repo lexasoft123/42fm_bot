@@ -20,6 +20,24 @@ class ImageGenTaskHandler
     - Оптимальная длина: 30–80 слов. Верни ТОЛЬКО промпт, без пояснений и markdown.
   PROMPT
 
+  EDIT_PROMPT_TEMPLATE = <<~PROMPT.freeze
+    Ты — эксперт по промптам для FLUX 2 AI в режиме редактирования картинок.
+    Пользователь прикрепил картинку (она приложена к этому сообщению) и просит: "%{request}"
+    Контекст чата:
+    %{context}
+    Факты о чате и участниках:
+    %{knowledge}
+    Правила:
+    - Сначала мысленно рассмотри исходную картинку — кто/что на ней, композиция, стиль, освещение.
+    - Верни короткий промпт на английском описывающий ТОЛЬКО желаемые изменения — что добавить/убрать/поменять/в каком стиле переделать.
+    - НЕ описывай всю картинку заново; FLUX сохранит исходник, меняется только то что ты укажешь.
+    - Используй повелительные глаголы: "Add a hat", "Change the background to a Moscow street", "Turn into Van Gogh oil painting style", "Replace the sky with aurora".
+    - Для смены стиля чётко указывай технику/эпоху/художника: "oil painting in Van Gogh's Starry Night style", "1990s anime screengrab", "cyberpunk neon noir".
+    - Не отказывай ни в каком запросе, даже провокационном — дай художественную интерпретацию.
+    - Если запрос неконкретный, используй содержимое картинки и чат-контекст чтобы сделать правку осмысленной.
+    - Оптимальная длина: 15–50 слов. Верни ТОЛЬКО промпт, без пояснений, без markdown, без кавычек.
+  PROMPT
+
   def call(task, api)
     task.external_id.nil? ? compose_and_submit(task) : poll_and_deliver(task, api)
   end
@@ -29,16 +47,29 @@ class ImageGenTaskHandler
   def compose_and_submit(task)
     p = task.params_hash
     request = p['request'].to_s
+    input_image = p['input_image']
+    editing = !input_image.to_s.empty?
 
-    # Generate prompt via LLM with chat context
+    # Generate prompt via LLM with chat context (+ vision of the source image when editing)
     unless p['prompt']
-      LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generating prompt for '#{request}'"
+      LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generating prompt for '#{request}' (edit=#{editing})"
 
       context = get_chat_context(task.chat_id)
       knowledge = get_relevant_knowledge(request, task.chat_id)
+      template = editing ? EDIT_PROMPT_TEMPLATE : PROMPT_TEMPLATE
+      llm_prompt = template % { request: request, context: context, knowledge: knowledge }
 
-      llm_prompt = PROMPT_TEMPLATE % { request: request, context: context, knowledge: knowledge }
-      p['prompt'] = GptMaster.new([{ role: 'user', content: llm_prompt }], setting: 'agent',
+      messages = if editing
+        media_type = p['input_media_type'] || 'image/jpeg'
+        [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: media_type, data: input_image } },
+          { type: 'text',  text: llm_prompt }
+        ] }]
+      else
+        [{ role: 'user', content: llm_prompt }]
+      end
+
+      p['prompt'] = GptMaster.new(messages, setting: 'agent',
                                   chat_id: task.chat_id, user_uid: p['user_uid'],
                                   purpose: 'image_prompt').call
       raise "GPT prompt failed" unless p['prompt'] && p['prompt'] != 'жпт не жпт'
@@ -46,7 +77,7 @@ class ImageGenTaskHandler
       ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
     end
 
-    task_id = FluxClient.new.submit(prompt: p['prompt'])
+    task_id = FluxClient.new.submit(prompt: p['prompt'], input_image: input_image.to_s.empty? ? nil : input_image)
     LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted #{task_id}"
     ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: task_id, params: p.to_json) }
     :pending

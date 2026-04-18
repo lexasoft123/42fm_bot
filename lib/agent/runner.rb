@@ -17,7 +17,7 @@ module Agent
       @user      = user
       @setting   = 'agent'
       @api_type  = GptMaster.resolve_setting(@setting)[:api_type]
-      @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, bot: bot }
+      @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, bot: bot, image: image }
     end
 
     def run

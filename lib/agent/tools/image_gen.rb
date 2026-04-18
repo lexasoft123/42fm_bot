@@ -1,19 +1,30 @@
 Agent::ToolRegistry.register(
   name: 'generate_image',
-  description: 'Создаёт оригинальную картинку через FLUX AI (нейросетевая генерация с нуля). Используй только когда пользователь просит нарисовать/создать что-то новое. НЕ используй для поиска существующих фото, мемов или картинок — для этого есть google_search.',
+  description: 'Создаёт картинку через FLUX AI. Два режима:
+1) Text-to-image (по умолчанию) — генерация с нуля по тексту.
+2) Image editing — если пользователь прикрепил/ответил на фото и просит его изменить/дорисовать/переделать/применить стиль, укажи edit_source=true и картинка пользователя будет использована как исходник. В prompt опиши что именно изменить.
+НЕ используй для поиска существующих изображений — для этого google_search.',
   parameters: {
-    'prompt' => { type: 'string', description: 'Запрос пользователя на его ОРИГИНАЛЬНОМ языке — не переводи, передай как есть. Если пользователь написал по-русски — передай по-русски.' },
+    'prompt'      => { type: 'string',  description: 'Что нарисовать (text-to-image) или что изменить (editing). На оригинальном языке пользователя — не переводи.' },
+    'edit_source' => { type: 'boolean', description: 'true если редактируем фото из сообщения пользователя; false/опущен — генерация с нуля', optional: true },
   },
   handler: ->(args, ctx) {
     if RateLimiter.exceeded?(ctx[:chat_id], 'image')
       next RateLimiter.reply(ctx[:chat_id], 'image')
     end
+    edit = args['edit_source'] && ctx[:image].is_a?(Hash) && ctx[:image][:data]
+    params = { request: args['prompt'], user_uid: ctx[:user]&.uid }
+    if edit
+      params[:input_image]      = ctx[:image][:data]
+      params[:input_media_type] = ctx[:image][:media_type]
+    end
     BackgroundTask.create!(
       task_type: 'image_generate',
       chat_id: ctx[:chat_id],
       max_attempts: 20,
-      params: { request: args['prompt'], user_uid: ctx[:user]&.uid }.to_json
+      params: params.to_json
     )
-    "Картинка поставлена в очередь генерации и скоро будет отправлена в чат"
+    edit ? 'Редактирование картинки поставлено в очередь и скоро будет отправлено в чат' \
+         : 'Картинка поставлена в очередь генерации и скоро будет отправлена в чат'
   }
 )
