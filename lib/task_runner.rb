@@ -1,5 +1,5 @@
 class TaskRunner
-  POLL_INTERVAL = 30
+  POLL_INTERVAL = 15
 
   @handlers = {}
   @thread = nil

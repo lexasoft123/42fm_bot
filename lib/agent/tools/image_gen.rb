@@ -24,7 +24,7 @@ Agent::ToolRegistry.register(
     BackgroundTask.create!(
       task_type: 'image_generate',
       chat_id: ctx[:chat_id],
-      max_attempts: 20,
+      max_attempts: 60,
       params: params.to_json
     )
     edit ? 'Редактирование картинки поставлено в очередь и скоро будет отправлено в чат' \
