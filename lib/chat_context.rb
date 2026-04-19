@@ -5,8 +5,13 @@ module ChatContext
                 'users.name, users.first_name, users.last_name'.freeze
 
   def get_chat_context(chat_id, thread_id: nil)
+    # thread_id kept for signature stability; not used as a filter.
+    # Telegram auto-tags any reply in a non-forum supergroup with the root
+    # message_id as thread_id, which is reply-chain metadata — not a topic
+    # marker. Filtering on it collapses context to a single reply thread.
+    # The thread field is still surfaced via serialize_msg for the LLM to use.
+    _ = thread_id
     scope = Message.left_outer_joins(:user).select(ChatContext::SELECT_COLS).where(chat_id: chat_id)
-    scope = scope.where(message_thread_id: thread_id) if thread_id
 
     rows = scope
       .order('messages.created_at DESC')

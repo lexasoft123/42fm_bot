@@ -115,23 +115,57 @@ class ImageGenTaskHandler
   def send_photo(api, chat_id, url, caption)
     caption = caption[0..1020] + "..." if caption.length > 1024
     tmp = download_to_tempfile(url)
-    unless tmp
+    response = if tmp
+      retries = 0
+      begin
+        api.sendPhoto(chat_id: chat_id, photo: Faraday::UploadIO.new(tmp.path, 'image/jpeg', 'image.jpg'), caption: caption)
+      rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed => e
+        retries += 1
+        LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendPhoto retry #{retries}: #{e.class}"
+        if retries <= 3
+          sleep 3
+          retry
+        end
+        nil
+      ensure
+        tmp.close
+        tmp.unlink rescue nil
+      end
+    else
       LOGGER.warn "[chat=#{chat_id}] #{self.class.name}: download failed, falling back to URL"
       api.sendPhoto(chat_id: chat_id, photo: url, caption: caption)
-      return
     end
 
-    retries = 0
-    begin
-      api.sendPhoto(chat_id: chat_id, photo: Faraday::UploadIO.new(tmp.path, 'image/jpeg', 'image.jpg'), caption: caption)
-    rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed => e
-      retries += 1
-      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendPhoto retry #{retries}: #{e.class}"
-      sleep 3 and retry if retries <= 3
-    ensure
-      tmp.close
-      tmp.unlink rescue nil
+    persist_bot_media_row(chat_id, response, caption) if response
+  end
+
+  # Save the sent photo as a bot Message row so user replies pointing at the
+  # photo's Telegram message_id can resolve to a known row (fixes "reply_to
+  # points at an id we never indexed" context gaps).
+  def persist_bot_media_row(chat_id, response, caption)
+    msg_id = extract_message_id(response)
+    return unless msg_id
+    thread_id = extract_message_thread_id(response)
+    ActiveRecord::Base.connection_pool.with_connection do
+      Message.create(
+        role: 'bot', chat_id: chat_id, body: caption,
+        message_id: msg_id, message_thread_id: thread_id
+      )
     end
+  rescue => e
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} persist_bot_media_row failed: #{e.class}: #{e.message}"
+  end
+
+  def extract_message_id(resp)
+    return resp.message_id if resp.respond_to?(:message_id)
+    return nil unless resp.is_a?(Hash)
+    resp.dig('result', 'message_id') || resp['message_id']
+  end
+
+  def extract_message_thread_id(resp)
+    return resp.message_thread_id if resp.respond_to?(:message_thread_id)
+    return nil unless resp.is_a?(Hash)
+    resp.dig('result', 'message_thread_id') || resp['message_thread_id']
   end
 
   def download_to_tempfile(url)

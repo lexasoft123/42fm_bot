@@ -12,15 +12,14 @@ Agent::ToolRegistry.register(
     count     = args['count'].to_i
     count     = count < 1 ? 10 : [count, 50].min
 
-    anchor_min = Message.where(chat_id: ctx[:chat_id], message_id: anchor_id)
-      .pluck(:created_at, :message_thread_id).first
-    next "Сообщение с id=#{anchor_id} не найдено" unless anchor_min
-    anchor_ts, anchor_thread = anchor_min
+    anchor_ts = Message.where(chat_id: ctx[:chat_id], message_id: anchor_id).pluck(:created_at).first
+    unless anchor_ts
+      next "Сообщение с id=#{anchor_id} не найдено в базе — возможно это картинка/аудио/стикер без сохранённого текста, или сообщение пришло до того как бот начал сохранять message_id. Посмотри ближайшие сообщения в контексте по времени."
+    end
 
     scope = Message.left_outer_joins(:user)
       .select(ChatContext::SELECT_COLS + ', messages.created_at')
       .where(chat_id: ctx[:chat_id])
-    scope = scope.where(message_thread_id: anchor_thread) if anchor_thread
 
     rows = case direction
     when 'before'

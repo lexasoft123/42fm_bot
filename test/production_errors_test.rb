@@ -474,6 +474,72 @@ class SunoFilenameTest < BotTest
     name = handler.send(:build_filename, '', 'Just Title', 1, 1)
     assert_equal 'Just_Title.mp3', name
   end
+
+  # Regression: each clip from sendMediaGroup must be saved as a bot Message row
+  # so later user replies pointing at the clip's message_id resolve cleanly.
+  def test_persist_bot_media_rows_creates_row_per_clip
+    handler = SunoTaskHandler.new
+    messages = [OpenStruct.new(message_id: 1001, message_thread_id: nil),
+                OpenStruct.new(message_id: 1002, message_thread_id: 50)]
+    before = Message.count
+    handler.send(:persist_bot_media_rows, -100, messages, 'Прогулки', { 'lyrics' => 'x' })
+    assert_equal before + 2, Message.count
+    rows = Message.where(chat_id: -100).order(:message_id).last(2)
+    assert_equal 'bot', rows.first.role
+    assert_equal 1001, rows.first.message_id
+    assert_equal 1002, rows.last.message_id
+    assert_equal 50,   rows.last.message_thread_id
+    assert_match(/Прогулки/, rows.first.body)
+    assert_match(%r{\(1/2\)}, rows.first.body)
+    assert_match(%r{\(2/2\)}, rows.last.body)
+  end
+
+  # persist_bot_media_rows: hash-style response (Net::HTTP response) works too
+  def test_persist_bot_media_rows_handles_hash_response
+    handler = SunoTaskHandler.new
+    messages = [{ 'message_id' => 2001, 'message_thread_id' => nil }]
+    before = Message.count
+    handler.send(:persist_bot_media_rows, -100, messages, 'Test', {})
+    assert_equal before + 1, Message.count
+    assert_equal 2001, Message.order(:id).last.message_id
+  end
+end
+
+# ==========================================================================
+# ImageGenPersistTest — bot photo delivery saves a Message row
+# ==========================================================================
+class ImageGenPersistTest < BotTest
+  def setup
+    super
+    require_relative '../lib/chat_context'
+    require_relative '../lib/task_handlers/image_gen_handler'
+  rescue LoadError
+    # already loaded
+  end
+
+  # Regression: sendPhoto response must produce a bot Message row so a user
+  # reply to the photo doesn't leave a dangling reply_to_message_id.
+  def test_persist_bot_media_row_creates_row
+    handler = ImageGenTaskHandler.new
+    response = OpenStruct.new(message_id: 3001, message_thread_id: 42)
+    before = Message.count
+    handler.send(:persist_bot_media_row, -200, response, '🎨 test caption')
+    assert_equal before + 1, Message.count
+    row = Message.order(:id).last
+    assert_equal 'bot', row.role
+    assert_equal(-200, row.chat_id)
+    assert_equal 3001, row.message_id
+    assert_equal 42,   row.message_thread_id
+    assert_equal '🎨 test caption', row.body
+  end
+
+  # When sendPhoto returned nothing we can extract an id from, skip silently.
+  def test_persist_bot_media_row_skips_when_no_message_id
+    handler = ImageGenTaskHandler.new
+    before = Message.count
+    handler.send(:persist_bot_media_row, -200, OpenStruct.new, 'caption')
+    assert_equal before, Message.count
+  end
 end
 
 # ==========================================================================
@@ -784,6 +850,24 @@ class ChatContextTest < BotTest
     Settings.instance_variable_set(:@_settings, OpenStruct.new)
     result = obj.get_chat_context(100)
     assert_equal '', result
+  end
+
+  # Regression: context must NOT be filtered by message_thread_id.
+  # In non-forum supergroups Telegram auto-tags any reply with the root
+  # message's id as thread_id, which collapsed the context window to one
+  # reply chain. See 2026-04-19 incident (gpt.log showed context = 1 msg).
+  def test_context_is_not_filtered_by_thread_id
+    user_message(chat_id: 100, body: 'hello 1', user: @user)
+    user_message(chat_id: 100, body: 'hello 2', user: @user, attrs: { message_thread_id: 999 })
+    user_message(chat_id: 100, body: 'hello 3', user: @user, attrs: { message_thread_id: 888 })
+
+    obj = Object.new
+    obj.extend(ChatContext)
+    # Even when we're nominally "in" thread 999, we must still see messages
+    # from other threads — thread_id is advisory, not a filter.
+    result = obj.get_chat_context(100, thread_id: 999)
+    bodies = JSON.parse(result).map { |m| m['msg'] }
+    assert_equal ['hello 1', 'hello 2', 'hello 3'], bodies
   end
 
   # get_relevant_knowledge returns empty string when knowledge is not configured

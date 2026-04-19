@@ -267,13 +267,46 @@ class SunoTaskHandler
     msg_id = messages&.first&.respond_to?(:message_id) ? messages.first.message_id : messages&.first&.dig('message_id')
     LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: sendMediaGroup ok, first_message_id=#{msg_id.inspect}"
 
+    persist_bot_media_rows(chat_id, messages, title, params)
+
     return unless params['lyrics']
 
     LOGGER.debug "[chat=#{chat_id}] #{self.class.name} send_audio: sending lyrics (#{params['lyrics'].to_s.length} chars, reply_to=#{msg_id.inspect})"
-    api.sendMessage(chat_id: chat_id, text: params['lyrics'], reply_to_message_id: msg_id)
+    lyrics_resp = api.sendMessage(chat_id: chat_id, text: params['lyrics'], reply_to_message_id: msg_id)
+    persist_lyrics_row(chat_id, lyrics_resp, params['lyrics'], msg_id)
     LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: lyrics sent"
   rescue => e
     LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_audio failed: #{e.class}: #{e.message} (#{e.backtrace&.first})"
+  end
+
+  # Save each clip from the media group as a bot Message row. Without these,
+  # a user reply to the audio would point at a Telegram message_id we never
+  # indexed, breaking reply_to-based context resolution.
+  def persist_bot_media_rows(chat_id, messages, title, params)
+    return unless messages.is_a?(Array)
+    messages.each_with_index do |msg, i|
+      mid = msg.respond_to?(:message_id) ? msg.message_id : msg['message_id']
+      tid = msg.respond_to?(:message_thread_id) ? msg.message_thread_id : msg['message_thread_id']
+      next unless mid
+      body = "[песня: #{title}#{messages.size > 1 ? " (#{i + 1}/#{messages.size})" : ''}]"
+      ActiveRecord::Base.connection_pool.with_connection do
+        Message.create(role: 'bot', chat_id: chat_id, body: body, message_id: mid, message_thread_id: tid)
+      end
+    end
+  rescue => e
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} persist_bot_media_rows failed: #{e.class}: #{e.message}"
+  end
+
+  def persist_lyrics_row(chat_id, resp, body, reply_to)
+    mid = resp.respond_to?(:message_id) ? resp.message_id : resp.is_a?(Hash) ? (resp.dig('result', 'message_id') || resp['message_id']) : nil
+    tid = resp.respond_to?(:message_thread_id) ? resp.message_thread_id : resp.is_a?(Hash) ? (resp.dig('result', 'message_thread_id') || resp['message_thread_id']) : nil
+    return unless mid
+    ActiveRecord::Base.connection_pool.with_connection do
+      Message.create(role: 'bot', chat_id: chat_id, body: body, message_id: mid,
+                     message_thread_id: tid, reply_to_message_id: reply_to)
+    end
+  rescue => e
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} persist_lyrics_row failed: #{e.class}: #{e.message}"
   end
 
   def build_filename(performer, title, index, total)
