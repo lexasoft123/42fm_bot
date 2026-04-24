@@ -1,6 +1,18 @@
 require 'httparty'
+require 'set'
 
 class FluxClient
+  @logged_unknown_status = Set.new
+  @logged_unknown_mutex  = Mutex.new
+
+  def self.note_unknown_status(task_id, status)
+    @logged_unknown_mutex.synchronize do
+      return if @logged_unknown_status.include?(task_id)
+      @logged_unknown_status.add(task_id)
+    end
+    LOGGER.warn "FluxClient: unknown status=#{status.inspect} for #{task_id} (treating as :pending)"
+  end
+
   def initialize
     @base_url = Settings.flux['api_url']
     @api_key  = Settings.flux['api_key']
@@ -36,9 +48,10 @@ class FluxClient
     case data['status']
     when 'Ready'
       { url: data.dig('result', 'sample') }
-    when 'Error', 'Content Moderated'
+    when 'Error', 'Content Moderated', 'Task not found', 'Request Moderated'
       :failed
     else
+      self.class.note_unknown_status(task_id, data['status'])
       :pending
     end
   rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
