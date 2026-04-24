@@ -10,6 +10,7 @@ Full docs: `docs/architecture.md` | Agent guide: `docs/agents.md`
 - **Always run `make test` before committing.** All tests must pass before creating a commit.
 - **Never run `ruby lib/bot.rb` directly.** Use Docker in production; use `./bin/bot start/stop/restart` only for local non-Docker development.
 - **Back up `db/bot.db` on prod only when the deploy includes a new migration.** Run `make backup` — code-only deploys don't need it. See `Backing up the prod DB` below for details.
+- **Never `scp config/settings.yml` to prod.** Local and prod copies intentionally diverge (e.g. `proxy` is enabled only on prod). To change prod settings, ssh in and edit in place, or hand the user the exact diff to apply.
 - Always update all documents on changes.
 
 ---
