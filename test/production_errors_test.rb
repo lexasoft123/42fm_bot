@@ -180,7 +180,7 @@ class TaskRunnerTest < BotTest
     task = BackgroundTask.create!(task_type: 'bogus', status: 'pending', chat_id: 1,
                                   attempts: 0, max_attempts: 5)
     runner = TaskRunner.new(@api)
-    runner.process_pending
+    runner.process_one(task)
     task.reload
     assert_equal 'failed', task.status
     assert_match(/unknown/, task.result_hash['error'])
@@ -195,7 +195,7 @@ class TaskRunnerTest < BotTest
     task = BackgroundTask.create!(task_type: 'slow_task', status: 'pending', chat_id: 1,
                                   attempts: 19, max_attempts: 20)
     runner = TaskRunner.new(@api)
-    runner.process_pending
+    runner.process_one(task)
 
     task.reload
     assert_equal 20, task.attempts
@@ -214,7 +214,7 @@ class TaskRunnerTest < BotTest
     task = BackgroundTask.create!(task_type: 'exploding', status: 'pending', chat_id: 1,
                                   attempts: 0, max_attempts: 5)
     runner = TaskRunner.new(@api)
-    runner.process_pending
+    runner.process_one(task)
 
     task.reload
     assert_equal 1, task.attempts
@@ -229,7 +229,7 @@ class TaskRunnerTest < BotTest
     task = BackgroundTask.create!(task_type: 'exploding', status: 'pending', chat_id: 1,
                                   attempts: 4, max_attempts: 5)
     runner = TaskRunner.new(@api)
-    runner.process_pending
+    runner.process_one(task)
 
     task.reload
     assert_equal 'failed', task.status
@@ -248,7 +248,7 @@ class TaskRunnerTest < BotTest
     task = BackgroundTask.create!(task_type: 'good_task', status: 'pending', chat_id: 1,
                                   attempts: 0, max_attempts: 5)
     runner = TaskRunner.new(@api)
-    runner.process_pending
+    runner.process_one(task)
 
     task.reload
     assert_equal 'done', task.status
