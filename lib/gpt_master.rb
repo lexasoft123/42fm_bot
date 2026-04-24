@@ -62,11 +62,13 @@ class GptMaster
 
     retries = 0
     loop do
+      t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       response = HTTParty.post(@api_url, body: body.to_json, headers: headers, timeout: 300)
+      took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
       if response.code == 200
         record_usage(response)
         stop = response['stop_reason'] || response.dig('choices', 0, 'finish_reason')
-        LOGGER.debug("#{tag}#call_raw: stop_reason=#{stop}")
+        LOGGER.debug("#{tag}#call_raw: stop_reason=#{stop} took=#{took_ms}ms")
         dump_gpt(method: 'call_raw', body: body, response: response.parsed_response, stop: stop)
         return response.parsed_response
       elsif response.code == 529 && retries < MAX_RETRIES

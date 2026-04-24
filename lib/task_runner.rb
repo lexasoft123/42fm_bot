@@ -56,7 +56,10 @@ class TaskRunner
         next
       end
 
+      t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       result = handler_class.new.call(task, @api)
+      took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
+      LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}: handler #{task.task_type}[#{task.id}] took=#{took_ms}ms result=#{result.is_a?(Hash) ? :hash : result.inspect}"
 
       case result
       when :pending

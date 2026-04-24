@@ -69,22 +69,27 @@ class SunoClient
 
   # Submit song generation request. Returns task_id string.
   def submit(title:, lyrics:, tags:, instrumental: false)
+    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     resp = HTTParty.post("#{@base_url}/api/v1/generate",
       body: { customMode: true, prompt: lyrics, style: tags, title: title,
               model: @model, instrumental: instrumental,
               callBackUrl: 'https://example.com/noop' }.to_json,
       headers: headers, timeout: 30)
+    LOGGER.debug "#{self.class.name}#submit took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms code=#{resp.code}"
     raise "Suno submit failed: #{resp.code} #{resp.body}" unless resp.code == 200
     resp.parsed_response.dig('data', 'taskId') || raise("No taskId in response")
   end
 
   # Single non-blocking poll. Returns :pending, :failed, or { audio_url:, title:, duration: }
   def poll_once(task_id)
+    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     resp = HTTParty.get("#{@base_url}/api/v1/generate/record-info",
       query: { taskId: task_id }, headers: headers, timeout: 30)
+    took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
     return :pending unless resp.code == 200
     data = resp.parsed_response['data']
     return :pending unless data
+    LOGGER.debug "#{self.class.name}#poll_once took=#{took_ms}ms status=#{data['status'].inspect}"
     case data['status']
     when 'SUCCESS'
       songs = data.dig('response', 'sunoData')

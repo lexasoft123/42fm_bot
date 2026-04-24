@@ -3,6 +3,7 @@ APP_PATH = Pathname.new File.expand_path('../../',  __FILE__)
 Dir.chdir APP_PATH
 
 require './lib/settings'
+require './lib/log_timing'
 require 'telegram/bot'
 require './lib/radio'
 require './lib/message_responder'

@@ -28,24 +28,28 @@ module Agent
       alog :info, "START user=#{@user.name} (#{@user.role})\nREQUEST: #{@text}"
 
       MAX_ITERATIONS.times do |i|
+        iter_t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         raw = new_gpt(messages, system_prompt).call_raw(tools: tools)
         return 'жпт не жпт' unless raw
 
         stop       = extract_stop_reason(raw)
         tool_calls = extract_tool_calls(raw)
+        iter_ms    = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - iter_t0) * 1000).round
 
         if tool_calls.empty?
           text = extract_text(raw) || 'жпт не жпт'
-          alog :info, "DONE (#{i + 1} iteration#{i > 0 ? 's' : ''}, stop=#{stop}, no tools)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
+          alog :info, "DONE (#{i + 1} iteration#{i > 0 ? 's' : ''}, stop=#{stop}, no tools, took=#{iter_ms}ms)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
           return text
         end
 
-        alog :info, "iteration #{i + 1} [stop=#{stop}]: #{tool_calls.map { |t| "#{t[:name]}(#{t[:input].to_json})" }.join(', ')}"
+        alog :info, "iteration #{i + 1} [stop=#{stop} took=#{iter_ms}ms]: #{tool_calls.map { |t| "#{t[:name]}(#{t[:input].to_json})" }.join(', ')}"
         messages << build_assistant_message(raw)
 
         tool_calls.each do |tc|
-          result = execute_tool(tc[:name], tc[:input])
-          alog :info, "  #{tc[:name]} → #{result[0..TOOL_RESULT_PREVIEW_CHARS]}#{result.length > TOOL_RESULT_PREVIEW_CHARS ? '...' : ''}"
+          tool_t0  = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          result   = execute_tool(tc[:name], tc[:input])
+          tool_ms  = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - tool_t0) * 1000).round
+          alog :info, "  #{tc[:name]} took=#{tool_ms}ms → #{result[0..TOOL_RESULT_PREVIEW_CHARS]}#{result.length > TOOL_RESULT_PREVIEW_CHARS ? '...' : ''}"
           messages << build_tool_result_message(tc[:id], result)
         end
       end

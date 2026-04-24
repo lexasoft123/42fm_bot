@@ -23,12 +23,14 @@ class MessageSender
     bot.api.sendChatAction(chat_id: chat.id, action: 'typing')
 
     first_id = nil
+    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     split_text(text).each do |chunk|
       resp = send_chunk(chunk)
       first_id ||= extract_message_id(resp)
     end
+    took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
 
-    logger.debug "#{self.class.name}#send: '#{text.slice(0, 80)}' to #{chat.title}"
+    logger.debug "#{self.class.name}#send: '#{text.slice(0, 80)}' to #{chat.title} took=#{took_ms}ms"
     first_id
   end
 

@@ -90,13 +90,16 @@ class Radio
   def command(cmd, raw: false)
     @mutex.synchronize do
       retried = false
+      t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       begin
         connect if @sock.nil?
         @sock.puts cmd
         res = Timeout::timeout(READ_TIMEOUT) { @sock.gets("END") }
         raise IOError, "connection closed" unless res
         res.force_encoding('UTF-8')
-        raw ? res : res.gsub(/[\r\n]+/, "").gsub("END", "").gsub(/\\"/, '"')
+        result = raw ? res : res.gsub(/[\r\n]+/, "").gsub("END", "").gsub(/\\"/, '"')
+        LOGGER.debug "#{self.class.name}#command(#{cmd.split.first}) took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms" if defined?(LOGGER)
+        result
       rescue Errno::EPIPE, Errno::ECONNRESET, IOError => e
         unless retried
           LOGGER.warn "#{self.class.name}: #{e.class}: #{e.message} — reconnecting" if defined?(LOGGER)

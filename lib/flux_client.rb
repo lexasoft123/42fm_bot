@@ -33,18 +33,23 @@ class FluxClient
       body[:height] = height
       LOGGER.debug "#{self.class.name}: submitting prompt (#{prompt.length} chars) to #{@model}"
     end
+    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     resp = HTTParty.post("#{@base_url}/v1/#{@model}",
       body: body.to_json, headers: headers, timeout: 60)
+    LOGGER.debug "#{self.class.name}#submit took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms code=#{resp.code}"
     raise "Flux submit failed: #{resp.code} #{resp.body}" unless resp.code == 200
     resp.parsed_response['id'] || raise("No id in response")
   end
 
   # Single non-blocking poll. Returns :pending, :failed, or { url: "..." }
   def poll_once(task_id)
+    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     resp = HTTParty.get("#{@base_url}/v1/get_result",
       query: { id: task_id }, headers: headers, timeout: 30)
+    took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
     return :pending unless resp.code == 200
     data = resp.parsed_response
+    LOGGER.debug "#{self.class.name}#poll_once took=#{took_ms}ms status=#{data['status'].inspect}"
     case data['status']
     when 'Ready'
       { url: data.dig('result', 'sample') }

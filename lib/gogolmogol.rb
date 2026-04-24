@@ -74,7 +74,10 @@ class Gogolmogol
     end
     opts["imgSize"]  = "large"
     q = query.gsub('гиф', 'gif animated')
-    GoogleCustomSearchApi.search(q, opts)
+    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    result = GoogleCustomSearchApi.search(q, opts)
+    LOGGER.debug "#{self.class.name}#get_search took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms results=#{result['items']&.size || 0}"
+    result
   end
 
 end
