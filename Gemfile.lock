@@ -134,6 +134,7 @@ GEM
       racc (~> 1.4)
     nokogiri (1.19.2-x86_64-linux-musl)
       racc (~> 1.4)
+    numo-narray-alt (0.10.3)
     observer (0.1.2)
     ostruct (0.6.3)
     pp (0.6.3)
@@ -227,6 +228,7 @@ DEPENDENCIES
   logger
   mutex_m
   nokogiri
+  numo-narray-alt
   observer
   ostruct
   pry

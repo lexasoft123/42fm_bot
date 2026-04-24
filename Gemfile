@@ -29,6 +29,7 @@ gem 'csv'
 gem 'observer'
 gem 'rake'
 gem 'wahwah'
+gem 'numo-narray-alt'
 
 group :development do
   gem 'irb', require: false
