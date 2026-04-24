@@ -78,9 +78,14 @@ class TaskRunner
         nil # handler already called mark_failed! and sent error
       end
     rescue => e
-      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name} task #{task.id}: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
+      transient = e.message.match?(/\s5\d{2}[\s{]/) ||
+                  e.is_a?(Net::OpenTimeout) || e.is_a?(Net::ReadTimeout) ||
+                  e.is_a?(Errno::ECONNRESET) || e.is_a?(Errno::ECONNREFUSED) ||
+                  e.is_a?(OpenSSL::SSL::SSLError) || e.is_a?(SocketError)
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name} task #{task.id} transient: #{e.class}: #{e.message}" if transient
+      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name} task #{task.id}: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}" unless transient
       ActiveRecord::Base.connection_pool.with_connection do
-        task.increment_attempts!
+        task.increment_attempts! unless transient
         permanent = e.message.match?(/\s4\d{2}[\s{]/)
         if task.reload.timed_out? || permanent
           task.mark_failed!(e.message)
