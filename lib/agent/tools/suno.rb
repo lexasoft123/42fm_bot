@@ -15,7 +15,7 @@ Agent::ToolRegistry.register(
     BackgroundTask.create!(
       task_type: 'suno_generate',
       chat_id: ctx[:chat_id],
-      max_attempts: 30,
+      max_attempts: 60,
       params: { tags: args['tags'] || 'rock',
                 title: args['title'] || 'Песня от 42FM',
                 lyrics: args['lyrics'],
