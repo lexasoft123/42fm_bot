@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sqlite3 \
     libxml2-dev \
     libxslt-dev \
+    libopenblas-dev \
+    liblapack-dev \
     ffmpeg \
     opus-tools \
     && rm -rf /var/lib/apt/lists/*
