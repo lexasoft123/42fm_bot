@@ -1,4 +1,5 @@
 require 'numo/narray'
+require 'numo/linalg'
 
 class KnowledgeBase
   SIMILARITY_THRESHOLD = 0.92
@@ -85,7 +86,8 @@ class KnowledgeBase
       # Replaces O(n²) Ruby loop (~15 min for n=1900) with one BLAS call (~2 sec).
       m     = Numo::DFloat.cast(records.map(&:embedding_vector))
       norms = Numo::NMath.sqrt((m * m).sum(axis: 1)).reshape(m.shape[0], 1)
-      sim   = (m / norms).dot((m / norms).transpose)
+      mn    = m / norms
+      sim   = Numo::Linalg.matmul(mn, mn.transpose)
       n     = records.size
       n.times do |i|
         ((i + 1)...n).each do |j|
