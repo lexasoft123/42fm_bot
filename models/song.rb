@@ -97,10 +97,13 @@ class Song < ActiveRecord::Base
     sanitized = sanitize_fts_query(query)
     return fallback_search(query, limit: limit) if sanitized.empty?
 
+    # bm25 column weights: title=1.0 artist=3.0 album=1.5 genre=1.0 category=1.0
+    # Heavier artist so 'metallica' returns Metallica's tracks before 'Metallica Cover'.
     find_by_sql([
       "SELECT songs.* FROM songs " \
       "JOIN songs_fts ON songs.id = songs_fts.rowid " \
       "WHERE songs_fts MATCH ? " \
+      "ORDER BY bm25(songs_fts, 1.0, 3.0, 1.5, 1.0, 1.0) " \
       "LIMIT ?",
       sanitized, limit
     ])
