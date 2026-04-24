@@ -53,7 +53,7 @@ class KnowledgeBase
       prompt    = EXTRACTION_PROMPT.gsub('{MESSAGES}', formatted)
 
       raw = GptMaster.ask('', prompt: prompt, chat_id: chat_id, purpose: 'knowledge_extract')
-      # Strip markdown code fences if present
+      return if raw.nil? || raw.strip.empty? || raw == 'жпт не жпт'
       json_str = raw.gsub(/\A```(?:json)?\n?|\n?```\z/, '').strip
       facts    = JSON.parse(json_str)
 
