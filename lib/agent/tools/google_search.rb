@@ -58,7 +58,8 @@ Agent::ToolRegistry.register(
           "Отправил #{media.size} картинок в чат"
         end
       rescue => e
-        LOGGER.error "[chat=#{ctx[:chat_id]}] google_search send failed: #{e.message}"
+        level = e.message.include?('IMAGE_PROCESS_FAILED') ? :warn : :error
+        LOGGER.public_send(level, "[chat=#{ctx[:chat_id]}] google_search send failed: #{e.message}")
         results.map { |r| r[:link] }.join("\n")
       ensure
         temp_files.each { |tf| tf[:file].close; tf[:file].unlink rescue nil }
