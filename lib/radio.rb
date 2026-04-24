@@ -20,13 +20,14 @@ class Radio
   end
 
   def request(track)
-    res = search_track(track)
-    return nil if res.empty?
+    songs = Song.search(track, limit: 50)
+    return nil if songs.empty?
 
-    tr     = res.sample
-    req_id = command("request.push #{tr}")
+    song   = songs.sample
+    req_id = command("request.push #{song.absolute_path}")
     meta   = get_track_metadata(req_id)
-    name   = format_track_name(meta, request_id: req_id)
+    name   = meta ? format_track_name(meta, request_id: req_id)
+                  : "#{song.display_name} [#{req_id.to_i}]"
     { name: name, id: req_id }
   end
 
