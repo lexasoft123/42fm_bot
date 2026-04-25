@@ -55,6 +55,8 @@ class FluxClient
       { url: data.dig('result', 'sample') }
     when 'Error', 'Content Moderated', 'Task not found', 'Request Moderated'
       :failed
+    when 'Pending', 'Processing', 'Queued'
+      :pending
     else
       self.class.note_unknown_status(task_id, data['status'])
       :pending

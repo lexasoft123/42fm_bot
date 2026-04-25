@@ -93,13 +93,15 @@ class SunoClient
     case data['status']
     when 'SUCCESS'
       songs = data.dig('response', 'sunoData')
-      return :failed if songs.nil? || songs.empty?
+      return :retry if songs.nil? || songs.empty?
       songs.map do |song|
         { audio_url: song['audioUrl'] || song['audio_url'],
           title: song['title'], duration: song['duration'] }
       end
-    when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED', 'SENSITIVE_WORD_ERROR'
-      :failed
+    when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED'
+      :retry # Suno-side transient — worker died; re-submitting usually works
+    when 'SENSITIVE_WORD_ERROR'
+      :failed # permanent — content flagged
     else
       :pending
     end

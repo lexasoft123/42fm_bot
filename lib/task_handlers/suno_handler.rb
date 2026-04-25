@@ -127,6 +127,8 @@ class SunoTaskHandler
     :pending
   end
 
+  MAX_GENERATION_RETRIES = 3
+
   def poll_and_deliver(task, api)
     result = SunoClient.new.poll_once(task.external_id)
 
@@ -135,14 +137,22 @@ class SunoTaskHandler
     case result
     when :pending
       :pending
-    when :failed
-      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno generation failed for #{task.external_id}"
-      ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!('suno_failed') }
-      begin
-        api.sendMessage(chat_id: task.chat_id, text: "Не удалось сгенерировать песню")
-      rescue => e
-        LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
+    when :retry
+      p = task.params_hash
+      retries = (p['generation_retries'] || 0) + 1
+      p['generation_retries'] = retries
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno transient failure for #{task.external_id} (retry #{retries}/#{MAX_GENERATION_RETRIES})"
+      if retries <= MAX_GENERATION_RETRIES
+        # Clear external_id so next handler call re-submits with cached lyrics/tags.
+        ActiveRecord::Base.connection_pool.with_connection do
+          task.update!(external_id: nil, params: p.to_json)
+        end
+        return :pending
       end
+      mark_failed_and_notify(task, api, 'suno_failed_after_retries')
+      :failed
+    when :failed
+      mark_failed_and_notify(task, api, 'suno_failed')
       :failed
     when Array
       LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result.size} clips"
@@ -150,6 +160,16 @@ class SunoTaskHandler
       title = task.params_hash['title'] || 'Песня от 42FM'
       send_audio(api, task.chat_id, result, title, task.params_hash)
       :done
+    end
+  end
+
+  def mark_failed_and_notify(task, api, reason)
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno generation #{reason} for #{task.external_id}"
+    ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(reason) }
+    begin
+      api.sendMessage(chat_id: task.chat_id, text: "Не удалось сгенерировать песню")
+    rescue => e
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
     end
   end
 
