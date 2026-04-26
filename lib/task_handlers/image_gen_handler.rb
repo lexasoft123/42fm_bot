@@ -43,13 +43,16 @@ class ImageGenTaskHandler
     - Оптимальная длина: до 500 слов. Верни ТОЛЬКО промпт, без пояснений, без markdown, без кавычек.
   PROMPT
 
+  MAX_PROMPT_FAILURES  = 3
+  MAX_SUBMIT_FAILURES  = 3
+
   def call(task, api)
-    task.external_id.nil? ? compose_and_submit(task) : poll_and_deliver(task, api)
+    task.external_id.nil? ? compose_and_submit(task, api) : poll_and_deliver(task, api)
   end
 
   private
 
-  def compose_and_submit(task)
+  def compose_and_submit(task, api)
     p = task.params_hash
     request = p['request'].to_s
     input_image = p['input_image']
@@ -74,18 +77,40 @@ class ImageGenTaskHandler
         [{ role: 'user', content: llm_prompt }]
       end
 
-      p['prompt'] = GptMaster.new(messages, setting: 'agent',
-                                  chat_id: task.chat_id, user_uid: p['user_uid'],
-                                  purpose: 'image_prompt').call
-      raise "GPT prompt failed" unless p['prompt'] && p['prompt'] != 'жпт не жпт'
+      begin
+        p['prompt'] = GptMaster.new(messages, setting: 'agent',
+                                    chat_id: task.chat_id, user_uid: p['user_uid'],
+                                    purpose: 'image_prompt').call
+        raise "GPT prompt failed" unless p['prompt'] && p['prompt'] != 'жпт не жпт'
+      rescue => e
+        return bail_or_retry(task, api, p, 'prompt_failures', MAX_PROMPT_FAILURES, "prompt: #{e.message}", raise_on_retry: e)
+      end
       LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: prompt → '#{p['prompt'][0..100]}...'"
       ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
     end
 
-    task_id = FluxClient.new.submit(prompt: p['prompt'], input_image: input_image.to_s.empty? ? nil : input_image)
+    begin
+      task_id = FluxClient.new.submit(prompt: p['prompt'], input_image: input_image.to_s.empty? ? nil : input_image)
+    rescue => e
+      return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit: #{e.message}", raise_on_retry: e)
+    end
     LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted #{task_id}"
     ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: task_id, params: p.to_json) }
     :pending
+  end
+
+  # Increment a step-failure counter; if cap reached, fail+notify; otherwise re-raise so
+  # TaskRunner retries on the next poll cycle.
+  def bail_or_retry(task, api, params, counter, max, reason, raise_on_retry:)
+    params[counter] = (params[counter] || 0) + 1
+    ActiveRecord::Base.connection_pool.with_connection { task.update!(params: params.to_json) }
+    if params[counter] >= max
+      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]} (max #{max}), giving up: #{reason}"
+      mark_failed_and_notify(task, api, "#{counter}_after_retries")
+      return :failed
+    end
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]}/#{max} — will retry: #{reason}"
+    raise raise_on_retry
   end
 
   MAX_GENERATION_RETRIES = 3

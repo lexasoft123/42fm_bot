@@ -1,9 +1,12 @@
 class SunoTaskHandler
   include ChatContext
 
+  MAX_PROMPT_FAILURES = 3
+  MAX_SUBMIT_FAILURES = 3
+
   def call(task, api)
     if task.external_id.nil?
-      compose_and_submit(task)
+      compose_and_submit(task, api)
     else
       poll_and_deliver(task, api)
     end
@@ -42,7 +45,7 @@ class SunoTaskHandler
     Название: %{title}
   PROMPT
 
-  def compose_and_submit(task)
+  def compose_and_submit(task, api)
     p = task.params_hash
 
     # Step 1: Parse freeform request with LLM (only for chat command path)
@@ -78,11 +81,15 @@ class SunoTaskHandler
 
       LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: composing lyrics for '#{subject}' (#{genre}#{artist.empty? ? '' : ", artist: #{artist}"})"
 
-      lyrics = GptMaster.new([{ role: 'user', content: prompt }],
-                             chat_id: task.chat_id, user_uid: p['user_uid'],
-                             purpose: 'suno_lyrics').call
-      raise "GPT lyrics failed" unless lyrics && lyrics != 'жпт не жпт'
-      p['lyrics'] = lyrics
+      begin
+        lyrics = GptMaster.new([{ role: 'user', content: prompt }],
+                               chat_id: task.chat_id, user_uid: p['user_uid'],
+                               purpose: 'suno_lyrics').call
+        raise "GPT lyrics failed" unless lyrics && lyrics != 'жпт не жпт'
+        p['lyrics'] = lyrics
+      rescue => e
+        return bail_or_retry(task, api, p, 'prompt_failures', MAX_PROMPT_FAILURES, "lyrics: #{e.message}", raise_on_retry: e)
+      end
     end
 
     # Step 3: Resolve tags for Suno
@@ -110,14 +117,7 @@ class SunoTaskHandler
     begin
       suno_task_id = SunoClient.new.submit(title: title, lyrics: p['lyrics'], tags: tags)
     rescue => e
-      p['submit_failures'] = (p['submit_failures'] || 0) + 1
-      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
-      if p['submit_failures'] >= 3
-        LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submit failed #{p['submit_failures']} times, giving up: #{e.message}"
-        ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!("submit_failed: #{e.message}") }
-        return :failed
-      end
-      raise
+      return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit: #{e.message}", raise_on_retry: e)
     end
     LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted #{suno_task_id} with tags '#{tags}'"
 
@@ -125,6 +125,20 @@ class SunoTaskHandler
       task.update!(external_id: suno_task_id, params: p.merge('title' => title).to_json)
     end
     :pending
+  end
+
+  # Increment a step-failure counter; if cap reached, fail+notify; otherwise re-raise so
+  # TaskRunner retries on the next poll cycle.
+  def bail_or_retry(task, api, params, counter, max, reason, raise_on_retry:)
+    params[counter] = (params[counter] || 0) + 1
+    ActiveRecord::Base.connection_pool.with_connection { task.update!(params: params.to_json) }
+    if params[counter] >= max
+      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]} (max #{max}), giving up: #{reason}"
+      mark_failed_and_notify(task, api, "#{counter}_after_retries")
+      return :failed
+    end
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]}/#{max} — will retry: #{reason}"
+    raise raise_on_retry
   end
 
   MAX_GENERATION_RETRIES = 3
