@@ -96,6 +96,34 @@ namespace :knowledge do
   end
 end
 
+namespace :chats do
+  desc "Populate chats table from Settings.auth.chats and authorize them"
+  task :sync do
+    require './config/boot'
+    AppConfigurator.new.configure
+
+    n = Chat.sync_from_config!
+    puts "Synced #{n} chats from Settings.auth.chats"
+    Chat.where(authorized: true).order(:chat_id).each do |c|
+      puts "  authorized: #{c.chat_id} #{c.title.inspect} audio=#{c.audio}"
+    end
+    unauthed = Chat.where(authorized: false).count
+    puts "  (also tracked: #{unauthed} unauthorized chat#{unauthed == 1 ? '' : 's'})" if unauthed > 0
+  end
+
+  desc "List all chats with auth status, last_seen and message counts"
+  task :list do
+    require './config/boot'
+    AppConfigurator.new.configure
+
+    Chat.order(:chat_id).each do |c|
+      auth = c.authorized? ? 'auth' : 'NOAUTH'
+      msgs = c.messages.count
+      puts "#{c.chat_id.to_s.rjust(15)} [#{auth}] type=#{c.chat_type} audio=#{c.audio} msgs=#{msgs} last=#{c.last_seen_at} #{c.title.inspect}"
+    end
+  end
+end
+
 namespace :music do
   desc "Scan music library and populate songs database"
   task :scan do

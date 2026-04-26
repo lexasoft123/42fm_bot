@@ -208,8 +208,7 @@ class MessageResponder
   end
 
   def process_voice_message
-    audio_ids = Settings.auth['chats'].select { |c| c['audio'] }.map { |c| c['id'] }
-    return unless audio_ids.include?(@chat_id)
+    return unless Chat.find_by(chat_id: @chat_id)&.audio
 
     file_id = message.voice.file_id
     file = bot.api.getFile(file_id: file_id)

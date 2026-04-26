@@ -35,7 +35,7 @@ begin
         chat_id = message.chat.id
         logger.debug "[chat=#{chat_id}] @#{message.from.username}: #{msg_text}"
         logger.debug "[chat=#{chat_id}] chat_seen: title=#{message.chat.title.inspect} type=#{message.chat.type}"
-        if Settings.auth['chats'].any? { |c| c['id'] == chat_id }
+        if Chat.where(chat_id: chat_id, authorized: true).exists?
           Chat.touch_seen(chat_id, title: message.chat.title, type: message.chat.type) rescue nil
           MessageResponder.new(options).respond
         else

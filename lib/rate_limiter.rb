@@ -20,11 +20,18 @@ module RateLimiter
   }.freeze
 
   def self.limit_for(chat_id, service)
-    chats = Settings.auth['chats'] || []
-    chat  = chats.find { |c| c['id'] == chat_id }
-    chat&.dig('rate_limits', service) ||
+    chat = Chat.find_by(chat_id: chat_id)
+    per_chat = parse_rate_limits(chat&.rate_limits)&.dig(service)
+    per_chat ||
       Settings.auth.dig('rate_limits', service) ||
       { 'max' => 1, 'window_minutes' => 20 }
+  end
+
+  def self.parse_rate_limits(json)
+    return nil if json.nil? || json.to_s.empty?
+    JSON.parse(json)
+  rescue JSON::ParserError
+    nil
   end
 
   def self.exceeded?(chat_id, service)
