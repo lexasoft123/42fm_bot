@@ -278,6 +278,54 @@ class RunnerTest < BotTest
     assert_equal({ 'query' => 'hello', 'count' => 5 }, received_args)
   end
 
+  # ToolResult.deferred auto-writes scratchpad and forwards a structured prefix
+  def test_deferred_tool_result_persists_intent_and_decorates_text
+    Agent::ToolRegistry.register(
+      name: 'flaky', description: 'flaky',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.deferred(user_text: 'Wait 5 min',
+                                   intent: 'do the thing later',
+                                   retry_in_min: 5)
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('flaky', {}),
+      anthropic_text('ok')
+    )
+    build_runner(text: 'go', user: @user, chat_id: 999).run
+
+    # Scratchpad got the intent
+    data = Agent::Scratchpad.read(999)
+    assert_equal 1, data['intentions'].size
+    assert_equal 'do the thing later', data['intentions'].first['content']
+
+    # Second LLM call's messages array contains a tool_result with the structured prefix
+    second_call = FakeGptMaster.calls[1]
+    tool_result_msg = second_call[:messages].last
+    content = tool_result_msg[:content].first[:content]
+    assert_includes content, '[deferred retry_in=5min'
+    assert_includes content, 'intent saved to scratchpad'
+    assert_includes content, 'Wait 5 min'
+  end
+
+  # Plain ToolResult.text passes through unchanged, no scratchpad write
+  def test_plain_tool_result_text_passthrough
+    Agent::ToolRegistry.register(
+      name: 'plain', description: 'plain',
+      handler: ->(_a, _c) { Agent::ToolResult.text('all good') }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('plain', {}),
+      anthropic_text('ok')
+    )
+    build_runner(text: 'go', user: @user, chat_id: 998).run
+
+    second_call = FakeGptMaster.calls[1]
+    content = second_call[:messages].last[:content].first[:content]
+    assert_equal 'all good', content
+    assert_empty Agent::Scratchpad.read(998)['intentions']
+  end
+
   # Two tool_use blocks in one response — both handlers are called in order
   def test_multiple_tools_in_one_response
     call_log = []

@@ -1,5 +1,6 @@
 require 'erb'
 require_relative 'scratchpad'
+require_relative 'tool_result'
 
 module Agent
   class Runner
@@ -136,10 +137,26 @@ module Agent
       end
 
       result = tool.handler.call(input, @tool_ctx)
-      truncate(result.to_s)
+      truncate(materialize_result(result))
     rescue => e
       alog :error, "tool #{name} error: #{e.class}: #{e.message}"
       "идите нахуй"
+    end
+
+    # Tools may return Agent::ToolResult for structured outcomes. For deferred
+    # results, persist the intent to scratchpad here and surface a structured
+    # prefix to the LLM. Plain String returns pass through unchanged.
+    def materialize_result(result)
+      return result.to_s unless result.is_a?(Agent::ToolResult)
+      return result.user_text unless result.deferred?
+
+      Agent::Scratchpad.add(@chat_id, category: 'intentions', content: result.deferred_intent)
+      alog :info, "auto-remember (deferred): #{result.deferred_intent[0..120]}"
+      retry_part = result.retry_in_min ? " retry_in=#{result.retry_in_min}min" : ''
+      "[deferred#{retry_part}, intent saved to scratchpad] #{result.user_text}"
+    rescue => e
+      alog :warn, "scratchpad add failed: #{e.class}: #{e.message}"
+      result.user_text
     end
 
     def truncate(str)

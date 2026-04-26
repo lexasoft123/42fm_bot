@@ -10,13 +10,13 @@ Agent::ToolRegistry.register(
   },
   handler: ->(args, ctx) {
     if RateLimiter.exceeded?(ctx[:chat_id], 'suno')
-      user_msg = RateLimiter.reply(ctx[:chat_id], 'suno')
-      mins     = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno')
-      title    = (args['title'] || args['lyrics'] || 'песню').to_s.slice(0, 80)
-      next "[ОТЛОЖЕНО retry_in=#{mins}min] Песня НЕ поставлена в очередь — лимит. " \
-           "Если запрос стоит выполнить позже — вызови remember(category:\"intentions\", " \
-           "content:\"спеть через #{mins} мин: #{title}\"). " \
-           "Пользователю передай: #{user_msg}"
+      mins  = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno')
+      title = (args['title'] || args['lyrics'] || 'песню').to_s.slice(0, 80)
+      next Agent::ToolResult.deferred(
+        user_text:    RateLimiter.reply(ctx[:chat_id], 'suno'),
+        intent:       "спеть через #{mins} мин: #{title}",
+        retry_in_min: mins
+      )
     end
     BackgroundTask.create!(
       task_type: 'suno_generate',
