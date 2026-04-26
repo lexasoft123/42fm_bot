@@ -3,6 +3,11 @@ require 'bundler/setup'
 require 'pry'
 require './config/boot.rb'
 
+# Pry 0.16's SimplePager references ::Readline, which was removed from Ruby 4.0
+# stdlib. Disable the pager so long output prints in full (the terminal handles
+# scrollback) rather than crashing with NameError on every `<page break>`.
+Pry.config.pager = false
+
 config = AppConfigurator.new
 config.configure
 
