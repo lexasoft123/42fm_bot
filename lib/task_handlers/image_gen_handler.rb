@@ -1,5 +1,8 @@
+require_relative 'agent_event_emitter'
+
 class ImageGenTaskHandler
   include ChatContext
+  include AgentEventEmitter
 
   PROMPT_TEMPLATE = <<~PROMPT.freeze
     Ты — эксперт по промптам для FLUX 2 AI.
@@ -146,6 +149,10 @@ class ImageGenTaskHandler
       p = task.params_hash
       caption = "🎨 #{p['prompt'].to_s.empty? ? p['request'] : p['prompt']}"
       send_photo(api, task.chat_id, result[:url], caption)
+      if (p['generation_retries'] || 0) >= 1
+        emit_agent_event(task, 'image_succeeded_after_retries',
+          summary: "Запрос: #{p['request'].to_s[0..200]} | Получилось с #{p['generation_retries']}-й попытки.")
+      end
       :done
     end
   end
@@ -160,6 +167,9 @@ class ImageGenTaskHandler
     rescue => e
       LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
     end
+    event_type = reason.to_s.include?('after_retries') ? 'image_failed_after_retries' : 'image_failed'
+    summary = "Запрос: #{task.params_hash['request'].to_s[0..200]} | Промпт: #{task.params_hash['prompt'].to_s[0..200]} | Причина: #{reason}"
+    emit_agent_event(task, event_type, summary: summary)
   end
 
   def send_photo(api, chat_id, url, caption)

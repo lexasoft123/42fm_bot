@@ -14,7 +14,8 @@ TEST_FILES := \
 	test/cost_report_test.rb \
 	test/e2e_telemetry_test.rb \
 	test/scratchpad_test.rb \
-	test/chat_test.rb
+	test/chat_test.rb \
+	test/agent_event_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \

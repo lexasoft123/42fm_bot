@@ -1,5 +1,8 @@
+require_relative 'agent_event_emitter'
+
 class SunoTaskHandler
   include ChatContext
+  include AgentEventEmitter
 
   MAX_PROMPT_FAILURES = 3
   MAX_SUBMIT_FAILURES = 3
@@ -171,8 +174,13 @@ class SunoTaskHandler
     when Array
       LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result.size} clips"
       ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
-      title = task.params_hash['title'] || 'Песня от 42FM'
-      send_audio(api, task.chat_id, result, title, task.params_hash)
+      p = task.params_hash
+      title = p['title'] || 'Песня от 42FM'
+      send_audio(api, task.chat_id, result, title, p)
+      if (p['generation_retries'] || 0) >= 1
+        emit_agent_event(task, 'song_succeeded_after_retries',
+          summary: "Песня '#{title}' получилась с #{p['generation_retries']}-й попытки.")
+      end
       :done
     end
   end
@@ -187,6 +195,10 @@ class SunoTaskHandler
     rescue => e
       LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
     end
+    p = task.params_hash
+    event_type = reason.to_s.include?('after_retries') ? 'song_failed_after_retries' : 'song_failed'
+    summary = "Тема: #{(p['topic'] || p['request']).to_s[0..150]} | Жанр: #{p['genre']} | Артист: #{p['artist']} | Причина: #{reason}"
+    emit_agent_event(task, event_type, summary: summary)
   end
 
   def resolve_tags(genre, artist, title = '', chat_id: nil, user_uid: nil)

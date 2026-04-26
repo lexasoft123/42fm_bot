@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-04-26
-**Updated:** 2026-04-26 — PR-1 (foundation) shipped: `chat_states` table, `Agent::Scratchpad` module, `remember`/`forget` tools, runner integration with `{SCRATCHPAD}` placeholder. PR-2 (event sources) and PR-3 (compaction + cron) still pending.
+**Updated:** 2026-04-26 — PR-1 (foundation) shipped: `chat_states` table, `Agent::Scratchpad` module, `remember`/`forget` tools, runner integration with `{SCRATCHPAD}` placeholder. PR-2 (first event source: `agent_event` task type, `AgentEventHandler`, FLUX/Suno failure & success-after-retry triggers, per-chat 10/hour rate-limit) shipped same day. PR-3 (compaction + cron) still pending.
 
 ## Context
 
