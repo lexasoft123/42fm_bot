@@ -82,4 +82,62 @@ class ScratchpadTest < BotTest
     data = Agent::Scratchpad.read(CHAT)
     assert_equal({ 'intentions' => [], 'notes' => [], 'expectations' => [] }, data)
   end
+
+  def test_add_with_due_at_persists_iso_timestamp
+    due = Time.now + 300
+    id = Agent::Scratchpad.add(CHAT, category: 'intentions',
+                               content: 'retry later', due_at: due)
+    entry = Agent::Scratchpad.read(CHAT)['intentions'].first
+    assert_equal id, entry['id']
+    assert_equal due.utc.iso8601, entry['due_at']
+  end
+
+  def test_due_intentions_returns_only_past_due_unacted
+    Agent::Scratchpad.add(CHAT, category: 'intentions',
+                          content: 'past', due_at: Time.now - 60)
+    Agent::Scratchpad.add(CHAT, category: 'intentions',
+                          content: 'future', due_at: Time.now + 600)
+    Agent::Scratchpad.add(CHAT, category: 'intentions', content: 'no due')
+    due = Agent::Scratchpad.due_intentions(CHAT)
+    assert_equal 1, due.size
+    assert_equal 'past', due.first['content']
+  end
+
+  def test_mark_acted_excludes_from_due_intentions
+    id = Agent::Scratchpad.add(CHAT, category: 'intentions',
+                               content: 'past', due_at: Time.now - 60)
+    assert_equal 1, Agent::Scratchpad.due_intentions(CHAT).size
+    Agent::Scratchpad.mark_acted(CHAT, id)
+    assert_empty Agent::Scratchpad.due_intentions(CHAT)
+  end
+
+  def test_add_prunes_expired_inline
+    # expires_at in the past — pruned on next add
+    Agent::Scratchpad.add(CHAT, category: 'notes', content: 'doomed',
+                          expires_at: Time.now - 10)
+    Agent::Scratchpad.add(CHAT, category: 'notes', content: 'fresh')
+    contents = Agent::Scratchpad.read(CHAT)['notes'].map { |e| e['content'] }
+    refute_includes contents, 'doomed'
+    assert_includes contents, 'fresh'
+  end
+
+  def test_compact_removes_old_and_expired
+    # Old entry — past max_age
+    old_id = Agent::Scratchpad.add(CHAT, category: 'notes', content: 'old')
+    # Force created_at to 60 days ago
+    state = ChatState.find(CHAT)
+    data = JSON.parse(state.scratchpad)
+    data['notes'].first['created_at'] = (Time.now - 60 * 86400).utc.iso8601
+    state.update!(scratchpad: data.to_json)
+
+    Agent::Scratchpad.add(CHAT, category: 'notes', content: 'recent')
+
+    stats = Agent::Scratchpad.compact(CHAT, max_age_days: 30)
+    assert_equal 1, stats[:removed]
+    assert_equal 1, stats[:kept]
+
+    contents = Agent::Scratchpad.read(CHAT)['notes'].map { |e| e['content'] }
+    refute_includes contents, 'old'
+    assert_includes contents, 'recent'
+  end
 end

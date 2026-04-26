@@ -150,7 +150,9 @@ module Agent
       return result.to_s unless result.is_a?(Agent::ToolResult)
       return result.user_text unless result.deferred?
 
-      Agent::Scratchpad.add(@chat_id, category: 'intentions', content: result.deferred_intent)
+      due_at = result.retry_in_min ? (Time.now + result.retry_in_min * 60) : nil
+      Agent::Scratchpad.add(@chat_id, category: 'intentions',
+                            content: result.deferred_intent, due_at: due_at)
       alog :info, "auto-remember (deferred): #{result.deferred_intent[0..120]}"
       retry_part = result.retry_in_min ? " retry_in=#{result.retry_in_min}min" : ''
       "[deferred#{retry_part}, intent saved to scratchpad] #{result.user_text}"

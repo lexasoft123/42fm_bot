@@ -24,6 +24,9 @@ begin
       TaskRunner.start(bot.api)
       logger.info "TaskRunner started"
 
+      CronScheduler.start
+      logger.info "CronScheduler started"
+
       synced = Chat.sync_from_config! rescue 0
       logger.info "Chat.sync_from_config!: synced #{synced} chats"
 

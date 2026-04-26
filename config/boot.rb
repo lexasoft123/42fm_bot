@@ -15,6 +15,7 @@ require './lib/agent/scratchpad'
 require './lib/agent/tool_result'
 require './lib/chat_context'
 require './lib/task_runner'
+require './lib/cron_scheduler'
 Dir['./lib/task_handlers/*.rb'].each { |f| require f }
 require './lib/music_scanner'
 require './lib/app_configurator'

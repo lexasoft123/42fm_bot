@@ -15,7 +15,8 @@ TEST_FILES := \
 	test/e2e_telemetry_test.rb \
 	test/scratchpad_test.rb \
 	test/chat_test.rb \
-	test/agent_event_test.rb
+	test/agent_event_test.rb \
+	test/cron_scheduler_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \

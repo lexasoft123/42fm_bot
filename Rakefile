@@ -96,6 +96,22 @@ namespace :knowledge do
   end
 end
 
+namespace :scratchpad do
+  desc "Compact scratchpads: prune expired + old entries (MAX_AGE_DAYS=30, CHAT_ID=optional)"
+  task :compact do
+    require './config/boot'
+    AppConfigurator.new.configure
+
+    max_age = ENV.fetch('MAX_AGE_DAYS', '30').to_i
+    scope   = ENV['CHAT_ID'] ? [ENV['CHAT_ID'].to_i] : ChatState.pluck(:chat_id)
+
+    scope.each do |cid|
+      stats = Agent::Scratchpad.compact(cid, max_age_days: max_age)
+      puts "chat #{cid}: removed=#{stats[:removed]} kept=#{stats[:kept]}"
+    end
+  end
+end
+
 namespace :chats do
   desc "Populate chats table from Settings.auth.chats and authorize them"
   task :sync do
