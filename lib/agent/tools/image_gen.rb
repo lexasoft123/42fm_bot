@@ -15,7 +15,12 @@ Agent::ToolRegistry.register(
   },
   handler: ->(args, ctx) {
     if RateLimiter.exceeded?(ctx[:chat_id], 'image')
-      next RateLimiter.reply(ctx[:chat_id], 'image')
+      user_msg = RateLimiter.reply(ctx[:chat_id], 'image')
+      mins     = RateLimiter.minutes_until_free(ctx[:chat_id], 'image')
+      next "[ОТЛОЖЕНО retry_in=#{mins}min] Картинка НЕ поставлена в очередь — лимит. " \
+           "Если запрос стоит выполнить позже — вызови remember(category:\"intentions\", " \
+           "content:\"дорисовать через #{mins} мин: #{args['prompt'].to_s.slice(0, 100)}\"). " \
+           "Пользователю передай: #{user_msg}"
     end
     edit = args['edit_source'] && ctx[:image].is_a?(Hash) && ctx[:image][:data]
     params = { request: args['prompt'], user_uid: ctx[:user]&.uid }
