@@ -53,8 +53,10 @@ class FluxClient
     case data['status']
     when 'Ready'
       { url: data.dig('result', 'sample') }
-    when 'Error', 'Content Moderated', 'Task not found', 'Request Moderated'
-      :failed
+    when 'Content Moderated', 'Request Moderated', 'Task not found'
+      :failed # permanent — moderation or task gone
+    when 'Error'
+      :retry # often transient — Flux server hiccup; re-submit usually works
     when 'Pending', 'Processing', 'Queued'
       :pending
     else

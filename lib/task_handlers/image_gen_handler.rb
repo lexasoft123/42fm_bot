@@ -88,6 +88,8 @@ class ImageGenTaskHandler
     :pending
   end
 
+  MAX_GENERATION_RETRIES = 3
+
   def poll_and_deliver(task, api)
     result = FluxClient.new.poll_once(task.external_id)
 
@@ -96,16 +98,22 @@ class ImageGenTaskHandler
     case result
     when :pending
       :pending
-    when :failed
-      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generation failed for #{task.external_id}"
-      ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!('flux_failed') }
-      text = "Не удалось сгенерировать картинку"
-      begin
-        resp = api.sendMessage(chat_id: task.chat_id, text: text)
-        Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)
-      rescue => e
-        LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
+    when :retry
+      p = task.params_hash
+      retries = (p['generation_retries'] || 0) + 1
+      p['generation_retries'] = retries
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: FLUX transient failure for #{task.external_id} (retry #{retries}/#{MAX_GENERATION_RETRIES})"
+      if retries <= MAX_GENERATION_RETRIES
+        # Clear external_id so next handler call re-submits with cached prompt.
+        ActiveRecord::Base.connection_pool.with_connection do
+          task.update!(external_id: nil, params: p.to_json)
+        end
+        return :pending
       end
+      mark_failed_and_notify(task, api, 'flux_failed_after_retries')
+      :failed
+    when :failed
+      mark_failed_and_notify(task, api, 'flux_failed')
       :failed
     when Hash
       LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result[:url]}"
@@ -114,6 +122,18 @@ class ImageGenTaskHandler
       caption = "🎨 #{p['prompt'].to_s.empty? ? p['request'] : p['prompt']}"
       send_photo(api, task.chat_id, result[:url], caption)
       :done
+    end
+  end
+
+  def mark_failed_and_notify(task, api, reason)
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generation #{reason} for #{task.external_id}"
+    ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(reason) }
+    text = "Не удалось сгенерировать картинку"
+    begin
+      resp = api.sendMessage(chat_id: task.chat_id, text: text)
+      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)
+    rescue => e
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
     end
   end
 
