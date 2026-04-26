@@ -166,8 +166,10 @@ class SunoTaskHandler
   def mark_failed_and_notify(task, api, reason)
     LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno generation #{reason} for #{task.external_id}"
     ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(reason) }
+    text = "Не удалось сгенерировать песню"
     begin
-      api.sendMessage(chat_id: task.chat_id, text: "Не удалось сгенерировать песню")
+      resp = api.sendMessage(chat_id: task.chat_id, text: text)
+      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)
     rescue => e
       LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
     end

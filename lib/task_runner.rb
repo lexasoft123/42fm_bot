@@ -103,11 +103,7 @@ class TaskRunner
       if task.reload.timed_out?
         LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}: task #{task.id} (#{task.task_type}) timed out after #{task.attempts} attempts"
         task.mark_failed!('timeout')
-        begin
-          @api.sendMessage(chat_id: task.chat_id, text: "Задача не выполнена (таймаут)")
-        rescue => e
-          LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}: failed to notify chat: #{e.class}: #{e.message}"
-        end
+        notify_chat(task.chat_id, "Задача не выполнена (таймаут)")
       end
     when :done, :failed
       nil # handler already updated state
@@ -123,11 +119,14 @@ class TaskRunner
     permanent = e.message.match?(/\s4\d{2}[\s{]/)
     if task.reload.timed_out? || permanent
       task.mark_failed!(e.message)
-      begin
-        @api.sendMessage(chat_id: task.chat_id, text: "Ошибка: #{e.message.truncate(200)}")
-      rescue => notify_err
-        LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}: failed to notify chat: #{notify_err.class}: #{notify_err.message}"
-      end
+      notify_chat(task.chat_id, "Ошибка: #{e.message.truncate(200)}")
     end
+  end
+
+  def notify_chat(chat_id, text)
+    resp = @api.sendMessage(chat_id: chat_id, text: text)
+    Message.persist_bot_reply(chat_id: chat_id, body: text, response: resp)
+  rescue => e
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name}: failed to notify chat: #{e.class}: #{e.message}"
   end
 end

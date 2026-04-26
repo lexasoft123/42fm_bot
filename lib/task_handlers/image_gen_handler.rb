@@ -99,8 +99,10 @@ class ImageGenTaskHandler
     when :failed
       LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generation failed for #{task.external_id}"
       ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!('flux_failed') }
+      text = "Не удалось сгенерировать картинку"
       begin
-        api.sendMessage(chat_id: task.chat_id, text: "Не удалось сгенерировать картинку")
+        resp = api.sendMessage(chat_id: task.chat_id, text: text)
+        Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)
       rescue => e
         LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
       end
