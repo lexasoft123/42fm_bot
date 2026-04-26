@@ -108,7 +108,8 @@ class ImageGenTaskHandler
     when Hash
       LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result[:url]}"
       ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
-      caption = "🎨 #{task.params_hash['request']}"
+      p = task.params_hash
+      caption = "🎨 #{p['prompt'].to_s.empty? ? p['request'] : p['prompt']}"
       send_photo(api, task.chat_id, result[:url], caption)
       :done
     end
