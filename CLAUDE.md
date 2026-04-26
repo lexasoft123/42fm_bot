@@ -142,6 +142,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/agent/tools/suno.rb` (agent-only, no direct command) |
 | FLUX image generation | `lib/flux_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/agent/tools/image_gen.rb` (agent-only, no direct command) |
 | Shared handler context | `lib/chat_context.rb` — `ChatContext` module (chat messages + knowledge for task handlers) |
+| Agent scratchpad | `lib/agent/scratchpad.rb` + `models/chat_state.rb` + `lib/agent/tools/scratchpad.rb` (`remember`/`forget` tools); auto-rendered as `{SCRATCHPAD}` in agent_prompt template |
 | DB schema | `db/migrate/` + `models/` — run with `bundle exec rake db:migrate` |
 | Sticker IDs | `config/initializers/telegram_stickers.rb` |
 | SOCKS proxy | `config/settings.yml` (`proxy` group) + `lib/app_configurator.rb` |
@@ -163,6 +164,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | `songs` | `title`, `artist`, `album`, `genre`, `year`, `filepath` (unique, relative to music root), `duration`, `category` |
 | `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — `content='songs'`, `content_rowid='id'`, `unicode61 remove_diacritics 1` tokenizer; auto-synced via triggers |
 | `api_usage` | `chat_id`, `user_uid` (nullable — null for background extractions), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_compact`/`suno_lyrics`/`suno_tags`/`suno_parse`/`image_prompt`), `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per LLM API response; feeds `бот затраты` |
+| `chat_states` | `chat_id` (PK), `scratchpad` (JSON), `updated_at` — agent's per-chat working memory (intentions/notes/expectations); read at every agent turn; written via `remember`/`forget` tools. See ADR-003. |
 
 ## Gotchas
 
@@ -185,6 +187,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 - Knowledge auto-extraction runs in a background Thread every `knowledge.extract_every` messages per chat
 - Embeddings deduplication threshold is 0.92 cosine similarity — near-duplicate facts are not stored
 - Knowledge auto-compaction (`KnowledgeBase.compact!`) clusters near-dupes via stored embeddings (no API calls) and LLM-merges each cluster; triggered as a `knowledge_compact` background task when count >= adaptive threshold (`compact_at` × factor based on last run's avg cluster size); logs to `log/knowledge_compact.log`; history in `knowledge_compact_log` table
+- Agent scratchpad (`Agent::Scratchpad`, `chat_states` table) is per-chat working memory distinct from the knowledge base — knowledge = facts about the world, scratchpad = agent's own intentions/expectations/notes. Three categories: `intentions`, `notes`, `expectations`. Hard cap 6000 chars (~1500 tokens) with FIFO eviction from the largest category. Rendered as `{SCRATCHPAD}` placeholder in `agent_prompt`. Agent manages it via `remember`/`forget` tools. See ADR-003 for the full architecture rationale.
 - `бот сожми знания` (admin only) triggers compaction immediately for the current chat
 - All `бот <text>` requests — including search, images, gifs, horoscope — route through `GptChat` → `Agent::Runner`. The agent's `google_search` / `horoscope` / `generate_image` tools handle those intents and can compose multiple tools in one turn (e.g. "бот найди новости и нарисуй" → `google_search` then `generate_image`). There are no direct-dispatch commands for search or horoscope anymore.
 - Agent mode is the only mode: `GptChat` / `GptQuestion` always route through `Agent::Runner`, which lets GPT call bot tools (radio, weather, search, etc.) autonomously. Agent supports vision — replying to a photo with "бот ..." sends the image to Claude for recognition.

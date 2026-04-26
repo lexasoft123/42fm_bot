@@ -111,7 +111,8 @@ bin/bot
 │   │       ├── knowledge.rb   # Knowledge search/add/delete tools
 │   │       ├── horoscope.rb   # Horoscope tool
 │   │       ├── suno.rb        # Suno song generation tool
-│   │       └── image_gen.rb   # FLUX image generation tool
+│   │       ├── image_gen.rb   # FLUX image generation tool
+│   │       └── scratchpad.rb  # remember / forget — agent working memory (ADR-003)
 │   ├── chat_context.rb        # ChatContext module: shared chat context + knowledge lookup for handlers
 │   ├── task_handlers/
 │   │   ├── suno_handler.rb    # Suno background task: LLM parse → GPT lyrics → submit → poll → deliver
@@ -211,6 +212,7 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 | `songs` | `title`, `artist`, `album`, `genre`, `year` (int), `filepath` (unique, relative to music root), `duration` (int, seconds), `category` (top-level dir) |
 | `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — content table mode (`content='songs'`, `content_rowid='id'`), `unicode61 remove_diacritics 1` tokenizer, auto-synced via INSERT/UPDATE/DELETE triggers |
 | `api_usage` | `chat_id` (nullable), `user_uid` (nullable — null for knowledge extraction/compaction), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_compact`/`suno_lyrics`/`suno_tags`/`suno_parse`/`image_prompt`), `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per API response; `ApiUsage.record` is fire-and-forget (rescues errors so telemetry never breaks replies) |
+| `chat_states` | `chat_id` (PK, bigint), `scratchpad` (JSON: `intentions`/`notes`/`expectations` arrays of `{id, content, created_at}`), `updated_at`. Per-chat agent working memory; written via the `remember`/`forget` agent tools, read into `{SCRATCHPAD}` on every agent turn. Hard cap 6000 chars with FIFO eviction. See ADR-003. |
 
 **Relationships:**
 - `User` has_many `messages` (FK: `user_uid` → `users.uid`)

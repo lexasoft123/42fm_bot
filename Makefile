@@ -12,7 +12,8 @@ TEST_FILES := \
 	test/api_usage_test.rb \
 	test/gpt_master_test.rb \
 	test/cost_report_test.rb \
-	test/e2e_telemetry_test.rb
+	test/e2e_telemetry_test.rb \
+	test/scratchpad_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \

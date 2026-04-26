@@ -238,6 +238,7 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 | Add a background task handler | `lib/task_handlers/my_handler.rb` + `TaskRunner.register(...)` |
 | FLUX image generation | `lib/flux_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/agent/tools/image_gen.rb` (agent-only, no direct command) |
 | Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/agent/tools/suno.rb` (agent-only, no direct command) |
+| Agent scratchpad (working memory) | `lib/agent/scratchpad.rb` + `models/chat_state.rb` + `lib/agent/tools/scratchpad.rb` (`remember`/`forget`); rendered as `{SCRATCHPAD}` in `chat_gpt.agent_prompt`. See ADR-003. |
 | Change reply/response text | `config/replies/*.yml` |
 | Change TTS behavior | `lib/polly.rb` + `lib/tts_service.rb` |
 | Change GPT prompt/model | `config/settings.yml` (`chat_gpt` group) |

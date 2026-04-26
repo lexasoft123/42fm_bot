@@ -1,4 +1,5 @@
 require 'erb'
+require_relative 'scratchpad'
 
 module Agent
   class Runner
@@ -101,11 +102,13 @@ module Agent
     def build_initial_content
       image      = @image
       phrase     = @phrase
+      scratchpad = Agent::Scratchpad.render(@chat_id)
       rendered = ERB.new(Settings.chat_gpt['agent_prompt'], trim_mode: '-').result(binding)
       content = rendered
-        .gsub('{REQUEST}')   { @text.to_s }
-        .gsub('{CONTEXT}')   { @context.to_s }
-        .gsub('{KNOWLEDGE}') { @knowledge.to_s }
+        .gsub('{REQUEST}')    { @text.to_s }
+        .gsub('{CONTEXT}')    { @context.to_s }
+        .gsub('{KNOWLEDGE}')  { @knowledge.to_s }
+        .gsub('{SCRATCHPAD}') { scratchpad }
       GptMaster.split_cache_break(content)
     end
 

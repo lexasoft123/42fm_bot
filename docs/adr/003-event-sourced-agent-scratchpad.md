@@ -1,7 +1,8 @@
 # ADR-003: Event-Sourced Agent with Per-Chat Scratchpad
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-04-26
+**Updated:** 2026-04-26 — PR-1 (foundation) shipped: `chat_states` table, `Agent::Scratchpad` module, `remember`/`forget` tools, runner integration with `{SCRATCHPAD}` placeholder. PR-2 (event sources) and PR-3 (compaction + cron) still pending.
 
 ## Context
 
