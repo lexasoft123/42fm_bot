@@ -204,6 +204,7 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 
 | Table | Key Columns |
 |-------|-------------|
+| `chats` | `chat_id` (PK, bigint = Telegram chat id), `title`, `chat_type` (`group`/`supergroup`/`private`/`channel`), `authorized` (bool), `audio` (bool), `rate_limits` (JSON, mirrors Settings.auth.chats[].rate_limits), `first_seen_at`, `last_seen_at`. Populated at startup via `Chat.sync_from_config!` from `Settings.auth.chats` and per-message via `Chat.touch_seen`. Associations: `has_one :chat_state`, `has_many :messages`/`:background_tasks`/`:api_usages`/`:knowledge_facts`. |
 | `users` | `uid` (Telegram ID), `name`, `first_name`, `last_name`, `role` (`new`/`member`/`admin`), `last_order` |
 | `messages` | `user_uid` (nullable — nil for bot replies), `chat_id`, `body`, `role` (`user`/`bot`), `message_id` (Telegram per-chat id, nullable on legacy rows), `reply_to_message_id`, `message_thread_id` (forum topic), `forwarded` (bool, default false), `edited_at` |
 | `phrases` | `user_id`, `content` (unique) — user-submitted catchphrases |

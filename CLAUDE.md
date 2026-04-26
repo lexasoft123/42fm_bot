@@ -155,6 +155,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 
 | Table | Columns |
 |-------|---------|
+| `chats` | `chat_id` (PK, bigint = Telegram chat id), `title`, `chat_type` (`group`/`supergroup`/`private`/`channel`), `authorized` (bool), `audio` (bool), `rate_limits` (JSON), `first_seen_at`, `last_seen_at`. Populated at startup from `Settings.auth['chats']` (`Chat.sync_from_config!`) and on every incoming message (`Chat.touch_seen`). `Chat` has_one :chat_state, has_many :messages/:background_tasks/:api_usages/:knowledge_facts. |
 | `users` | `uid`, `name`, `first_name`, `last_name`, `role` (`new`/`member`/`admin`), `last_order` |
 | `messages` | `user_uid` (nullable), `chat_id`, `body`, `role` (`user`/`bot`), `message_id` (Telegram per-chat id, nullable for legacy rows), `reply_to_message_id` (nullable), `message_thread_id` (forum topic, nullable), `forwarded` (bool), `edited_at` (nullable) |
 | `phrases` | `user_id`, `content` |
