@@ -185,7 +185,7 @@ class MessageResponder
     Thread.new do
       recent = ActiveRecord::Base.connection_pool.with_connection do
         Message.left_outer_joins(:user)
-          .select('users.name, messages.body')
+          .select(ChatContext::SELECT_COLS)
           .where(chat_id: chat_id, role: 'user')
           .order('messages.created_at DESC')
           .limit(extract_every)

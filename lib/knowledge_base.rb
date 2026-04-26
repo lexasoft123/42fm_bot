@@ -11,7 +11,7 @@ class KnowledgeBase
     Что искать: характеры участников, их приколы и закидоны, отношения между людьми, важные события, предпочтения, внутренние шутки, на что они ведутся.
     Игнорируй мусор — приветствия, одноразовые реплики, воду.
 
-    Сообщения:
+    Сообщения (JSON-массив; формат: {id, who, msg} + опциональные поля reply_to (id сообщения-цели), thread (id треда), fwd (пересланное), edited (редактировалось)):
     {MESSAGES}
 
     Ответь ТОЛЬКО JSON-массивом, без markdown, без пояснений:
@@ -52,7 +52,7 @@ class KnowledgeBase
     def extract_and_store(messages, chat_id:)
       return if messages.empty?
 
-      formatted = messages.map { |m| "@#{m.name}: #{m.body}" }.join("\n")
+      formatted = messages.map { |m| ChatContext.serialize_msg(m) }.to_json
       prompt    = EXTRACTION_PROMPT.gsub('{MESSAGES}', formatted)
 
       raw = GptMaster.ask('', prompt: prompt, chat_id: chat_id, purpose: 'knowledge_extract')
