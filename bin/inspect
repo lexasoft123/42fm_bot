@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+#
+# Read-only inspection probes for the prod bot. Designed to be invoked over
+# SSH from a dev machine:
+#
+#   ssh bot@92.241.191.11 'cd ~/bot && bin/inspect <probe> [arg]'
+#
+# Every probe is read-only — only `sqlite3 ... "SELECT ..."` and `grep`/`tail`
+# against log files. New probes added here are auto-approved by the
+# .claude/hooks/auto_approve_ssh.py hook (it whitelists `bin/inspect *`).
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DB=${BOT_DB:-db/bot.db}
+LOG=${BOT_LOG:-log/bot.log}
+DEFAULT_SINCE="$(date -u -d '24 hours ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -v-24H '+%Y-%m-%d %H:%M:%S')"
+
+usage() {
+  cat <<'EOF'
+Usage: bin/inspect <probe> [arg]
+
+ADR-003 verification probes:
+  scratchpad-recent  [since='YYYY-MM-DD HH:MM:SS']  chat_state writes since timestamp
+  agent-events       [since='YYYY-MM-DD HH:MM:SS']  recent agent_event task rows
+  cron-dispatches    [N=10]                          last N cron_tick dispatches
+  cron-health        [N=10]                          last N CronScheduler log lines
+  auto-remember      [N=10]                          last N Runner auto-remember entries
+  deferred           [N=10]                          last N "deferred retry_in" entries
+  manual-remember    [N=10]                          last N agent-initiated remember() calls
+
+General probes:
+  errors             [N=20]                          last N ERROR-level log lines
+  errors-today                                      ERROR lines from today
+  task-failures      [N=20]                          last N failed background_tasks
+  bot-status                                        Docker compose ps + last 5 'Starting bot' lines
+EOF
+}
+
+probe="${1:-}"
+arg="${2:-}"
+
+case "$probe" in
+  scratchpad-recent)
+    since="${arg:-$DEFAULT_SINCE}"
+    sqlite3 -header -column "$DB" \
+      "SELECT chat_id, length(scratchpad) AS len, updated_at
+         FROM chat_states
+        WHERE length(scratchpad) > 2 AND updated_at > '$since'
+        ORDER BY updated_at DESC;"
+    ;;
+  agent-events)
+    since="${arg:-$DEFAULT_SINCE}"
+    sqlite3 -header -column "$DB" \
+      "SELECT id, status, datetime(created_at) AS created,
+              substr(json_extract(params,'\$.event_type'),1,30) AS event,
+              substr(json_extract(params,'\$.summary'),1,80) AS summary
+         FROM background_tasks
+        WHERE task_type='agent_event' AND created_at > '$since'
+        ORDER BY id DESC LIMIT 20;"
+    ;;
+  cron-dispatches)
+    grep "CronScheduler: dispatched cron_tick" "$LOG" | tail -n "${arg:-10}"
+    ;;
+  cron-health)
+    grep "CronScheduler" "$LOG" | tail -n "${arg:-10}"
+    ;;
+  auto-remember)
+    grep "auto-remember" "$LOG" | tail -n "${arg:-10}"
+    ;;
+  deferred)
+    grep "deferred retry_in" "$LOG" | tail -n "${arg:-10}"
+    ;;
+  manual-remember)
+    grep "remember(" "$LOG" | tail -n "${arg:-10}"
+    ;;
+  errors)
+    grep -E '\bERROR\b' "$LOG" | tail -n "${arg:-20}"
+    ;;
+  errors-today)
+    today="$(date -u +%Y-%m-%d)"
+    grep -E "$today.*\bERROR\b" "$LOG" || echo "(no errors today)"
+    ;;
+  task-failures)
+    sqlite3 -header -column "$DB" \
+      "SELECT id, task_type, chat_id, attempts, datetime(updated_at) AS updated,
+              substr(coalesce(json_extract(result,'\$.error'),''),1,80) AS err
+         FROM background_tasks
+        WHERE status='failed'
+        ORDER BY id DESC LIMIT ${arg:-20};"
+    ;;
+  bot-status)
+    docker compose ps 2>/dev/null || true
+    echo
+    grep "Starting bot" "$LOG" | tail -n 5
+    ;;
+  ""|-h|--help)
+    usage
+    [[ "$probe" == "" ]] && exit 1 || exit 0
+    ;;
+  *)
+    echo "Unknown probe: $probe" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
