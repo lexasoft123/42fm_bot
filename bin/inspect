@@ -60,22 +60,22 @@ case "$probe" in
         ORDER BY id DESC LIMIT 20;"
     ;;
   cron-dispatches)
-    grep "CronScheduler: dispatched cron_tick" "$LOG" | tail -n "${arg:-10}"
+    grep "CronScheduler: dispatched cron_tick" "$LOG" | tail -n "${arg:-10}" || echo "(no matches)"
     ;;
   cron-health)
-    grep "CronScheduler" "$LOG" | tail -n "${arg:-10}"
+    grep "CronScheduler" "$LOG" | tail -n "${arg:-10}" || echo "(no matches)"
     ;;
   auto-remember)
-    grep "auto-remember" "$LOG" | tail -n "${arg:-10}"
+    grep "auto-remember" "$LOG" | tail -n "${arg:-10}" || echo "(no matches)"
     ;;
   deferred)
-    grep "deferred retry_in" "$LOG" | tail -n "${arg:-10}"
+    grep "deferred retry_in" "$LOG" | tail -n "${arg:-10}" || echo "(no matches)"
     ;;
   manual-remember)
-    grep "remember(" "$LOG" | tail -n "${arg:-10}"
+    grep "remember(" "$LOG" | tail -n "${arg:-10}" || echo "(no matches)"
     ;;
   errors)
-    grep -E '\bERROR\b' "$LOG" | tail -n "${arg:-20}"
+    grep -E '\bERROR\b' "$LOG" | tail -n "${arg:-20}" || echo "(no matches)"
     ;;
   errors-today)
     today="$(date -u +%Y-%m-%d)"
@@ -92,7 +92,7 @@ case "$probe" in
   bot-status)
     docker compose ps 2>/dev/null || true
     echo
-    grep "Starting bot" "$LOG" | tail -n 5
+    grep "Starting bot" "$LOG" | tail -n 5 || echo "(no matches)"
     ;;
   ""|-h|--help)
     usage
