@@ -7,10 +7,11 @@ Agent::ToolRegistry.register(
     'suno_task_id' => { type: 'string', description: 'Опциональный Suno taskId (external_id из background_tasks) конкретной песни. Если пусто — будет резолв через reply_to (если есть) или последняя готовая песня в чате.' },
   },
   handler: ->(args, ctx) {
-    if RateLimiter.exceeded?(ctx[:chat_id], 'suno')
-      mins = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno')
+    role = ctx[:user]&.role
+    if RateLimiter.exceeded?(ctx[:chat_id], 'suno', role: role)
+      mins = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno', role: role)
       next Agent::ToolResult.deferred(
-        user_text:    RateLimiter.reply(ctx[:chat_id], 'suno'),
+        user_text:    RateLimiter.reply(ctx[:chat_id], 'suno', role: role),
         intent:       "сделать обложку через #{mins} мин",
         retry_in_min: mins
       )

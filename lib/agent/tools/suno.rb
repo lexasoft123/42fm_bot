@@ -10,11 +10,12 @@ Agent::ToolRegistry.register(
     'with_cover_art' => { type: 'boolean', description: 'true если пользователь хочет ещё и обложку. После доставки песни автоматически создастся задача на cover_art (отдельный rate-limit не тратится сверх «suno», но если бакет уже исчерпан в момент чейна — обложка тихо пропустится).' },
   },
   handler: ->(args, ctx) {
-    if RateLimiter.exceeded?(ctx[:chat_id], 'suno')
-      mins  = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno')
+    role = ctx[:user]&.role
+    if RateLimiter.exceeded?(ctx[:chat_id], 'suno', role: role)
+      mins  = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno', role: role)
       title = (args['title'] || args['lyrics'] || 'песню').to_s.slice(0, 80)
       next Agent::ToolResult.deferred(
-        user_text:    RateLimiter.reply(ctx[:chat_id], 'suno'),
+        user_text:    RateLimiter.reply(ctx[:chat_id], 'suno', role: role),
         intent:       "спеть через #{mins} мин: #{title}",
         retry_in_min: mins
       )

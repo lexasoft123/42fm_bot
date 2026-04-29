@@ -14,10 +14,11 @@ Agent::ToolRegistry.register(
     'edit_source' => { type: 'boolean', description: 'true если редактируем фото из сообщения пользователя; false/опущен — генерация с нуля', optional: true },
   },
   handler: ->(args, ctx) {
-    if RateLimiter.exceeded?(ctx[:chat_id], 'image')
-      mins = RateLimiter.minutes_until_free(ctx[:chat_id], 'image')
+    role = ctx[:user]&.role
+    if RateLimiter.exceeded?(ctx[:chat_id], 'image', role: role)
+      mins = RateLimiter.minutes_until_free(ctx[:chat_id], 'image', role: role)
       next Agent::ToolResult.deferred(
-        user_text:    RateLimiter.reply(ctx[:chat_id], 'image'),
+        user_text:    RateLimiter.reply(ctx[:chat_id], 'image', role: role),
         intent:       "дорисовать через #{mins} мин: #{args['prompt']}",
         retry_in_min: mins
       )

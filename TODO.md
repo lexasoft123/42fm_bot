@@ -24,6 +24,11 @@ This file tracks pending work and parking-lot ideas. New entries land at the top
 
 * [ ] Temporary artifact storage for the agent — files / texts / scratch state that survives between agent turns within a session, distinct from the long-lived knowledge base and the per-chat scratchpad. Currently the agent re-fetches everything per turn. Open question: does the existing scratchpad already cover this, or do we need a separate ephemeral store with TTL?
 
+* [ ] Admin-menu support for editing `Settings.auth.rate_limits.admin.<svc>` from inside the menu (currently YAML-only).
+  - Today: per-chat rate limits are editable via the menu; admin per-role limits live in `settings.common.yml` and require a redeploy to change.
+  - Want: a "global limits" sub-view alongside chat-detail showing both default and admin caps; tap to edit.
+  - **Caveat**: `Settings` is read-only at runtime (loaded once at boot). Either move admin limits into a DB row (e.g. `chat_states.global_settings`) or accept that menu-edits write the YAML on disk + restart the container. The DB-row path is cleaner.
+
 ## Ideas / parking lot
 
 (Speculative, not committed. Promote to Pending when concrete enough to plan.)

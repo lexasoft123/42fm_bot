@@ -23,10 +23,11 @@ Agent::ToolRegistry.register(
       )
     end
 
-    if RateLimiter.exceeded?(ctx[:chat_id], 'suno')
-      mins = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno')
+    role = ctx[:user]&.role
+    if RateLimiter.exceeded?(ctx[:chat_id], 'suno', role: role)
+      mins = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno', role: role)
       next Agent::ToolResult.deferred(
-        user_text:    RateLimiter.reply(ctx[:chat_id], 'suno'),
+        user_text:    RateLimiter.reply(ctx[:chat_id], 'suno', role: role),
         intent:       "подпеть через #{mins} мин: #{(args['title'] || 'трек').to_s.slice(0, 80)}",
         retry_in_min: mins
       )

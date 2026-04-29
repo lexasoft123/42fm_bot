@@ -156,6 +156,13 @@ auth:
   rate_limits:
     image: { max: 1, window_minutes: 20 }
     suno:  { max: 1, window_minutes: 20 }
+    # Per-role overrides — used when ctx[:user].role matches. RateLimiter
+    # consults these BEFORE the per-chat or default bucket. Counters are
+    # still per-chat-shared, so an admin's higher cap simply lets them keep
+    # acting after regular users have hit theirs.
+    admin:
+      image: { max: 5, window_minutes: 20 }
+      suno:  { max: 5, window_minutes: 20 }
   # Super-admin UIDs (Telegram user ids) — set in config/settings.yml, not here.
   # Empty = no super-admins (fail-closed). The /admin menu is gated on this list.
   # super_admin_uids: []

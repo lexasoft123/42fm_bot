@@ -21,7 +21,22 @@ module RateLimiter
     ]
   }.freeze
 
-  def self.limit_for(chat_id, service)
+  # Resolve the rate-limit bucket for a (chat, service, role) triple.
+  # Priority order:
+  #   1. role == 'admin' AND Settings.auth['rate_limits']['admin'][service] set
+  #      → admin global override (e.g. 10x the regular cap).
+  #   2. Per-chat chat.rate_limits[service] → set via the admin menu.
+  #   3. Settings.auth['rate_limits'][service] → global default from settings.
+  #   4. Hard-coded fallback { max: 1, window_minutes: 20 }.
+  #
+  # Counters remain per-chat-shared: an admin's higher cap means they can
+  # keep acting after regular users have exhausted theirs (correct semantics —
+  # the chat counter still increments, but the admin's limit allows more).
+  def self.limit_for(chat_id, service, role: nil)
+    if role.to_s == 'admin'
+      admin_limit = Settings.auth.dig('rate_limits', 'admin', service)
+      return admin_limit if admin_limit
+    end
     chat = Chat.find_by(chat_id: chat_id)
     per_chat = parse_rate_limits(chat&.rate_limits)&.dig(service)
     per_chat ||
@@ -36,8 +51,8 @@ module RateLimiter
     nil
   end
 
-  def self.exceeded?(chat_id, service)
-    limit      = limit_for(chat_id, service)
+  def self.exceeded?(chat_id, service, role: nil)
+    limit      = limit_for(chat_id, service, role: role)
     task_types = TASK_TYPES[service]
     window     = limit['window_minutes'] * 60
     count      = BackgroundTask
@@ -47,8 +62,8 @@ module RateLimiter
     count >= limit['max']
   end
 
-  def self.minutes_until_free(chat_id, service)
-    limit      = limit_for(chat_id, service)
+  def self.minutes_until_free(chat_id, service, role: nil)
+    limit      = limit_for(chat_id, service, role: role)
     task_types = TASK_TYPES[service]
     window     = limit['window_minutes'] * 60
     oldest     = BackgroundTask
@@ -60,8 +75,8 @@ module RateLimiter
     [((oldest.created_at + window - Time.now) / 60).ceil, 1].max
   end
 
-  def self.reply(chat_id, service)
-    mins     = minutes_until_free(chat_id, service)
+  def self.reply(chat_id, service, role: nil)
+    mins     = minutes_until_free(chat_id, service, role: role)
     template = RATE_LIMIT_REPLIES[service].sample
     template % { mins: mins }
   end
