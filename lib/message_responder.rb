@@ -80,6 +80,15 @@ class MessageResponder
     process_voice_message if message.voice
 
     text = message.text || message.caption
+    # Captionless music attachment (message.audio or document with audio
+    # MIME) → synthesize a `бот` trigger so the agent runs with the
+    # audio_hint visible and can ask the user what to do (add_vocals /
+    # cover_audio / something else). Without this, forwarding a track to
+    # the bot's private chat with no caption is silently ignored.
+    # message.voice is intentionally excluded — it's already handled by
+    # process_voice_message above (which posts the file URL to the chat),
+    # and routing voice through the agent too would cause double-replies.
+    text = 'бот' if text.to_s.strip.empty? && music_attached?
     return unless text
 
     cmd = UnicodeUtils.downcase(text)
@@ -205,6 +214,11 @@ class MessageResponder
       user.last_name = message.from.last_name
       user.save
     end
+  end
+
+  def music_attached?
+    return true if message.audio
+    !!(message.document&.mime_type&.start_with?('audio/'))
   end
 
   def process_voice_message
