@@ -13,10 +13,11 @@ module AdminMenu
       end
 
       action = Router.parse(query.data)
-      Session.set(uid, message_id: message_id) if message_id
 
       case action.kind
       when :unknown
+        # Don't touch session state on garbage callbacks — a stale message_id
+        # from someone's lingering keyboard must not poison the redraw path.
         safe_answer(bot, query, action.answer)
       when :close
         begin
@@ -27,13 +28,16 @@ module AdminMenu
         Session.clear(uid)
         safe_answer(bot, query, '')
       when :await_input
+        Session.set(uid, message_id: message_id) if message_id
         Session.set_awaiting_input(uid, action.params.merge(kind: action.view))
         prompt = await_input_prompt(action.view)
         bot.api.sendMessage(chat_id: chat_id, text: prompt)
         safe_answer(bot, query, '')
       when :mutate
+        Session.set(uid, message_id: message_id) if message_id
         handle_mutation(bot, query, action, chat_id, message_id)
       else  # :render
+        Session.set(uid, message_id: message_id) if message_id
         view_response = render(action.view, action.params)
         edit_message(bot, chat_id, message_id, uid, view_response)
         safe_answer(bot, query, '')

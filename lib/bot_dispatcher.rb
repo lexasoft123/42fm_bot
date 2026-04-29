@@ -23,6 +23,12 @@ module BotDispatcher
 
     Chat.touch_seen(chat_id, title: message.chat.title, type: message.chat.type) rescue nil
     MessageResponder.new({ bot: bot, message: message, radio: radio }).respond
+  rescue => e
+    # Localise per-message faults so one bad update doesn't bounce the entire
+    # bot.listen loop into the outer 5s retry-from-scratch cycle. MessageResponder
+    # has its own internal rescue, but construction itself (e.g. user save) can
+    # raise before that fires.
+    LOGGER.error "[chat=#{message.chat.id rescue '?'}] BotDispatcher#handle_message: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
   end
 
   # Super-admin private chats bypass the chats-table allowlist so /admin works

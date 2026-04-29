@@ -79,7 +79,7 @@ class MessageResponder
     return if message.edit_date
     return if message.date + 30 < Time.now.to_i
     return if maybe_handle_admin_input
-    process_voice_message if message.voice
+    process_voice_message if message.voice && !super_admin_awaiting_input?
 
     text = message.text || message.caption
     return unless text
@@ -220,6 +220,13 @@ class MessageResponder
     return false unless @user.super_admin?
     return false unless AdminMenu::Session.awaiting_input?(@user.uid)
     AdminMenu::TextInputHandler.handle(@bot, @message, @user)
+  end
+
+  # If a super-admin is in awaiting_input mode, skip voice-message handling so
+  # the file URL (which contains the bot token) isn't echoed back into the
+  # private chat as a side effect of the audio passthrough.
+  def super_admin_awaiting_input?
+    message.chat.type == 'private' && @user.super_admin? && AdminMenu::Session.awaiting_input?(@user.uid)
   end
 
   def process_voice_message
