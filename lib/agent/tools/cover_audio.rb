@@ -4,7 +4,7 @@ Agent::ToolRegistry.register(
   parameters: {
     'style'         => { type: 'string', description: 'Целевой стиль на английском, через запятую. Без имён артистов. Пример: "synthwave, retro 80s, analog synth, neon, nostalgic"' },
     'title'         => { type: 'string', description: 'Название будущего трека.' },
-    'prompt'        => { type: 'string', description: 'Опционально: тема/настроение для нового исполнения.' },
+    'prompt'        => { type: 'string', description: 'Опционально: тема/настроение/текст для нового исполнения. Если пользователь дал КОНКРЕТНЫЙ текст — передай его сюда дословно, целиком, без парафраза. Если только тему — передай её кратко, без украшательств.' },
     'upload_url'    => { type: 'string', description: 'Опциональный URL аудио, если пользователь дал ссылку. Если пустой — берётся URL прикреплённого файла.' },
     'vocal_gender'  => { type: 'string', description: 'Опционально: "m" или "f".' },
     'negative_tags' => { type: 'string', description: 'Опционально: чего НЕ хотим, через запятую на английском.' },
