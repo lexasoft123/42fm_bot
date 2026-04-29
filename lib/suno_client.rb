@@ -107,30 +107,38 @@ class SunoClient
       taskId: suno_task_id, callBackUrl: 'https://example.com/noop')
   end
 
-  # Poll once for cover-art task. Same /record-info shape, but the success
-  # branch carries image URLs instead of audio. Returns :pending, :failed,
-  # :retry, or [{ image_url: }, ...].
+  # Poll once for cover-art task. Cover-art uses a different polling
+  # endpoint (`/api/v1/suno/cover/record-info`) and response shape than
+  # song generation. The shape is:
+  #
+  #   { data: { taskId, parentTaskId, completeTime, response: { images: [...] },
+  #             successFlag: 1|2, errorCode, errorMessage, createTime } }
+  #
+  # Empirically: successFlag=1 with non-empty response.images means done;
+  # successFlag=2 means still in progress; errorCode!=0 or errorMessage
+  # populated indicates failure. Returns :pending, :failed, :retry, or
+  # [{ image_url: }, ...].
   def poll_cover_art_once(task_id)
     t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    resp = HTTParty.get("#{@base_url}/api/v1/generate/record-info",
+    resp = HTTParty.get("#{@base_url}/api/v1/suno/cover/record-info",
       query: { taskId: task_id }, headers: headers, timeout: 30)
     took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
     return :pending unless resp.code == 200
     data = resp.parsed_response['data']
     return :pending unless data
-    LOGGER.debug "#{self.class.name}#poll_cover_art_once took=#{took_ms}ms status=#{data['status'].inspect}"
-    case data['status']
-    when 'SUCCESS'
-      images = data.dig('response', 'images') || data.dig('response', 'imageUrls') || data['images']
-      return :retry if images.nil? || images.empty?
-      Array(images).map { |url| { image_url: url } }
-    when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED'
-      :retry
-    when 'SENSITIVE_WORD_ERROR'
-      :failed
-    else
-      :pending
+    LOGGER.debug "#{self.class.name}#poll_cover_art_once took=#{took_ms}ms successFlag=#{data['successFlag'].inspect}"
+
+    images = data.dig('response', 'images')
+    return Array(images).map { |url| { image_url: url } } if images && !images.empty?
+
+    err_code = data['errorCode']
+    err_msg  = data['errorMessage']
+    if (err_code && err_code.to_i != 0) || (err_msg && !err_msg.to_s.empty?)
+      LOGGER.warn "#{self.class.name}#poll_cover_art_once Suno error: code=#{err_code} msg=#{err_msg.inspect}"
+      return :failed
     end
+
+    :pending
   rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
     LOGGER.warn "#{self.class.name} poll_cover_art_once: #{e.class}: #{e.message}"
     :pending

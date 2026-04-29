@@ -111,42 +111,64 @@ class SunoClientTest < Minitest::Test
     assert_match(/No taskId/, err.message)
   end
 
-  def test_poll_cover_art_once_extracts_image_urls_on_success
-    images = ['https://cdn/cover-1.png', 'https://cdn/cover-2.png']
+  def with_stubbed_get(captured: [], code: 200, body: {})
     HTTParty.singleton_class.send(:alias_method, :__get, :get)
-    HTTParty.singleton_class.send(:define_method, :get) do |_url, _opts|
-      FakeResponse.new(code: 200, body: {
-        'data' => { 'status' => 'SUCCESS', 'response' => { 'images' => images } }
-      })
+    HTTParty.singleton_class.send(:define_method, :get) do |url, opts|
+      captured << { url: url, query: opts[:query] }
+      FakeResponse.new(code: code, body: body)
     end
-    result = SunoClient.new.poll_cover_art_once('any-id')
+    yield
+  ensure
+    HTTParty.singleton_class.send(:alias_method, :get, :__get)
+    HTTParty.singleton_class.send(:remove_method, :__get)
+  end
+
+  def test_poll_cover_art_once_uses_dedicated_cover_endpoint
+    captured = []
+    with_stubbed_get(captured: captured, body: { 'data' => { 'successFlag' => 2 } }) do
+      SunoClient.new.poll_cover_art_once('any-id')
+    end
+    assert_match %r{/api/v1/suno/cover/record-info\z}, captured.last[:url],
+                 'cover-art uses /api/v1/suno/cover/record-info, not /api/v1/generate/record-info'
+    assert_equal 'any-id', captured.last[:query][:taskId]
+  end
+
+  def test_poll_cover_art_once_extracts_image_urls_on_success_flag_1
+    images = ['https://cdn/cover-1.png', 'https://cdn/cover-2.png']
+    body = { 'data' => { 'successFlag' => 1,
+                         'response' => { 'images' => images } } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_cover_art_once('any-id') }
     assert_kind_of Array, result
     assert_equal 2, result.size
     assert_equal images.first, result.first[:image_url]
-  ensure
-    HTTParty.singleton_class.send(:alias_method, :get, :__get)
-    HTTParty.singleton_class.send(:remove_method, :__get)
   end
 
-  def test_poll_cover_art_once_returns_failed_on_sensitive_word
-    HTTParty.singleton_class.send(:alias_method, :__get, :get)
-    HTTParty.singleton_class.send(:define_method, :get) do |_url, _opts|
-      FakeResponse.new(code: 200, body: { 'data' => { 'status' => 'SENSITIVE_WORD_ERROR' } })
-    end
-    assert_equal :failed, SunoClient.new.poll_cover_art_once('any-id')
-  ensure
-    HTTParty.singleton_class.send(:alias_method, :get, :__get)
-    HTTParty.singleton_class.send(:remove_method, :__get)
+  def test_poll_cover_art_once_returns_pending_when_in_progress
+    # successFlag=2, no images yet, no error fields — still working.
+    body = { 'data' => { 'successFlag' => 2, 'response' => nil,
+                         'errorCode' => nil, 'errorMessage' => nil } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_cover_art_once('any-id') }
+    assert_equal :pending, result
   end
 
-  def test_poll_cover_art_once_returns_pending_on_unknown_status
-    HTTParty.singleton_class.send(:alias_method, :__get, :get)
-    HTTParty.singleton_class.send(:define_method, :get) do |_url, _opts|
-      FakeResponse.new(code: 200, body: { 'data' => { 'status' => 'PROCESSING' } })
-    end
-    assert_equal :pending, SunoClient.new.poll_cover_art_once('any-id')
-  ensure
-    HTTParty.singleton_class.send(:alias_method, :get, :__get)
-    HTTParty.singleton_class.send(:remove_method, :__get)
+  def test_poll_cover_art_once_returns_failed_on_error_code
+    body = { 'data' => { 'successFlag' => 2, 'response' => nil,
+                         'errorCode' => 405, 'errorMessage' => 'rate limited' } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_cover_art_once('any-id') }
+    assert_equal :failed, result
+  end
+
+  def test_poll_cover_art_once_returns_failed_on_error_message_only
+    body = { 'data' => { 'successFlag' => 2, 'response' => nil,
+                         'errorCode' => 0, 'errorMessage' => 'sensitive content' } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_cover_art_once('any-id') }
+    assert_equal :failed, result
+  end
+
+  def test_poll_cover_art_once_treats_zero_errorcode_as_not_an_error
+    body = { 'data' => { 'successFlag' => 2, 'response' => nil,
+                         'errorCode' => 0, 'errorMessage' => '' } }
+    assert_equal :pending,
+                 with_stubbed_get(body: body) { SunoClient.new.poll_cover_art_once('any-id') }
   end
 end
