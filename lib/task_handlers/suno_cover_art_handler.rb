@@ -75,7 +75,7 @@ class SunoCoverArtHandler
       :failed
     when Array
       LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result.size} images"
-      delivered = send_images(api, task.chat_id, result, task.params_hash)
+      delivered = send_images(api, task.chat_id, result, task.params_hash, bg_task_external_id: task.external_id)
       if delivered
         ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
         :done
@@ -90,7 +90,7 @@ class SunoCoverArtHandler
     end
   end
 
-  def send_images(api, chat_id, clips, params)
+  def send_images(api, chat_id, clips, params, bg_task_external_id: nil)
     source_title = params['source_title']
     caption = source_title ? "🎨 обложка для «#{source_title}»" : '🎨 обложка'
 
@@ -139,14 +139,14 @@ class SunoCoverArtHandler
 
     return false unless result
 
-    persist_bot_media_rows(chat_id, result, caption)
+    persist_bot_media_rows(chat_id, result, caption, bg_task_external_id: bg_task_external_id)
     true
   rescue => e
     LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_images failed: #{e.class}: #{e.message}"
     false
   end
 
-  def persist_bot_media_rows(chat_id, result, caption)
+  def persist_bot_media_rows(chat_id, result, caption, bg_task_external_id: nil)
     messages = result.is_a?(Hash) ? result['result'] : result
     return unless messages.is_a?(Array)
     messages.each do |msg|
@@ -154,7 +154,8 @@ class SunoCoverArtHandler
       tid = msg.respond_to?(:message_thread_id) ? msg.message_thread_id : msg['message_thread_id']
       next unless mid
       ActiveRecord::Base.connection_pool.with_connection do
-        Message.create(role: 'bot', chat_id: chat_id, body: "[#{caption}]", message_id: mid, message_thread_id: tid)
+        Message.create(role: 'bot', chat_id: chat_id, body: "[#{caption}]", message_id: mid,
+                       message_thread_id: tid, bg_task_external_id: bg_task_external_id)
       end
     end
   rescue => e

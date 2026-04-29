@@ -225,7 +225,7 @@ class SunoTaskHandler
       p = task.params_hash
       title = p['title'] || 'Песня от 42FM'
       maybe_chain_cover_art(task, p, title)
-      send_audio(api, task.chat_id, result, title, p)
+      send_audio(api, task.chat_id, result, title, p, bg_task_external_id: task.external_id)
       if (p['generation_retries'] || 0) >= 1
         emit_agent_event(task, 'song_succeeded_after_retries',
           summary: "Песня '#{title}' получилась с #{p['generation_retries']}-й попытки.")
@@ -349,7 +349,7 @@ class SunoTaskHandler
     PROMPT
   end
 
-  def send_audio(api, chat_id, clips, title, params)
+  def send_audio(api, chat_id, clips, title, params, bg_task_external_id: nil)
     artist = params['artist'].to_s.strip
     performer = artist.empty? ? '42FM Bot' : artist
 
@@ -403,7 +403,7 @@ class SunoTaskHandler
     msg_id = messages&.first&.respond_to?(:message_id) ? messages.first.message_id : messages&.first&.dig('message_id')
     LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: sendMediaGroup ok, first_message_id=#{msg_id.inspect}"
 
-    persist_bot_media_rows(chat_id, messages, title, params)
+    persist_bot_media_rows(chat_id, messages, title, params, bg_task_external_id: bg_task_external_id)
 
     return unless params['lyrics']
 
@@ -418,7 +418,7 @@ class SunoTaskHandler
   # Save each clip from the media group as a bot Message row. Without these,
   # a user reply to the audio would point at a Telegram message_id we never
   # indexed, breaking reply_to-based context resolution.
-  def persist_bot_media_rows(chat_id, messages, title, params)
+  def persist_bot_media_rows(chat_id, messages, title, params, bg_task_external_id: nil)
     return unless messages.is_a?(Array)
     messages.each_with_index do |msg, i|
       mid = msg.respond_to?(:message_id) ? msg.message_id : msg['message_id']
@@ -426,7 +426,8 @@ class SunoTaskHandler
       next unless mid
       body = "[песня: #{title}#{messages.size > 1 ? " (#{i + 1}/#{messages.size})" : ''}]"
       ActiveRecord::Base.connection_pool.with_connection do
-        Message.create(role: 'bot', chat_id: chat_id, body: body, message_id: mid, message_thread_id: tid)
+        Message.create(role: 'bot', chat_id: chat_id, body: body, message_id: mid,
+                       message_thread_id: tid, bg_task_external_id: bg_task_external_id)
       end
     end
   rescue => e

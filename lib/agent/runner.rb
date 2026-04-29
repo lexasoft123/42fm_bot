@@ -8,7 +8,7 @@ module Agent
     MAX_TOOL_RESULT_LENGTH = 2000
     TOOL_RESULT_PREVIEW_CHARS = 600
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, image: nil, phrase: nil, audio: nil)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil)
       @text      = text
       @context   = context
       @knowledge = knowledge
@@ -20,7 +20,9 @@ module Agent
       @user      = user
       @setting   = 'agent'
       @api_type  = GptMaster.resolve_setting(@setting)[:api_type]
-      @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, bot: bot, image: image, audio: audio }
+      @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, bot: bot,
+                     image: image, audio: audio,
+                     reply_to_message_id: reply_to_message_id }
     end
 
     def run
