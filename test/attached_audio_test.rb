@@ -14,9 +14,14 @@ class AttachedAudioHarness
   def initialize(message:); @message = message; end
 
   def attached_audio
-    src = message.audio
-    src ||= message.voice
-    src ||= (message.document if message.document&.mime_type&.start_with?('audio/'))
+    audio_metadata_from(message) ||
+      (message.reply_to_message && audio_metadata_from(message.reply_to_message))
+  end
+
+  def audio_metadata_from(msg)
+    src = msg.audio
+    src ||= msg.voice
+    src ||= (msg.document if msg.document&.mime_type&.start_with?('audio/'))
     return nil unless src
 
     {
@@ -34,9 +39,9 @@ class AttachedAudioTest < Minitest::Test
   VoiceStub    = Struct.new(:file_id, :mime_type, :duration,        keyword_init: true)
   DocumentStub = Struct.new(:file_id, :mime_type,                   keyword_init: true)
 
-  def msg(audio: nil, voice: nil, document: nil, video: nil, video_note: nil, animation: nil)
-    Struct.new(:audio, :voice, :document, :video, :video_note, :animation)
-      .new(audio, voice, document, video, video_note, animation)
+  def msg(audio: nil, voice: nil, document: nil, video: nil, video_note: nil, animation: nil, reply_to_message: nil)
+    Struct.new(:audio, :voice, :document, :video, :video_note, :animation, :reply_to_message)
+      .new(audio, voice, document, video, video_note, animation, reply_to_message)
   end
 
   def test_audio_attachment_returns_metadata_only
@@ -92,5 +97,31 @@ class AttachedAudioTest < Minitest::Test
 
   def test_no_attachment_returns_nil
     assert_nil AttachedAudioHarness.new(message: msg).attached_audio
+  end
+
+  def test_audio_on_reply_target_is_picked_up
+    # User replies to a previous audio message with a text prompt — the
+    # audio is on reply_to_message, not the current message.
+    quoted = msg(audio: AudioStub.new(file_id: 'OLD-AUD', mime_type: 'audio/mpeg',
+                                      duration: 200, title: 'Old', performer: 'Band'))
+    current = msg(reply_to_message: quoted)
+    result = AttachedAudioHarness.new(message: current).attached_audio
+    refute_nil result
+    assert_equal 'OLD-AUD', result[:file_id]
+    assert_equal 'Old', result[:title]
+  end
+
+  def test_current_message_audio_takes_precedence_over_reply_target
+    a_now = AudioStub.new(file_id: 'NEW', mime_type: 'audio/mpeg', duration: 1, title: 'N', performer: nil)
+    quoted = msg(audio: AudioStub.new(file_id: 'OLD', mime_type: 'audio/mpeg', duration: 1, title: 'O', performer: nil))
+    current = msg(audio: a_now, reply_to_message: quoted)
+    result = AttachedAudioHarness.new(message: current).attached_audio
+    assert_equal 'NEW', result[:file_id]
+  end
+
+  def test_reply_target_with_no_audio_returns_nil
+    quoted = msg # plain text reply target
+    current = msg(reply_to_message: quoted)
+    assert_nil AttachedAudioHarness.new(message: current).attached_audio
   end
 end

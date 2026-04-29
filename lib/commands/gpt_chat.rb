@@ -64,15 +64,25 @@ module Commands
     # when mime_type starts with audio/. Skips video / video_note / animation.
     # Returns { file_id:, mime_type:, duration:, title:, performer: } or nil.
     #
+    # Also checks message.reply_to_message — when a user quotes a previous
+    # audio with a text prompt ("бот спой это под джаз" replying to an mp3),
+    # the audio lives on the reply target, not the current message. Mirrors
+    # extract_replied_image.
+    #
     # The Telegram file URL is resolved lazily inside Suno tool handlers via
     # `TelegramFile.public_url(ctx[:bot].api, ctx[:audio][:file_id])` — only
     # when a tool actually needs it. Calling getFile here unconditionally
     # would burn a Telegram round-trip for every audio-bearing message
     # regardless of whether the agent decides to use the audio.
     def attached_audio
-      src = message.audio
-      src ||= message.voice
-      src ||= (message.document if message.document&.mime_type&.start_with?('audio/'))
+      audio_metadata_from(message) ||
+        (message.reply_to_message && audio_metadata_from(message.reply_to_message))
+    end
+
+    def audio_metadata_from(msg)
+      src = msg.audio
+      src ||= msg.voice
+      src ||= (msg.document if msg.document&.mime_type&.start_with?('audio/'))
       return nil unless src
 
       {
