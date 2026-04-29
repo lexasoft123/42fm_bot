@@ -22,7 +22,8 @@ TEST_FILES := \
 	test/attached_audio_test.rb \
 	test/telegram_file_test.rb \
 	test/suno_cover_art_handler_test.rb \
-	test/cover_art_tool_test.rb
+	test/cover_art_tool_test.rb \
+	test/admin_menu_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \

@@ -353,6 +353,16 @@ Loads `config/replies/*.yml`. Each entry has a regex trigger and a list of respo
 ### Dice — `lib/dice.rb`
 Rolls 2 dice for user and 2 for bot, determines winner, returns templated response from `config/lib/dice.yml`.
 
+### Admin menu — `lib/admin_menu/` + `lib/bot_dispatcher.rb`
+Inline-keyboard menu in the super-admin's private chat for runtime bot administration (no SSH or YAML edits required for routine config). Triggered by `/admin` or `бот меню`; gated on `Settings.auth['super_admin_uids']`.
+- **`BotDispatcher`** (`lib/bot_dispatcher.rb`) — entry from `bot.listen`. Dispatches `Message` → `MessageResponder`, `CallbackQuery` → `AdminMenu::CallbackHandler`, anything else → debug-log. Owns the chat-allowlist check including the implicit-auth bypass for super-admins in private chat.
+- **`AdminMenu::Session`** (`lib/admin_menu/session.rb`) — Mutex-guarded in-memory state per super-admin uid. Lost on restart (acceptable — sessions are short). `awaiting_input?` has a built-in 5-min TTL; stale sessions auto-clear on access.
+- **`AdminMenu::Views`** (`lib/admin_menu/views.rb`) — view builders. Each method returns `{ text:, reply_markup: }`. Plain text + emoji only — no `parse_mode` (chat titles can contain Markdown-active characters that would break renders).
+- **`AdminMenu::Router`** (`lib/admin_menu/router.rb`) — parses `adm:<view>[:<param>...]` callback_data into `Action` structs (`render` / `mutate` / `await_input` / `close` / `unknown`).
+- **`AdminMenu::CallbackHandler`** (`lib/admin_menu/callback_handler.rb`) — invoked from `BotDispatcher`. Permission-checks against `super_admin_uids`, performs DB mutations, calls `editMessageText` to update the menu in place, dismisses the loading spinner via `answerCallbackQuery`. Includes guards: refuse to deauthorize a super-admin's own private chat; refuse to demote a super-admin's `users.role`; show a confirmation sub-view before deauthorizing the LAST authorized chat.
+- **`AdminMenu::TextInputHandler`** (`lib/admin_menu/text_input_handler.rb`) — invoked from `MessageResponder#maybe_handle_admin_input` when the super-admin types free text and `Session.awaiting_input?` is true. Validates input (rate-limit edits: `max,window_minutes` both positive integers), calls `Chat#update_rate_limits!`, redraws the menu. Bypasses on `/cancel`, any `/`-prefix command, or `бот`/`жпт`/`балаболь`-prefix agent triggers.
+- **`Commands::AdminMenuOpen`** (`lib/commands/admin_menu_open.rb`) — registered first in `Commands::REGISTRY`. `match?` returns true ONLY for super-admin in private chat with text `/admin` or `бот меню` — preserves existing behavior in all other contexts (e.g. `бот меню` in groups still routes to `GptChat` / Agent).
+
 ---
 
 ## External Services

@@ -154,6 +154,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | DB schema | `db/migrate/` + `models/` — run with `bundle exec rake db:migrate` |
 | Sticker IDs | `config/initializers/telegram_stickers.rb` |
 | SOCKS proxy | `config/settings.yml` (`proxy` group) + `lib/app_configurator.rb` |
+| Admin menu (super-admin only) | `lib/admin_menu/*.rb` + `lib/commands/admin_menu_open.rb` + `lib/bot_dispatcher.rb`. `/admin` or `бот меню` in private chat from a super-admin opens an inline-keyboard menu to manage authorized chats, per-chat rate limits, and global `users.role`. |
 
 ## Services
 
@@ -177,6 +178,10 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 
 ## Gotchas
 
+- **Telegram update dispatch** — `bot.listen` (gem 2.7.0) yields `update.current_message` directly (the inner `Message` / `CallbackQuery` / `EditedMessage` / etc.), NOT the wrapper `Update`. `BotDispatcher.dispatch` (`lib/bot_dispatcher.rb`) does `case update when Message ... when CallbackQuery ... else log` — anything else is silently logged as ignored. Add new `when` branches there to handle additional update types.
+- **Super-admin (`Settings.auth['super_admin_uids']`)** — list of Telegram UIDs that get `/admin` menu access. Set in `config/settings.yml` (gitignored), NOT `settings.common.yml`. Empty list = no super-admins (fail-closed). Distinct from `users.role == 'admin'`: super-admin is the menu-gating list (settings-driven, almost-never-changes), `admin` role is the per-command gate (DB-driven, mutable via menu). At startup `AdminMenu.register_commands` calls `setMyCommands` scoped per super-admin uid so `/admin` shows in their Telegram menu button (the "/" icon next to the input field) — no need to remember the slash command.
+- **Super-admin private-chat implicit authorization** — `BotDispatcher#authorized?` short-circuits the `Chat.where(authorized: true)` allowlist for super-admins in private chat. This makes `/admin` work on first deploy without pre-seeding a `chats` row, AND prevents the menu from creating an unrecoverable lock-out. Two further guards in `AdminMenu::CallbackHandler#perform_mutation`: refuse to deauthorize a chat whose `chat_id == any super_admin_uid`; refuse to demote a super-admin's `users.role`.
+- **Admin menu `awaiting_input` early-exit** — `MessageResponder#maybe_handle_admin_input` intercepts plain-text from super-admin in private chat ONLY when `AdminMenu::Session.awaiting_input?(uid)` is true. `Session.awaiting_input?` has a built-in 5-min TTL — stale sessions auto-clear on access. `TextInputHandler` itself bypasses on `/cancel` keyword, on any `/`-prefixed slash command, and on `бот`/`жпт`/`балаболь`-prefixed agent triggers — so normal bot use is never locked out by a dangling session.
 - Messages from non-whitelisted `chat_ids` are silently dropped in `lib/bot.rb`
 - Messages older than 30s are skipped
 - Voice messages only go to `audio_chat_ids`

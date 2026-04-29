@@ -51,6 +51,7 @@ require './lib/commands/knowledge_add'
 require './lib/commands/knowledge_list'
 require './lib/commands/knowledge_delete'
 require './lib/commands/knowledge_compact'
+require './lib/commands/admin_menu_open'
 require './lib/commands/fallback_reply'
 require './lib/commands/registry'
 
@@ -77,6 +78,7 @@ class MessageResponder
 
     return if message.edit_date
     return if message.date + 30 < Time.now.to_i
+    return if maybe_handle_admin_input
     process_voice_message if message.voice
 
     text = message.text || message.caption
@@ -205,6 +207,19 @@ class MessageResponder
       user.last_name = message.from.last_name
       user.save
     end
+  end
+
+  # Admin-menu free-text input intercept. Returns true when the message is
+  # consumed by AdminMenu::TextInputHandler; false otherwise (so normal
+  # dispatch continues). Only fires for super-admins in private chats with an
+  # active awaiting_input session — TextInputHandler itself enforces TTL,
+  # /cancel, and slash-/бот-prefix bypasses.
+  def maybe_handle_admin_input
+    return false unless message.text
+    return false unless message.chat.type == 'private'
+    return false unless @user.super_admin?
+    return false unless AdminMenu::Session.awaiting_input?(@user.uid)
+    AdminMenu::TextInputHandler.handle(@bot, @message, @user)
   end
 
   def process_voice_message

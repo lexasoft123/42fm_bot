@@ -1,6 +1,7 @@
 module Commands
   # Order matters — first match wins
   REGISTRY = [
+    AdminMenuOpen,
     TtsVoice,
     BoberVoice,
     OrderBlock,

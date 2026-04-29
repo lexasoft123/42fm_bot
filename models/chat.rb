@@ -46,4 +46,14 @@ class Chat < ActiveRecord::Base
     end
     chats.size
   end
+
+  # Merge a per-bucket rate limit into the existing rate_limits JSON column.
+  # Validates positive integers — second line of defense behind TextInputHandler.
+  def update_rate_limits!(bucket, max:, window_minutes:)
+    raise ArgumentError, 'max must be a positive integer' unless max.is_a?(Integer) && max.positive?
+    raise ArgumentError, 'window_minutes must be a positive integer' unless window_minutes.is_a?(Integer) && window_minutes.positive?
+    current = rate_limits.to_s.empty? ? {} : (JSON.parse(rate_limits) rescue {})
+    current[bucket.to_s] = { 'max' => max, 'window_minutes' => window_minutes }
+    update!(rate_limits: current.to_json)
+  end
 end

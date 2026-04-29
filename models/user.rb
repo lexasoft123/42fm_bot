@@ -6,4 +6,7 @@ class User < ActiveRecord::Base
     return self.last_order + 2.minutes
   end
 
+  def super_admin?
+    Settings.auth['super_admin_uids'].to_a.include?(uid)
+  end
 end

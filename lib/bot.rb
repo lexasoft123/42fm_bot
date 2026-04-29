@@ -30,20 +30,11 @@ begin
       synced = Chat.sync_from_config! rescue 0
       logger.info "Chat.sync_from_config!: synced #{synced} chats"
 
-      bot.listen do |message|
-        next unless message.is_a? Telegram::Bot::Types::Message
-        next unless message.from
-        options = { bot: bot, message: message, radio: @radio }
-        msg_text = message.text || message.caption
-        chat_id = message.chat.id
-        logger.debug "[chat=#{chat_id}] @#{message.from.username}: #{msg_text}"
-        logger.debug "[chat=#{chat_id}] chat_seen: title=#{message.chat.title.inspect} type=#{message.chat.type}"
-        if Chat.where(chat_id: chat_id, authorized: true).exists?
-          Chat.touch_seen(chat_id, title: message.chat.title, type: message.chat.type) rescue nil
-          MessageResponder.new(options).respond
-        else
-          logger.warn "[chat=#{chat_id}] unauthorized chat"
-        end
+      AdminMenu.register_commands(bot.api)
+      logger.info "AdminMenu.register_commands done"
+
+      bot.listen do |update|
+        BotDispatcher.dispatch(bot, update, radio: @radio)
       end
     end
   rescue => e
