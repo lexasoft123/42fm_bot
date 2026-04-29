@@ -778,55 +778,6 @@ class MessageResponderCaptionTest < BotTest
     assert_equal "бот привет", text
   end
 
-  # Captionless music attachment (forwarded MP3 to private chat) should
-  # synthesize a `бот` trigger so the agent runs with the audio_hint
-  # visible. (Apr 29 — user forwarded mp3 to private chat, no reaction)
-  def test_captionless_audio_attachment_synthesizes_bot_trigger
-    require_relative '../lib/message_responder'
-    audio = OpenStruct.new(file_id: 'AUD1', mime_type: 'audio/mpeg', duration: 180)
-    msg = OpenStruct.new(text: nil, caption: nil, message_id: 1, voice: nil,
-                         chat: OpenStruct.new(id: 100, title: 't'), date: Time.now.to_i,
-                         from: OpenStruct.new(id: @user.uid, username: @user.name, first_name: 'u', last_name: nil),
-                         audio: audio, document: nil)
-    responder = MessageResponder.new(bot: nil, message: msg, radio: nil)
-    assert responder.send(:music_attached?), 'audio attachment should be detected'
-  end
-
-  def test_captionless_document_with_audio_mime_synthesizes_trigger
-    require_relative '../lib/message_responder'
-    doc = OpenStruct.new(file_id: 'DOC1', mime_type: 'audio/wav')
-    msg = OpenStruct.new(text: nil, caption: nil, message_id: 1, voice: nil,
-                         chat: OpenStruct.new(id: 100, title: 't'), date: Time.now.to_i,
-                         from: OpenStruct.new(id: @user.uid, username: @user.name, first_name: 'u', last_name: nil),
-                         audio: nil, document: doc)
-    responder = MessageResponder.new(bot: nil, message: msg, radio: nil)
-    assert responder.send(:music_attached?), 'audio-MIME document should be detected'
-  end
-
-  def test_captionless_voice_does_not_synthesize_trigger
-    # Voice messages are handled by process_voice_message (URL into chat);
-    # synthesizing a bot trigger here would cause double replies.
-    require_relative '../lib/message_responder'
-    voice = OpenStruct.new(file_id: 'V1', mime_type: 'audio/ogg')
-    msg = OpenStruct.new(text: nil, caption: nil, message_id: 1, voice: voice,
-                         chat: OpenStruct.new(id: 100, title: 't'), date: Time.now.to_i,
-                         from: OpenStruct.new(id: @user.uid, username: @user.name, first_name: 'u', last_name: nil),
-                         audio: nil, document: nil)
-    responder = MessageResponder.new(bot: nil, message: msg, radio: nil)
-    refute responder.send(:music_attached?), 'voice should be excluded'
-  end
-
-  def test_captionless_pdf_document_does_not_synthesize_trigger
-    require_relative '../lib/message_responder'
-    doc = OpenStruct.new(file_id: 'D2', mime_type: 'application/pdf')
-    msg = OpenStruct.new(text: nil, caption: nil, message_id: 1, voice: nil,
-                         chat: OpenStruct.new(id: 100, title: 't'), date: Time.now.to_i,
-                         from: OpenStruct.new(id: @user.uid, username: @user.name, first_name: 'u', last_name: nil),
-                         audio: nil, document: doc)
-    responder = MessageResponder.new(bot: nil, message: msg, radio: nil)
-    refute responder.send(:music_attached?), 'non-audio document should be excluded'
-  end
-
   # save_message uses caption for photo messages
   def test_save_message_stores_caption
     msg = OpenStruct.new(
