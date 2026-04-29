@@ -12,6 +12,7 @@ Full docs: `docs/architecture.md` | Agent guide: `docs/agents.md`
 - **Back up `db/bot.db` on prod only when the deploy includes a new migration.** Run `make backup` — code-only deploys don't need it. See `Backing up the prod DB` below for details.
 - **Never `scp config/settings.yml` to prod.** Local and prod copies intentionally diverge (e.g. `proxy` is enabled only on prod). To change prod settings, ssh in and edit in place, or hand the user the exact diff to apply.
 - **In plan mode, run the `plan-reviewer` agent (via the Task tool) on the plan file before calling ExitPlanMode.** Then **report the reviewer's findings to the user verbatim** before applying any patches. Wait for the user to decide which findings to act on — do not auto-apply. Only after the user has seen the findings (and you've patched what they agreed to) should you call ExitPlanMode. Manual ad-hoc reviews of older plans: `/review-plan <path>`.
+- **For substantive code changes (new features, multi-file refactors), invoke the `code-reviewer` agent before commit.** Same workflow as `plan-reviewer`: report findings to the user verbatim, wait for their call, then patch and commit. Skip for trivial edits (typos, single-line fixes). Manual ad-hoc reviews: `/review-code [path]` (defaults to staged or branch diff). The reviewer uses Ruby LSP for symbol/caller resolution.
 - Always update all documents on changes.
 
 ---
