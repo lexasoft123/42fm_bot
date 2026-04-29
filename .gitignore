@@ -12,7 +12,7 @@ radio.yml
 *~
 *.swp
 *.swo
-*.db
+db/*.db*
 *.log
 /pids
 /bober
