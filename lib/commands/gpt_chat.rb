@@ -19,12 +19,13 @@ module Commands
 
       phrase = maybe_save_phrase(text)
       replied_image = extract_image || extract_replied_image
+      audio = attached_audio
 
       reply = Agent::Runner.new(
         text: text, context: get_chat_context,
         knowledge: get_relevant_knowledge(text),
         radio: radio, chat_id: chat_id, user: user, bot: bot,
-        image: replied_image, phrase: phrase
+        image: replied_image, phrase: phrase, audio: audio
       ).run
       CommandResult.text(reply, reply_to_message_id: message.message_id, persist_as_bot_reply: true)
     end
@@ -56,6 +57,33 @@ module Commands
       photos = message.reply_to_message.photo
       return nil unless photos.is_a?(Array) && !photos.empty?
       download_photo(photos.last.file_id)
+    end
+
+    # Pull a public Telegram URL for an attached audio file. Allowlists:
+    # message.audio (any audio), message.voice (OGG), message.document only
+    # when mime_type starts with audio/. Skips video / video_note / animation.
+    # Returns { url:, mime_type:, duration:, title:, performer: } or nil.
+    def attached_audio
+      src = message.audio
+      src ||= message.voice
+      src ||= (message.document if message.document&.mime_type&.start_with?('audio/'))
+      return nil unless src
+
+      file = bot.api.getFile(file_id: src.file_id)
+      file_path = file.respond_to?(:file_path) ? file.file_path : file.dig('result', 'file_path')
+      return nil unless file_path
+
+      token = Settings.telegram['token']
+      {
+        url:        "https://api.telegram.org/file/bot#{token}/#{file_path}",
+        mime_type:  src.respond_to?(:mime_type) ? src.mime_type : nil,
+        duration:   src.respond_to?(:duration)  ? src.duration  : nil,
+        title:      src.respond_to?(:title)     ? src.title     : nil,
+        performer:  src.respond_to?(:performer) ? src.performer : nil,
+      }
+    rescue => e
+      LOGGER.warn "[chat=#{chat_id}] #{self.class.name}#attached_audio failed: #{e.class}: #{e.message}"
+      nil
     end
 
     def download_photo(file_id)

@@ -69,15 +69,67 @@ class SunoClient
 
   # Submit song generation request. Returns task_id string.
   def submit(title:, lyrics:, tags:, instrumental: false)
+    post_for_task_id('/api/v1/generate',
+      customMode: true, prompt: lyrics, style: tags, title: title,
+      model: @model, instrumental: instrumental,
+      callBackUrl: 'https://example.com/noop')
+  end
+
+  # Submit add-vocals request: layer AI vocals over a user-provided audio URL.
+  # Returns one clip on success. task_id polled via /record-info like submit.
+  def add_vocals(upload_url:, prompt:, title:, style:, negative_tags: '', vocal_gender: nil)
+    body = { uploadUrl: upload_url, prompt: prompt, title: title, style: style,
+             negativeTags: negative_tags, model: @model,
+             callBackUrl: 'https://example.com/noop' }
+    body[:vocalGender] = vocal_gender if vocal_gender
+    post_for_task_id('/api/v1/generate/add-vocals', **body)
+  end
+
+  # Submit upload-cover request: musical reinterpretation of a user-provided
+  # audio URL in a new style. Returns 2 clips on success.
+  def cover_audio(upload_url:, style:, title:, prompt: '', negative_tags: '', vocal_gender: nil)
+    body = { uploadUrl: upload_url, customMode: true, instrumental: false,
+             style: style, title: title, prompt: prompt,
+             negativeTags: negative_tags, model: @model,
+             callBackUrl: 'https://example.com/noop' }
+    body[:vocalGender] = vocal_gender if vocal_gender
+    post_for_task_id('/api/v1/generate/upload-cover', **body)
+  end
+
+  # Submit cover-art request: generate 2 album-art images for an existing Suno
+  # song task. Polled via /record-info like everything else.
+  def cover_art(suno_task_id:)
+    post_for_task_id('/api/v1/suno/cover/generate',
+      taskId: suno_task_id, callBackUrl: 'https://example.com/noop')
+  end
+
+  # Poll once for cover-art task. Same /record-info shape, but the success
+  # branch carries image URLs instead of audio. Returns :pending, :failed,
+  # :retry, or [{ image_url: }, ...].
+  def poll_cover_art_once(task_id)
     t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    resp = HTTParty.post("#{@base_url}/api/v1/generate",
-      body: { customMode: true, prompt: lyrics, style: tags, title: title,
-              model: @model, instrumental: instrumental,
-              callBackUrl: 'https://example.com/noop' }.to_json,
-      headers: headers, timeout: 30)
-    LOGGER.debug "#{self.class.name}#submit took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms code=#{resp.code}"
-    raise "Suno submit failed: #{resp.code} #{resp.body}" unless resp.code == 200
-    resp.parsed_response.dig('data', 'taskId') || raise("No taskId in response")
+    resp = HTTParty.get("#{@base_url}/api/v1/generate/record-info",
+      query: { taskId: task_id }, headers: headers, timeout: 30)
+    took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
+    return :pending unless resp.code == 200
+    data = resp.parsed_response['data']
+    return :pending unless data
+    LOGGER.debug "#{self.class.name}#poll_cover_art_once took=#{took_ms}ms status=#{data['status'].inspect}"
+    case data['status']
+    when 'SUCCESS'
+      images = data.dig('response', 'images') || data.dig('response', 'imageUrls') || data['images']
+      return :retry if images.nil? || images.empty?
+      Array(images).map { |url| { image_url: url } }
+    when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED'
+      :retry
+    when 'SENSITIVE_WORD_ERROR'
+      :failed
+    else
+      :pending
+    end
+  rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
+    LOGGER.warn "#{self.class.name} poll_cover_art_once: #{e.class}: #{e.message}"
+    :pending
   end
 
   # Single non-blocking poll. Returns :pending, :failed, or { audio_url:, title:, duration: }
@@ -133,6 +185,14 @@ class SunoClient
   end
 
   private
+
+  def post_for_task_id(path, **body)
+    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    resp = HTTParty.post("#{@base_url}#{path}", body: body.to_json, headers: headers, timeout: 30)
+    LOGGER.debug "#{self.class.name}#post #{path} took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms code=#{resp.code}"
+    raise "Suno #{path} failed: #{resp.code} #{resp.body}" unless resp.code == 200
+    resp.parsed_response.dig('data', 'taskId') || raise("No taskId in response from #{path}")
+  end
 
   def headers
     { 'Content-Type' => 'application/json',

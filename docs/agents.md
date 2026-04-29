@@ -238,6 +238,10 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 | Add a background task handler | `lib/task_handlers/my_handler.rb` + `TaskRunner.register(...)` |
 | FLUX image generation | `lib/flux_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/agent/tools/image_gen.rb` (agent-only, no direct command) |
 | Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/agent/tools/suno.rb` (agent-only, no direct command) |
+| Suno add-vocals (sing along to user audio) | `lib/agent/tools/add_vocals.rb` → `suno_add_vocals` task (handled by `SunoTaskHandler`); 1 clip output |
+| Suno upload-cover (musical cover) | `lib/agent/tools/cover_audio.rb` → `suno_cover_audio` task (handled by `SunoTaskHandler`); 2 clip output |
+| Suno cover-art (album-art images) | `lib/agent/tools/cover_art.rb` → `suno_cover_art` task → `lib/task_handlers/suno_cover_art_handler.rb`; 2 PNG output |
+| Audio attachment plumbing | `lib/commands/gpt_chat.rb#attached_audio` extracts URL from `message.audio` / `message.voice` / `message.document` (audio MIME); threaded into `Agent::Runner` as `audio:` and exposed in tool ctx |
 | Agent scratchpad (working memory) | `lib/agent/scratchpad.rb` + `models/chat_state.rb` + `lib/agent/tools/scratchpad.rb` (`remember`/`forget`); rendered as `{SCRATCHPAD}` in `chat_gpt.agent_prompt`. See ADR-003. |
 | Agent reacts to task outcomes | `lib/task_handlers/agent_event_handler.rb` + `lib/task_handlers/agent_event_emitter.rb` mixin (used by image_gen + suno handlers). 10/hour/chat cap. See ADR-003 PR-2. |
 | Change reply/response text | `config/replies/*.yml` |

@@ -8,18 +8,19 @@ module Agent
     MAX_TOOL_RESULT_LENGTH = 2000
     TOOL_RESULT_PREVIEW_CHARS = 600
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, image: nil, phrase: nil)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, image: nil, phrase: nil, audio: nil)
       @text      = text
       @context   = context
       @knowledge = knowledge
       @image     = image
       @phrase    = phrase
+      @audio     = audio
       @radio     = radio
       @chat_id   = chat_id
       @user      = user
       @setting   = 'agent'
       @api_type  = GptMaster.resolve_setting(@setting)[:api_type]
-      @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, bot: bot, image: image }
+      @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, bot: bot, image: image, audio: audio }
     end
 
     def run
@@ -110,7 +111,21 @@ module Agent
         .gsub('{CONTEXT}')    { @context.to_s }
         .gsub('{KNOWLEDGE}')  { @knowledge.to_s }
         .gsub('{SCRATCHPAD}') { scratchpad }
+      content += "\n\n#{audio_hint}" if @audio
       GptMaster.split_cache_break(content)
+    end
+
+    # When the user attaches audio, hint the model so it picks add_vocals /
+    # cover_audio when the caption is ambiguous. Includes title/duration when
+    # Telegram provided them so the agent has something to caption with.
+    def audio_hint
+      bits = []
+      bits << "title=#{@audio[:title].inspect}" if @audio[:title]
+      bits << "performer=#{@audio[:performer].inspect}" if @audio[:performer]
+      bits << "duration=#{@audio[:duration]}s" if @audio[:duration]
+      bits << "mime=#{@audio[:mime_type]}" if @audio[:mime_type]
+      desc = bits.empty? ? '' : " (#{bits.join(', ')})"
+      "[К сообщению прикреплён аудиофайл#{desc}. Если непонятно, что с ним делать — спроси: подпеть (add_vocals), сделать кавер (cover_audio), или другое.]"
     end
 
     def build_initial_messages(user_content)

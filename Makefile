@@ -16,7 +16,10 @@ TEST_FILES := \
 	test/scratchpad_test.rb \
 	test/chat_test.rb \
 	test/agent_event_test.rb \
-	test/cron_scheduler_test.rb
+	test/cron_scheduler_test.rb \
+	test/suno_handler_chain_test.rb \
+	test/suno_client_test.rb \
+	test/attached_audio_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \

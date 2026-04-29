@@ -1,8 +1,10 @@
 require_relative 'agent_event_emitter'
+require_relative '../media_download'
 
 class SunoTaskHandler
   include ChatContext
   include AgentEventEmitter
+  include MediaDownload
 
   MAX_PROMPT_FAILURES = 3
   MAX_SUBMIT_FAILURES = 3
@@ -16,6 +18,52 @@ class SunoTaskHandler
   end
 
   private
+
+  def compose_and_submit(task, api)
+    case task.task_type
+    when 'suno_add_vocals'  then submit_add_vocals(task, api)
+    when 'suno_cover_audio' then submit_cover_audio(task, api)
+    else                          compose_and_submit_generate(task, api)
+    end
+  end
+
+  def submit_add_vocals(task, api)
+    p = task.params_hash
+    begin
+      suno_task_id = SunoClient.new.add_vocals(
+        upload_url:    p['upload_url'],
+        prompt:        p['theme'].to_s,
+        title:         p['title'],
+        style:         p['style'].to_s,
+        negative_tags: p['negative_tags'].to_s,
+        vocal_gender:  p['vocal_gender']
+      )
+    rescue => e
+      return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit add_vocals: #{e.message}", raise_on_retry: e)
+    end
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted add_vocals #{suno_task_id}"
+    ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: suno_task_id) }
+    :pending
+  end
+
+  def submit_cover_audio(task, api)
+    p = task.params_hash
+    begin
+      suno_task_id = SunoClient.new.cover_audio(
+        upload_url:    p['upload_url'],
+        style:         p['style'].to_s,
+        title:         p['title'],
+        prompt:        p['prompt'].to_s,
+        negative_tags: p['negative_tags'].to_s,
+        vocal_gender:  p['vocal_gender']
+      )
+    rescue => e
+      return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit cover_audio: #{e.message}", raise_on_retry: e)
+    end
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted cover_audio #{suno_task_id}"
+    ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: suno_task_id) }
+    :pending
+  end
 
   PARSE_PROMPT = <<~PROMPT.freeze
     Разбери запрос на генерацию песни. Извлеки жанр, исполнителя (если упоминается) и тему.
@@ -48,7 +96,7 @@ class SunoTaskHandler
     Название: %{title}
   PROMPT
 
-  def compose_and_submit(task, api)
+  def compose_and_submit_generate(task, api)
     p = task.params_hash
 
     # Step 1: Parse freeform request with LLM (only for chat command path)
@@ -176,6 +224,7 @@ class SunoTaskHandler
       ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
       p = task.params_hash
       title = p['title'] || 'Песня от 42FM'
+      maybe_chain_cover_art(task, p, title)
       send_audio(api, task.chat_id, result, title, p)
       if (p['generation_retries'] || 0) >= 1
         emit_agent_event(task, 'song_succeeded_after_retries',
@@ -183,6 +232,41 @@ class SunoTaskHandler
       end
       :done
     end
+  end
+
+  # If the originating tool call set with_cover_art=true, enqueue a chained
+  # suno_cover_art task pointing at this song's external_id. Skipped if rate-
+  # limit bucket is exhausted or a cover-art task already exists for this
+  # source (dedup against poll_and_deliver re-entry / process restart).
+  def maybe_chain_cover_art(task, params, title)
+    return unless params['with_cover_art'] == true
+    return unless task.external_id
+
+    if RateLimiter.exceeded?(task.chat_id, 'suno')
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: with_cover_art=true but suno bucket exhausted — dropping cover-art chain"
+      return
+    end
+
+    already = ActiveRecord::Base.connection_pool.with_connection do
+      BackgroundTask.where(chat_id: task.chat_id, task_type: 'suno_cover_art')
+                    .where("json_extract(params, '$.source_task_id') = ?", task.external_id)
+                    .exists?
+    end
+    return if already
+
+    ActiveRecord::Base.connection_pool.with_connection do
+      BackgroundTask.create!(
+        task_type: 'suno_cover_art',
+        chat_id: task.chat_id,
+        max_attempts: 60,
+        params: { source_task_id: task.external_id,
+                  source_title:   title,
+                  user_uid:       params['user_uid'] }.to_json
+      )
+    end
+    LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: chained suno_cover_art for #{task.external_id} (charged 'suno' bucket via row-count)"
+  rescue => e
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: chain cover_art failed: #{e.class}: #{e.message}"
   end
 
   def mark_failed_and_notify(task, api, reason)
@@ -364,23 +448,8 @@ class SunoTaskHandler
     "#{name}.mp3"
   end
 
-  def download_to_tempfile(url, filename, chat_id: nil)
-    response = HTTParty.get(url, timeout: 60)
-    unless response.code == 200
-      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} download_to_tempfile: HTTP #{response.code} for #{url}"
-      return nil
-    end
-
-    tmp = Tempfile.new(['suno_', '.mp3'], '/tmp')
-    tmp.binmode
-    tmp.write(response.body)
-    tmp.rewind
-    LOGGER.debug "[chat=#{chat_id}] #{self.class.name} download_to_tempfile: #{response.body.bytesize} bytes → #{filename}"
-    tmp
-  rescue => e
-    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} download_to_tempfile failed: #{e.class}: #{e.message}"
-    nil
-  end
 end
 
 TaskRunner.register('suno_generate', SunoTaskHandler)
+TaskRunner.register('suno_add_vocals', SunoTaskHandler)
+TaskRunner.register('suno_cover_audio', SunoTaskHandler)
