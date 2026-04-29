@@ -65,14 +65,19 @@ class SunoHandlerChainTest < BotTest
     assert_equal 0, BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_art').count
   end
 
-  def test_chain_skips_when_rate_limit_exhausted
-    # Stub the rate limiter to report exhausted
+  def test_chain_proceeds_even_when_rate_limit_would_say_exhausted
+    # The chain bypasses the 'suno' bucket on purpose: the parent suno_generate
+    # row is itself counted in the bucket, so under default settings
+    # (max=1, window=20min) the bucket is *always* exhausted by the time we
+    # get here. Gating on it would silently drop the cover-art that the user
+    # was already promised.
     RateLimiter.singleton_class.send(:alias_method, :__exceeded, :exceeded?)
     RateLimiter.singleton_class.send(:define_method, :exceeded?) { |_, _| true }
 
     task = make_song_task(with_cover_art: true)
     @handler.send(:maybe_chain_cover_art, task, task.params_hash, 'Тестовая')
-    assert_equal 0, BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_art').count
+    assert_equal 1, BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_art').count,
+                 'chain must proceed regardless of bucket state'
   ensure
     RateLimiter.singleton_class.send(:alias_method, :exceeded?, :__exceeded)
     RateLimiter.singleton_class.send(:remove_method, :__exceeded)

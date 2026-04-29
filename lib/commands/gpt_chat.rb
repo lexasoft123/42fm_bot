@@ -59,31 +59,29 @@ module Commands
       download_photo(photos.last.file_id)
     end
 
-    # Pull a public Telegram URL for an attached audio file. Allowlists:
+    # Pull metadata for an attached audio file. Allowlists:
     # message.audio (any audio), message.voice (OGG), message.document only
     # when mime_type starts with audio/. Skips video / video_note / animation.
-    # Returns { url:, mime_type:, duration:, title:, performer: } or nil.
+    # Returns { file_id:, mime_type:, duration:, title:, performer: } or nil.
+    #
+    # The Telegram file URL is resolved lazily inside Suno tool handlers via
+    # `TelegramFile.public_url(ctx[:bot].api, ctx[:audio][:file_id])` — only
+    # when a tool actually needs it. Calling getFile here unconditionally
+    # would burn a Telegram round-trip for every audio-bearing message
+    # regardless of whether the agent decides to use the audio.
     def attached_audio
       src = message.audio
       src ||= message.voice
       src ||= (message.document if message.document&.mime_type&.start_with?('audio/'))
       return nil unless src
 
-      file = bot.api.getFile(file_id: src.file_id)
-      file_path = file.respond_to?(:file_path) ? file.file_path : file.dig('result', 'file_path')
-      return nil unless file_path
-
-      token = Settings.telegram['token']
       {
-        url:        "https://api.telegram.org/file/bot#{token}/#{file_path}",
-        mime_type:  src.respond_to?(:mime_type) ? src.mime_type : nil,
-        duration:   src.respond_to?(:duration)  ? src.duration  : nil,
-        title:      src.respond_to?(:title)     ? src.title     : nil,
-        performer:  src.respond_to?(:performer) ? src.performer : nil,
+        file_id:   src.file_id,
+        mime_type: src.respond_to?(:mime_type) ? src.mime_type : nil,
+        duration:  src.respond_to?(:duration)  ? src.duration  : nil,
+        title:     src.respond_to?(:title)     ? src.title     : nil,
+        performer: src.respond_to?(:performer) ? src.performer : nil,
       }
-    rescue => e
-      LOGGER.warn "[chat=#{chat_id}] #{self.class.name}#attached_audio failed: #{e.class}: #{e.message}"
-      nil
     end
 
     def download_photo(file_id)

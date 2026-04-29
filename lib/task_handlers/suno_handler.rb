@@ -235,17 +235,21 @@ class SunoTaskHandler
   end
 
   # If the originating tool call set with_cover_art=true, enqueue a chained
-  # suno_cover_art task pointing at this song's external_id. Skipped if rate-
-  # limit bucket is exhausted or a cover-art task already exists for this
-  # source (dedup against poll_and_deliver re-entry / process restart).
+  # suno_cover_art task pointing at this song's external_id.
+  #
+  # The chain is **not** subject to the 'suno' rate-limit bucket: the user
+  # paid the bucket cost when they asked for the song-with-cover-art, and
+  # the chain is bounded (one cover-art per song). Re-charging the bucket
+  # at chain time would silently drop the cover-art under default settings
+  # (max=1, window=20min) because the parent suno_generate row is still
+  # inside the window. The user was already promised the cover-art —
+  # delivering it isn't a separate user-initiated request.
+  #
+  # Dedup against re-entry / process restart via json_extract on
+  # source_task_id (sqlite-only; revisit if we migrate to Postgres).
   def maybe_chain_cover_art(task, params, title)
     return unless params['with_cover_art'] == true
     return unless task.external_id
-
-    if RateLimiter.exceeded?(task.chat_id, 'suno')
-      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: with_cover_art=true but suno bucket exhausted — dropping cover-art chain"
-      return
-    end
 
     already = ActiveRecord::Base.connection_pool.with_connection do
       BackgroundTask.where(chat_id: task.chat_id, task_type: 'suno_cover_art')
@@ -264,7 +268,7 @@ class SunoTaskHandler
                   user_uid:       params['user_uid'] }.to_json
       )
     end
-    LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: chained suno_cover_art for #{task.external_id} (charged 'suno' bucket via row-count)"
+    LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: chained suno_cover_art for #{task.external_id}"
   rescue => e
     LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: chain cover_art failed: #{e.class}: #{e.message}"
   end

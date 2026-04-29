@@ -77,6 +77,10 @@ class SunoClient
 
   # Submit add-vocals request: layer AI vocals over a user-provided audio URL.
   # Returns one clip on success. task_id polled via /record-info like submit.
+  # Per https://docs.sunoapi.org/suno-api/add-vocals the required fields are
+  # uploadUrl/prompt/title/style/negativeTags/callBackUrl — customMode and
+  # instrumental are NOT applicable (this endpoint always layers vocals over
+  # the input, no opt-out), so we omit them deliberately.
   def add_vocals(upload_url:, prompt:, title:, style:, negative_tags: '', vocal_gender: nil)
     body = { uploadUrl: upload_url, prompt: prompt, title: title, style: style,
              negativeTags: negative_tags, model: @model,

@@ -12,8 +12,10 @@ Agent::ToolRegistry.register(
   },
   handler: ->(args, ctx) {
     upload_url = args['upload_url'].to_s.strip
-    upload_url = ctx[:audio]&.dig(:url) if upload_url.empty?
-    if upload_url.to_s.empty?
+    if upload_url.empty? && ctx[:audio] && ctx[:audio][:file_id]
+      upload_url = TelegramFile.public_url(ctx[:bot].api, ctx[:audio][:file_id], chat_id: ctx[:chat_id]).to_s
+    end
+    if upload_url.empty?
       next Agent::ToolResult.deferred(
         user_text:    'Прикрепи аудиофайл или дай прямую ссылку — иначе кавер делать не из чего.',
         intent:       'сделать кавер, как только пользователь пришлёт исходник',

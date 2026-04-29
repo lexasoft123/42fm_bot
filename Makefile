@@ -19,7 +19,9 @@ TEST_FILES := \
 	test/cron_scheduler_test.rb \
 	test/suno_handler_chain_test.rb \
 	test/suno_client_test.rb \
-	test/attached_audio_test.rb
+	test/attached_audio_test.rb \
+	test/telegram_file_test.rb \
+	test/suno_cover_art_handler_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \
