@@ -205,4 +205,23 @@ class SunoClientTest < Minitest::Test
     assert_equal :pending,
                  with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
   end
+
+  # poll_once must surface the lyrics Suno used in the clip via the
+  # `prompt` field, mapped to `:lyrics` in the result hash. This is the
+  # only path by which add_vocals / cover_audio (which don't compose
+  # lyrics locally) get any text to send back to the chat.
+  def test_poll_once_extracts_lyrics_from_prompt_field
+    body = { 'data' => { 'status' => 'SUCCESS',
+                         'response' => { 'sunoData' => [
+                           { 'audioUrl' => 'https://cdn/clip-1.mp3',
+                             'title'    => 'Cover',
+                             'duration' => 120,
+                             'prompt'   => "[Verse 1]\nDoom doom dada doom\n[Chorus]\nLa la la" },
+                         ] } } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+    assert_kind_of Array, result
+    assert_equal 1, result.size
+    assert_equal "[Verse 1]\nDoom doom dada doom\n[Chorus]\nLa la la", result.first[:lyrics]
+    assert_equal 'https://cdn/clip-1.mp3', result.first[:audio_url]
+  end
 end

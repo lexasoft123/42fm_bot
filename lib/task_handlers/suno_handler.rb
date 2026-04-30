@@ -406,14 +406,28 @@ class SunoTaskHandler
 
     persist_bot_media_rows(chat_id, messages, title, params, bg_task_external_id: bg_task_external_id)
 
-    return unless params['lyrics']
+    lyrics = resolve_delivery_lyrics(params, clips)
+    return if lyrics.empty?
 
-    LOGGER.debug "[chat=#{chat_id}] #{self.class.name} send_audio: sending lyrics (#{params['lyrics'].to_s.length} chars, reply_to=#{msg_id.inspect})"
-    lyrics_resp = api.sendMessage(chat_id: chat_id, text: params['lyrics'], reply_to_message_id: msg_id)
-    persist_lyrics_row(chat_id, lyrics_resp, params['lyrics'], msg_id)
+    LOGGER.debug "[chat=#{chat_id}] #{self.class.name} send_audio: sending lyrics (#{lyrics.length} chars, reply_to=#{msg_id.inspect})"
+    lyrics_resp = api.sendMessage(chat_id: chat_id, text: lyrics, reply_to_message_id: msg_id)
+    persist_lyrics_row(chat_id, lyrics_resp, lyrics, msg_id)
     LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: lyrics sent"
   rescue => e
     LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_audio failed: #{e.class}: #{e.message} (#{e.backtrace&.first})"
+  end
+
+  # compose_song stores the locally-composed lyrics in `params['lyrics']`
+  # at submit time. add_vocals / cover_audio don't compose locally — Suno
+  # generates lyrics server-side and returns them in each clip's `:lyrics`
+  # field (extracted from the response's `prompt` by SunoClient#poll_once).
+  # Without the fallback, those task types would silently skip the
+  # follow-up text reply because `params['lyrics']` is nil for them.
+  def resolve_delivery_lyrics(params, clips)
+    from_params = params['lyrics'].to_s.strip
+    return from_params unless from_params.empty?
+    return '' unless clips.is_a?(Array) && clips.first
+    clips.first[:lyrics].to_s.strip
   end
 
   # Save each clip from the media group as a bot Message row. Without these,

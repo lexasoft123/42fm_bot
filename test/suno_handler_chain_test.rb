@@ -93,4 +93,38 @@ class SunoHandlerChainTest < BotTest
     reloaded = BackgroundTask.find(task.id)
     assert_equal true, reloaded.params_hash['with_cover_art']
   end
+
+  # --- resolve_delivery_lyrics: lyrics fallback for add_vocals/cover_audio ---
+
+  # compose_song path: `params['lyrics']` is set locally at submit time and
+  # wins over whatever Suno echoes back in the clip.
+  def test_resolve_delivery_lyrics_prefers_params_when_present
+    clips = [{ lyrics: 'suno-echoed' }]
+    result = @handler.send(:resolve_delivery_lyrics, { 'lyrics' => 'composed locally' }, clips)
+    assert_equal 'composed locally', result
+  end
+
+  # cover_audio / add_vocals path: no local lyrics → fall through to the
+  # clip's `:lyrics` (mapped from Suno's response.sunoData[].prompt).
+  def test_resolve_delivery_lyrics_falls_back_to_clip_when_params_empty
+    clips = [{ lyrics: "[Verse] cover lyrics from suno" }]
+    result = @handler.send(:resolve_delivery_lyrics, {}, clips)
+    assert_equal "[Verse] cover lyrics from suno", result
+  end
+
+  # `params['lyrics']` of whitespace-only is treated as empty and falls
+  # through — guards against an old retry path stashing a blank string.
+  def test_resolve_delivery_lyrics_treats_whitespace_params_as_empty
+    clips = [{ lyrics: 'real lyrics' }]
+    result = @handler.send(:resolve_delivery_lyrics, { 'lyrics' => "   \n  " }, clips)
+    assert_equal 'real lyrics', result
+  end
+
+  # If neither source has anything, return empty so the caller skips the
+  # sendMessage call entirely (the lone caller has `return if lyrics.empty?`).
+  def test_resolve_delivery_lyrics_returns_empty_when_neither_present
+    assert_equal '', @handler.send(:resolve_delivery_lyrics, {}, [{ lyrics: nil }])
+    assert_equal '', @handler.send(:resolve_delivery_lyrics, {}, [])
+    assert_equal '', @handler.send(:resolve_delivery_lyrics, { 'lyrics' => '' }, nil)
+  end
 end

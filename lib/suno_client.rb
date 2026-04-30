@@ -159,8 +159,14 @@ class SunoClient
       songs = data.dig('response', 'sunoData')
       return :retry if songs.nil? || songs.empty?
       songs.map do |song|
+        # `prompt` carries the actual lyrics Suno used in the clip — for
+        # add_vocals/cover_audio we never compose lyrics ourselves, so this
+        # is the only place to surface them. compose_song already passes
+        # lyrics through `params`, so this is additive (not the source of
+        # truth there).
         { audio_url: song['audioUrl'] || song['audio_url'],
-          title: song['title'], duration: song['duration'] }
+          title: song['title'], duration: song['duration'],
+          lyrics: song['prompt'] }
       end
     when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED'
       :retry # Suno-side transient — worker died; re-submitting usually works
