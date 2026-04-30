@@ -13,6 +13,8 @@ This file tracks pending work and parking-lot ideas. New entries land at the top
 
 ## Pending
 
+* [ ] Latency warn for slow agent iterations. Now that `agent` runs DeepSeek V4 Pro thinking, p95 per-iteration time jumps materially (live probe showed ~7s/iter, sometimes 18s+ on hard tasks). `Agent::Runner` already logs `took=Nms` per iter (lib/agent/runner.rb:54,62) but no threshold-warn. Cheap addition: `LOGGER.warn` if `iter_ms > 15_000` so we have a grep target before users complain. Plan also called out a 25s p95 rollback trigger but that needs an automated signal — simplest is a daily aggregator that grep's `iteration .* took=` and reports p95.
+
 * [ ] Per-chat admin permissions (Phase 2 of the admin menu).
   - **Today**: `users.role == 'admin'` is global — being admin in one chat means admin everywhere.
   - **Want**: per-chat admin assignment so user X can be admin in chat A but not in chat B.

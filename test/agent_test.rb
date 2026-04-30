@@ -432,6 +432,67 @@ class RunnerTest < BotTest
     assert tool_result[:content].end_with?('...')
   end
 
+  # DeepSeek thinking-mode rule: when tools are involved, the assistant's
+  # reasoning_content from a prior turn MUST be carried in the message history
+  # on the follow-up turn. Our runner relies on `raw.dig('choices', 0, 'message')`
+  # in build_assistant_message (openai branch) to return the WHOLE assistant
+  # message including reasoning_content + tool_calls. Lock that contract.
+  def test_runner_carries_reasoning_content_across_iterations_for_openai
+    # Capture original resolve_setting (a `def self.` class method) and override
+    # to force the openai branch. ensure-block restores via the captured Method
+    # so other tests in the suite (including production_errors_test.rb's own
+    # FakeGptMaster reopening) aren't disturbed.
+    original_resolve = FakeGptMaster.method(:resolve_setting)
+    FakeGptMaster.define_singleton_method(:resolve_setting) do |_name|
+      { api_key: 'fake', api_type: 'openai', api_url: 'http://fake',
+        model: 'deepseek-v4-pro', max_tokens: 100 }
+    end
+
+    Agent::ToolRegistry.register(name: 'echo', description: 'Echo it',
+      parameters: { 'msg' => { type: 'string' } },
+      handler: ->(_a, _c) { 'ok' })
+
+    iter1 = {
+      'choices' => [{
+        'message' => {
+          'role' => 'assistant',
+          'content' => nil,
+          'reasoning_content' => 'I should call the echo tool to verify.',
+          'tool_calls' => [{
+            'id' => 'call_1', 'type' => 'function',
+            'function' => { 'name' => 'echo', 'arguments' => '{"msg":"hi"}' },
+          }],
+        },
+        'finish_reason' => 'tool_calls',
+      }],
+    }
+    iter2 = {
+      'choices' => [{
+        'message' => { 'role' => 'assistant',
+                       'content' => 'done',
+                       'reasoning_content' => 'Tool returned ok, I respond.' },
+        'finish_reason' => 'stop',
+      }],
+    }
+
+    FakeGptMaster.enqueue(iter1, iter2)
+    result = build_runner(text: 'go', user: @user).run
+    assert_equal 'done', result
+
+    # Iter 2's request body must contain the prior assistant message with
+    # reasoning_content intact — that's the load-bearing multi-turn rule.
+    calls = FakeGptMaster.calls.select { |c| c[:method] == :call_raw }
+    assert_equal 2, calls.size
+    iter2_messages = calls[1][:messages]
+    assistant_msg = iter2_messages.find { |m| (m['role'] || m[:role]) == 'assistant' }
+    assert assistant_msg, 'iter2 must contain prior assistant message in history'
+    reasoning = assistant_msg['reasoning_content'] || assistant_msg[:reasoning_content]
+    assert_equal 'I should call the echo tool to verify.', reasoning,
+      'reasoning_content from iter1 must be preserved into iter2 (DeepSeek multi-turn rule)'
+  ensure
+    FakeGptMaster.define_singleton_method(:resolve_setting, original_resolve) if original_resolve
+  end
+
   # When image is provided, message content is an array with image and text blocks
   def test_build_messages_with_image
     FakeGptMaster.enqueue(anthropic_text('I see a cat'))

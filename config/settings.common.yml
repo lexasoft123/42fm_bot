@@ -20,6 +20,8 @@ chat_gpt:
       provider: deepseek
       model: deepseek-v4-pro
       max_tokens: 16000
+      thinking:
+        type: enabled
     # Used when the user attaches/replies-to an image — DeepSeek doesn't see
     # images, so vision requests fall back to Anthropic. Same toolset, same
     # prompt; only the LLM provider differs. Picked automatically by

@@ -13,6 +13,7 @@ module Settings
       'legacy_thinking' => { 'provider' => 'anthropic', 'model' => 'claude-sonnet-4-6', 'max_tokens' => 100, 'thinking_budget' => 1600 },
       'adaptive_thinking' => { 'provider' => 'anthropic', 'model' => 'claude-opus-4-7', 'max_tokens' => 100, 'thinking' => { 'type' => 'adaptive' }, 'output_config' => { 'effort' => 'high' } },
       'openai'  => { 'provider' => 'openai',    'model' => 'gpt-4' },
+      'deepseek_thinking' => { 'provider' => 'openai', 'model' => 'deepseek-v4-pro', 'thinking' => { 'type' => 'enabled' } },
     },
     'pricing' => {
       'claude-sonnet-4-6' => { 'input' => 3, 'output' => 15, 'cache_read' => 0.30, 'cache_write' => 3.75 },
@@ -301,6 +302,85 @@ class GptMasterBodyBuildingTest < BotTest
       HTTParty.singleton_class.remove_method(:post) rescue nil
     end
     assert captured['tools'].none? { |t| t.key?('cache_control') }
+  end
+
+  def test_openai_branch_passes_through_thinking_when_set
+    captured = nil
+    HTTParty.define_singleton_method(:post) do |_url, opts|
+      captured = JSON.parse(opts[:body])
+      FakeResponse.new(200,
+        'choices' => [{ 'message' => { 'content' => 'k' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 })
+    end
+    begin
+      GptMaster.new([{ role: 'user', content: 'hi' }], setting: 'deepseek_thinking',
+                    chat_id: 1, purpose: 'agent').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    assert_equal 'enabled', captured['thinking']['type']
+    refute captured['thinking'].key?('budget_tokens'),
+      'DeepSeek thinking shape is bare {type: enabled}, no Anthropic-style budget_tokens'
+  end
+
+  def test_openai_branch_omits_thinking_when_not_set
+    captured = nil
+    HTTParty.define_singleton_method(:post) do |_url, opts|
+      captured = JSON.parse(opts[:body])
+      FakeResponse.new(200,
+        'choices' => [{ 'message' => { 'content' => 'k' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 })
+    end
+    begin
+      GptMaster.new([{ role: 'user', content: 'hi' }], setting: 'openai',
+                    chat_id: 1, purpose: 'main_chat').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    refute captured.key?('thinking'),
+      'openai-compatible body must not include thinking when @thinking is nil'
+  end
+
+  # Cost-tracking insurance against future API drift: if a provider ever splits
+  # reasoning_tokens OUT of completion_tokens (OpenAI o-series convention),
+  # extract_usage must derive output from total - prompt so reasoning is still
+  # billed. Today DeepSeek folds reasoning INTO completion_tokens, so this
+  # branch is a no-op — the test locks in the safety net.
+  def test_openai_extract_usage_handles_reasoning_split_from_completion
+    HTTParty.define_singleton_method(:post) do |_url, _opts|
+      # total > prompt + completion → reasoning is separate. Output should be total-prompt.
+      FakeResponse.new(200,
+        'choices' => [{ 'message' => { 'content' => 'k' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 100, 'completion_tokens' => 30, 'total_tokens' => 200,
+                     'completion_tokens_details' => { 'reasoning_tokens' => 70 } })
+    end
+    begin
+      GptMaster.new([{ role: 'user', content: 'hi' }], setting: 'openai',
+                    chat_id: 1, purpose: 'main_chat').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    row = ApiUsage.last
+    assert_equal 100, row.input_tokens
+    assert_equal 100, row.output_tokens, 'output should be total(200) - prompt(100) = 100, not raw completion=30'
+  end
+
+  def test_openai_extract_usage_uses_completion_when_total_matches
+    HTTParty.define_singleton_method(:post) do |_url, _opts|
+      # total == prompt + completion → reasoning already in completion (DeepSeek today).
+      FakeResponse.new(200,
+        'choices' => [{ 'message' => { 'content' => 'k' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 100, 'completion_tokens' => 50, 'total_tokens' => 150,
+                     'completion_tokens_details' => { 'reasoning_tokens' => 20 } })
+    end
+    begin
+      GptMaster.new([{ role: 'user', content: 'hi' }], setting: 'openai',
+                    chat_id: 1, purpose: 'main_chat').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    row = ApiUsage.last
+    assert_equal 50, row.output_tokens, 'output should be completion=50 (no double-count of reasoning_tokens)'
   end
 end
 

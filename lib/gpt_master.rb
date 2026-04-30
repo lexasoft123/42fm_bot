@@ -163,10 +163,22 @@ class GptMaster
       if @system_prompt && !@system_prompt.empty?
         messages = [{ role: 'system', content: @system_prompt }] + @messages
       end
-      {
+      body = {
         model:    @model,
         messages: messages,
       }
+      # DeepSeek V4-Pro accepts the same `thinking: {type: enabled}` shape we
+      # use for Anthropic. Vanilla OpenAI chat-completions and Grok ignore
+      # unknown body keys, so a `thinking:` config on those providers is a
+      # no-op (not a 400). Caveat: stricter endpoints (Azure OpenAI strict
+      # mode, OpenAI /v1/responses) DO reject unknown keys — gate per-provider
+      # if we ever route this setting at one of those.
+      # reasoning_content in the response rides along automatically via
+      # build_assistant_message in agent runner (returns the whole
+      # choices[0].message hash) — required for multi-turn tool flows per
+      # DeepSeek docs.
+      body[:thinking] = symbolize(@thinking) if @thinking
+      body
     end
   end
 
@@ -257,9 +269,20 @@ class GptMaster
     else
       cached = u.dig('prompt_tokens_details', 'cached_tokens').to_i
       prompt = u['prompt_tokens'].to_i
+      completion = u['completion_tokens'].to_i
+      total = u['total_tokens'].to_i
+      # If the API exposes total and it's larger than prompt+completion, the
+      # provider has split reasoning_tokens (or another output category) out of
+      # completion_tokens. Re-derive output as `total - prompt` so reasoning is
+      # billed alongside visible completion. DeepSeek V4 today folds reasoning
+      # INTO completion_tokens (verified empirically: total == prompt + completion),
+      # so this branch is a no-op there. Costs nothing today, prevents silent
+      # under-counting if DeepSeek (or another openai-compat provider) ever
+      # adopts the OpenAI o-series convention.
+      output = (total > prompt + completion) ? (total - prompt) : completion
       {
         input:       prompt - cached,
-        output:      u['completion_tokens'].to_i,
+        output:      output,
         cache_read:  cached,
         cache_write: 0,
       }
