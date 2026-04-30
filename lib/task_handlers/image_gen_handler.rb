@@ -45,8 +45,14 @@ class ImageGenTaskHandler
         [{ role: 'user', content: llm_prompt }]
       end
 
+      # Image-edit prompt enrichment needs vision (the LLM has to see the source
+      # image to write a useful edit instruction). Route to `agent_vision`
+      # (Anthropic) when editing — DeepSeek rejects the {type: 'image', source:
+      # {...}} content block with "unknown variant 'image', expected 'text'"
+      # 400. Text-to-image enrichment stays on the cheaper `agent` setting.
+      enrich_setting = editing ? 'agent_vision' : 'agent'
       begin
-        p['prompt'] = GptMaster.new(messages, setting: 'agent',
+        p['prompt'] = GptMaster.new(messages, setting: enrich_setting,
                                     chat_id: task.chat_id, user_uid: p['user_uid'],
                                     purpose: 'image_prompt').call
         raise "GPT prompt failed" unless p['prompt'] && p['prompt'] != 'жпт не жпт'

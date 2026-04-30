@@ -393,9 +393,11 @@ class HandlerAdapterIntegrationTest < BotTest
   # template the handler picked. Returns a canned string from #call.
   class FakeGptMaster
     @@captured = []
+    @@settings = []
     def self.captured; @@captured; end
-    def self.reset!; @@captured = []; end
-    def initialize(messages, **_); @@captured << messages; end
+    def self.settings; @@settings; end
+    def self.reset!; @@captured = []; @@settings = []; end
+    def initialize(messages, **kw); @@captured << messages; @@settings << kw[:setting]; end
     def call; 'enriched prompt'; end
   end
 
@@ -475,6 +477,26 @@ class HandlerAdapterIntegrationTest < BotTest
     # appears in the LLM prompt FakeGptMaster captured.
     refute_empty FakeGptMaster.captured
     assert_match(/\[text_to_image\]/, gpt_text(FakeGptMaster.captured.first))
+  end
+
+  # Regression: prompt enrichment for image-edit MUST go to a vision-capable
+  # provider. Pre-fix, the handler hardcoded `setting: 'agent'` (DeepSeek),
+  # which rejects the {type: 'image', source: {...}} content block with
+  # `400 unknown variant 'image', expected 'text'`. Fix routes editing to
+  # `agent_vision` (Anthropic Sonnet 4.6) and keeps text-to-image on cheap
+  # `agent` (DeepSeek) where no image is sent.
+  def test_image_edit_uses_agent_vision_setting
+    task = fresh_task(input_image: Base64.strict_encode64('fakebytes'))
+    ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal 'agent_vision', FakeGptMaster.settings.first,
+      'image-edit prompt enrichment must use agent_vision; DeepSeek rejects vision content blocks'
+  end
+
+  def test_text_to_image_uses_agent_setting
+    task = fresh_task # no image
+    ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal 'agent', FakeGptMaster.settings.first,
+      'text-to-image prompt enrichment stays on cheap `agent` (DeepSeek)'
   end
 
   def test_submit_uses_edit_template_when_input_image_present
