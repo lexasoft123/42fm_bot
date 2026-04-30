@@ -41,12 +41,18 @@ class KnowledgeBase
       query_vec = EmbeddingService.embed(query)
       return [] unless query_vec
 
-      Knowledge.where(chat_id: chat_id).where.not(embedding: nil).map do |k|
-        [k, cosine_similarity(query_vec, k.embedding_vector)]
-      end.sort_by { |_, score| -score }
-        .drop(offset)
-        .first(top_k)
-        .map { |k, _| k }
+      records = Knowledge.where(chat_id: chat_id).where.not(embedding: nil).to_a
+      return [] if records.empty?
+
+      scores = batch_cosine_to(query_vec, records)
+      return [] unless scores
+
+      scores.to_a
+            .each_with_index
+            .sort_by { |s, _| -s }
+            .drop(offset)
+            .first(top_k)
+            .map { |_, i| records[i] }
     end
 
     def extract_and_store(messages, chat_id:)
@@ -165,21 +171,33 @@ class KnowledgeBase
       end
     end
 
-    def cosine_similarity(a, b)
-      return 0.0 if a.nil? || b.nil?
-      dot    = a.zip(b).sum { |x, y| x * y }
-      norm_a = Math.sqrt(a.sum { |x| x**2 })
-      norm_b = Math.sqrt(b.sum { |x| x**2 })
-      return 0.0 if norm_a.zero? || norm_b.zero?
-      dot / (norm_a * norm_b)
+    # Batched cosine similarity of one query vector vs N record vectors via
+    # Numo BLAS. Returns a 1-D Numo array of scores in `records` order, or
+    # nil if the query is degenerate (zero norm). Used by `search` and
+    # `similar_exists?` — both run on every agent turn / fact extraction
+    # so per-turn latency in chats with thousands of facts depends on
+    # this not being a Ruby loop. `compact!` uses its own matrix×matrix
+    # flavor of the same idea.
+    def batch_cosine_to(query_vec, records)
+      q     = Numo::DFloat.cast(query_vec)
+      qnorm = Math.sqrt((q * q).sum)
+      return nil if qnorm.zero?
+
+      m     = Numo::DFloat.cast(records.map(&:embedding_vector))
+      norms = Numo::NMath.sqrt((m * m).sum(axis: 1))
+      m.dot(q) / (norms * qnorm)
     end
 
     def similar_exists?(content, chat_id:)
       vec = EmbeddingService.embed(content)
       return false unless vec
-      Knowledge.where(chat_id: chat_id).where.not(embedding: nil).any? do |k|
-        cosine_similarity(vec, k.embedding_vector) > SIMILARITY_THRESHOLD
-      end
+
+      records = Knowledge.where(chat_id: chat_id).where.not(embedding: nil).to_a
+      return false if records.empty?
+
+      scores = batch_cosine_to(vec, records)
+      return false unless scores
+      scores.max > SIMILARITY_THRESHOLD
     end
   end
 end
