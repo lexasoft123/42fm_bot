@@ -74,16 +74,18 @@ class MessageResponder
 
   def respond
     save_message
+    LOGGER.debug "[chat=#{@chat_id}] respond: post-save text=#{(message.text || message.caption).to_s[0..40].inspect}"
 
-    return if message.edit_date
-    return if message.date + 30 < Time.now.to_i
-    return if maybe_handle_admin_input
+    return LOGGER.debug("[chat=#{@chat_id}] respond: skip edit_date") if message.edit_date
+    return LOGGER.debug("[chat=#{@chat_id}] respond: skip stale message.date=#{message.date} now=#{Time.now.to_i}") if message.date + 30 < Time.now.to_i
+    return LOGGER.debug("[chat=#{@chat_id}] respond: skip maybe_handle_admin_input") if maybe_handle_admin_input
     process_voice_message if message.voice && !super_admin_awaiting_input?
 
     text = message.text || message.caption
-    return unless text
+    return LOGGER.debug("[chat=#{@chat_id}] respond: skip nil text") unless text
 
     cmd = UnicodeUtils.downcase(text)
+    LOGGER.debug "[chat=#{@chat_id}] respond: pre-dispatch cmd=#{cmd[0..40].inspect}"
 
     ctx = CommandContext.new(
       bot: @bot,
