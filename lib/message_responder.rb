@@ -155,7 +155,15 @@ class MessageResponder
 
   def save_message
     body = message.text || message.caption
-    return unless body
+    audio_src = message.audio || message.voice ||
+                (message.document if message.document&.mime_type&.start_with?('audio/'))
+    # Persist audio-only messages too (no caption) so `Commands::GptChat`
+    # can walk back through recent rows to find an earlier upload when the
+    # user later asks for a cover without using Telegram's reply feature.
+    # Body for an audio-only row uses a stable marker so the agent's chat
+    # context shows "[аудио]" rather than empty.
+    return unless body || audio_src
+    body ||= '[аудио]'
 
     if message.edit_date
       existing = Message.find_by(chat_id: @chat_id, message_id: message.message_id)
@@ -165,15 +173,21 @@ class MessageResponder
       end
     end
 
+    audio_only = !message.text && !message.caption  # nothing to extract from
     Message.create(
       user_uid: @user.uid, chat_id: @chat_id, body: body,
       message_id: message.message_id,
       reply_to_message_id: message.reply_to_message&.message_id,
       message_thread_id: message.message_thread_id,
       forwarded: !message.forward_origin.nil?,
-      edited_at: (message.edit_date ? Time.at(message.edit_date) : nil)
+      edited_at: (message.edit_date ? Time.at(message.edit_date) : nil),
+      attachment_file_id:   audio_src&.file_id,
+      attachment_mime_type: (audio_src.respond_to?(:mime_type) ? audio_src.mime_type : nil)
     )
-    maybe_extract_knowledge unless message.edit_date
+    # Audio-only rows have body=`[аудио]` placeholder — feeding them to the
+    # knowledge extractor adds noise AND bumps `count % extract_every`
+    # cadence so real-text extraction fires on the wrong message. Skip.
+    maybe_extract_knowledge unless message.edit_date || audio_only
   end
 
   def maybe_extract_knowledge

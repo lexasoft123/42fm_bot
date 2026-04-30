@@ -9,13 +9,18 @@ LOGGER = Logger.new(IO::NULL) unless defined?(LOGGER)
 # `attached_audio_method_source` constant if you ever want to assert
 # string-equality between the two).
 class AttachedAudioHarness
-  attr_accessor :message
+  attr_accessor :message, :chat_id
 
-  def initialize(message:); @message = message; end
+  # Mirror of Commands::GptChat::AUDIO_LOOKBACK. Keep in sync (intentional
+  # duplication: harness avoids requiring the full GptChat dep tree).
+  AUDIO_LOOKBACK = 20
+
+  def initialize(message:, chat_id: nil); @message = message; @chat_id = chat_id; end
 
   def attached_audio
     audio_metadata_from(message) ||
-      (message.reply_to_message && audio_metadata_from(message.reply_to_message))
+      (message.reply_to_message && audio_metadata_from(message.reply_to_message)) ||
+      recent_chat_audio
   end
 
   def audio_metadata_from(msg)
@@ -31,6 +36,19 @@ class AttachedAudioHarness
       title:     src.respond_to?(:title)     ? src.title     : nil,
       performer: src.respond_to?(:performer) ? src.performer : nil,
     }
+  end
+
+  def recent_chat_audio
+    return nil unless chat_id
+    row = Message.where(chat_id: chat_id, role: 'user',
+                        message_thread_id: message.message_thread_id)
+                 .order(id: :desc)
+                 .limit(AUDIO_LOOKBACK)
+                 .find { |m| m.attachment_file_id }
+    return nil unless row
+    { file_id:   row.attachment_file_id,
+      mime_type: row.attachment_mime_type,
+      duration:  nil, title: nil, performer: nil }
   end
 end
 
@@ -123,5 +141,101 @@ class AttachedAudioTest < Minitest::Test
     quoted = msg # plain text reply target
     current = msg(reply_to_message: quoted)
     assert_nil AttachedAudioHarness.new(message: current).attached_audio
+  end
+end
+
+# Recent-chat audio lookback: when neither the current message nor its reply
+# target carries an attachment, walk back through the last 20 messages in
+# this chat for a stored attachment_file_id (saved by
+# MessageResponder#save_message). Lets users say "сделай кавер" in a fresh
+# message after an earlier audio upload, without relying on Telegram-reply.
+class RecentChatAudioLookbackTest < BotTest
+  CHAT = -77
+
+  def msg(**attrs)
+    defaults = { audio: nil, voice: nil, document: nil, video: nil,
+                 video_note: nil, animation: nil, reply_to_message: nil,
+                 message_thread_id: nil }
+    Struct.new(*defaults.keys).new(*defaults.merge(attrs).values_at(*defaults.keys))
+  end
+
+  def make_msg_row(**attrs)
+    Message.create!({ role: 'user', chat_id: CHAT, body: '[аудио]' }.merge(attrs))
+  end
+
+  def test_lookback_picks_most_recent_attachment_in_chat
+    make_msg_row(message_id: 1, attachment_file_id: 'OLD_AUD',  attachment_mime_type: 'audio/mpeg')
+    make_msg_row(message_id: 2, attachment_file_id: 'NEW_AUD',  attachment_mime_type: 'audio/wav')
+    make_msg_row(message_id: 3, body: 'plain text')  # no attachment, but most recent overall
+    result = AttachedAudioHarness.new(message: msg, chat_id: CHAT).attached_audio
+    refute_nil result
+    assert_equal 'NEW_AUD', result[:file_id], 'must return the most recent attachment, not the absolute most recent message'
+    assert_equal 'audio/wav', result[:mime_type]
+  end
+
+  def test_lookback_returns_nil_when_no_recent_attachments
+    20.times { |i| make_msg_row(message_id: i + 1, body: 'just text') }
+    assert_nil AttachedAudioHarness.new(message: msg, chat_id: CHAT).attached_audio
+  end
+
+  def test_lookback_skips_attachments_in_other_chats
+    Message.create!(role: 'user', chat_id: -999, body: '[аудио]', message_id: 1, attachment_file_id: 'OTHER')
+    assert_nil AttachedAudioHarness.new(message: msg, chat_id: CHAT).attached_audio
+  end
+
+  def test_lookback_capped_at_20_messages
+    # Create 25 plain-text messages followed by 1 message with attachment
+    # that's older than the 20-row window — must NOT be returned.
+    make_msg_row(message_id: 1, attachment_file_id: 'STALE', attachment_mime_type: 'audio/mpeg')
+    25.times { |i| make_msg_row(message_id: i + 2, body: 'noise') }
+    assert_nil AttachedAudioHarness.new(message: msg, chat_id: CHAT).attached_audio,
+               'attachment beyond the 20-row lookback window must be ignored'
+  end
+
+  def test_lookback_skipped_when_current_message_has_audio
+    make_msg_row(message_id: 1, attachment_file_id: 'OLD_AUD', attachment_mime_type: 'audio/mpeg')
+    a_now = AttachedAudioTest::AudioStub.new(file_id: 'CURRENT', mime_type: 'audio/mpeg',
+                                              duration: 5, title: 'Now', performer: nil)
+    result = AttachedAudioHarness.new(message: msg(audio: a_now), chat_id: CHAT).attached_audio
+    assert_equal 'CURRENT', result[:file_id], 'current-message audio takes precedence over lookback'
+  end
+
+  def test_lookback_skipped_when_reply_target_has_audio
+    make_msg_row(message_id: 1, attachment_file_id: 'OLD_AUD', attachment_mime_type: 'audio/mpeg')
+    quoted_audio = AttachedAudioTest::AudioStub.new(file_id: 'QUOTED', mime_type: 'audio/mpeg',
+                                                     duration: 5, title: 'Q', performer: nil)
+    quoted = msg(audio: quoted_audio)
+    current = msg(reply_to_message: quoted)
+    result = AttachedAudioHarness.new(message: current, chat_id: CHAT).attached_audio
+    assert_equal 'QUOTED', result[:file_id], 'reply-target audio takes precedence over lookback'
+  end
+
+  # Forum-topic isolation: a "сделай кавер" asked in topic A must not
+  # match an audio uploaded in topic B (or in the General/no-thread space).
+  # Mirrors how get_chat_context already scopes the agent's context.
+  def test_lookback_filters_by_message_thread_id
+    make_msg_row(message_id: 1, attachment_file_id: 'TOPIC_B', attachment_mime_type: 'audio/mpeg',
+                 message_thread_id: 999)
+    # Asking in topic 100 — should NOT match the topic-999 audio.
+    result = AttachedAudioHarness.new(message: msg(message_thread_id: 100), chat_id: CHAT).attached_audio
+    assert_nil result, 'audio from a different topic must not be matched'
+  end
+
+  def test_lookback_finds_audio_in_same_thread
+    make_msg_row(message_id: 1, attachment_file_id: 'TOPIC_100', attachment_mime_type: 'audio/mpeg',
+                 message_thread_id: 100)
+    result = AttachedAudioHarness.new(message: msg(message_thread_id: 100), chat_id: CHAT).attached_audio
+    refute_nil result
+    assert_equal 'TOPIC_100', result[:file_id]
+  end
+
+  # Latent-safety: the column is currently only written by save_message for
+  # user messages, but harden the lookback so a future change persisting
+  # bot media with attachment_file_id doesn't accidentally feed bot audio
+  # back into Suno cover_audio (which expects a USER-supplied source).
+  def test_lookback_skips_bot_role_attachments
+    make_msg_row(message_id: 1, role: 'bot', attachment_file_id: 'BOT_AUD', attachment_mime_type: 'audio/mpeg')
+    assert_nil AttachedAudioHarness.new(message: msg, chat_id: CHAT).attached_audio,
+               'bot-role attachments must not be returned as a user upload source'
   end
 end

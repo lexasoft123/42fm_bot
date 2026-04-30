@@ -28,7 +28,8 @@ TEST_FILES := \
 	test/rate_limiter_test.rb \
 	test/atlas_client_test.rb \
 	test/image_gen_adapter_test.rb \
-	test/knowledge_base_test.rb
+	test/knowledge_base_test.rb \
+	test/chat_context_serialize_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \

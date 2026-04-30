@@ -1,7 +1,7 @@
 module ChatContext
   SELECT_COLS = 'messages.id, messages.message_id, messages.reply_to_message_id, ' \
                 'messages.message_thread_id, messages.forwarded, messages.edited_at, ' \
-                'messages.role, messages.body, ' \
+                'messages.role, messages.body, messages.attachment_file_id, ' \
                 'users.name, users.first_name, users.last_name'.freeze
 
   def get_chat_context(chat_id, thread_id: nil)
@@ -50,6 +50,12 @@ module ChatContext
     h[:thread] = r.message_thread_id if r.message_thread_id
     h[:fwd] = true if r.forwarded
     h[:edited] = true if r.try(:edited_at)
+    # Surface the presence of an audio attachment so the agent can locate
+    # an earlier upload in the chat thread when the user later asks for a
+    # cover without a Telegram-reply pointing at it. Value is just `true`
+    # — the bot resolves the file_id internally; no need to expose it to
+    # the LLM.
+    h[:audio] = true if r.try(:attachment_file_id)
     if r.role == 'bot'
       h[:who] = 'Жзяцля'
     else

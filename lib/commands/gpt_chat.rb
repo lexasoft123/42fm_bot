@@ -78,7 +78,32 @@ module Commands
     # regardless of whether the agent decides to use the audio.
     def attached_audio
       audio_metadata_from(message) ||
-        (message.reply_to_message && audio_metadata_from(message.reply_to_message))
+        (message.reply_to_message && audio_metadata_from(message.reply_to_message)) ||
+        recent_chat_audio
+    end
+
+    # Walk back through the last 20 messages in this chat for a stored
+    # attachment (saved by MessageResponder#save_message when an incoming
+    # message had audio / voice / audio-MIME document). Lets the agent
+    # reach an earlier upload when the user asks for a cover in a fresh
+    # message without using Telegram's reply feature to point at it.
+    # Bounded at 20 (not unlimited) so a long-stale audio from yesterday
+    # doesn't get matched to a today's "сделай кавер" with no real link.
+    # Filters: `role: 'user'` (avoid future bot-row matches if we ever
+    # store attachments on bot rows) and same-thread (forum topics —
+    # don't surface an audio uploaded in topic A as a match for "сделай
+    # кавер" asked in topic B).
+    AUDIO_LOOKBACK = 20
+    def recent_chat_audio
+      row = Message.where(chat_id: chat_id, role: 'user',
+                          message_thread_id: message.message_thread_id)
+                   .order(id: :desc)
+                   .limit(AUDIO_LOOKBACK)
+                   .find { |m| m.attachment_file_id }
+      return nil unless row
+      { file_id:   row.attachment_file_id,
+        mime_type: row.attachment_mime_type,
+        duration:  nil, title: nil, performer: nil }
     end
 
     def audio_metadata_from(msg)
