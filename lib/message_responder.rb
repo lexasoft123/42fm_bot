@@ -57,6 +57,13 @@ require './lib/commands/registry'
 class MessageResponder
   attr_reader :message, :bot, :user, :reply_master, :radio
 
+  # Anchor for the "skip stale message" check below. Set once at class load
+  # so each new responder compares against the process-startup time, not a
+  # rolling now()-30s window.
+  PROCESS_START          = Time.now
+  STALE_GUARD_WINDOW_SEC = 60   # filter only fires during this initial window
+  STALE_THRESHOLD_SEC    = 30   # drop messages older than this when filtering
+
   def initialize(options)
     @bot = options[:bot]
     @message = options[:message]
@@ -74,18 +81,16 @@ class MessageResponder
 
   def respond
     save_message
-    LOGGER.debug "[chat=#{@chat_id}] respond: post-save text=#{(message.text || message.caption).to_s[0..40].inspect}"
 
-    return LOGGER.debug("[chat=#{@chat_id}] respond: skip edit_date") if message.edit_date
-    return LOGGER.debug("[chat=#{@chat_id}] respond: skip stale message.date=#{message.date} now=#{Time.now.to_i}") if message.date + 30 < Time.now.to_i
-    return LOGGER.debug("[chat=#{@chat_id}] respond: skip maybe_handle_admin_input") if maybe_handle_admin_input
+    return if message.edit_date
+    return if stale_after_restart?
+    return if maybe_handle_admin_input
     process_voice_message if message.voice && !super_admin_awaiting_input?
 
     text = message.text || message.caption
-    return LOGGER.debug("[chat=#{@chat_id}] respond: skip nil text") unless text
+    return unless text
 
     cmd = UnicodeUtils.downcase(text)
-    LOGGER.debug "[chat=#{@chat_id}] respond: pre-dispatch cmd=#{cmd[0..40].inspect}"
 
     ctx = CommandContext.new(
       bot: @bot,
@@ -222,6 +227,21 @@ class MessageResponder
       user.last_name = message.from.last_name
       user.save
     end
+  end
+
+  # On restart Telegram replays the last few hours of unread updates via
+  # getUpdates — replying to all of them would spam the chat with stale
+  # context. Filter messages older than STALE_THRESHOLD_SEC, but ONLY
+  # during the first STALE_GUARD_WINDOW_SEC seconds after process start.
+  # After the initial replay window, process all messages regardless of
+  # age — under sustained load (slow agent turns queueing up), legitimate
+  # user messages can routinely exceed 30s before we get to them, and
+  # silently dropping them is worse than a delayed reply.
+  def stale_after_restart?
+    return false if (Time.now - PROCESS_START) > STALE_GUARD_WINDOW_SEC
+    stale = message.date + STALE_THRESHOLD_SEC < Time.now.to_i
+    LOGGER.debug "[chat=#{@chat_id}] stale_after_restart? skipping replay-window message.date=#{message.date} now=#{Time.now.to_i}" if stale
+    stale
   end
 
   # Admin-menu free-text input intercept. Returns true when the message is
