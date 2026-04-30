@@ -496,7 +496,7 @@ chat_gpt:
       max_tokens: 16000
     agent_vision:                 # Agent::Runner picks this when @image is attached
       provider: grok
-      model: grok-4-fast-non-reasoning
+      model: grok-4-fast-reasoning
       max_tokens: 16000
     knowledge:                    # KnowledgeBase extract + compact (background, frequent)
       provider: deepseek

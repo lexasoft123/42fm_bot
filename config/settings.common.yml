@@ -28,9 +28,14 @@ chat_gpt:
     # editing (input_image attached). Anthropic is no longer used for vision —
     # Grok is cheaper, less filtered, and more permissive about named-people
     # image descriptions which the bot's persona requires.
+    # Reasoning variant is preferred over non-reasoning: empirically the
+    # non-reasoning model occasionally hallucinated `🎨 <caption>` image
+    # replies as plain text instead of invoking generate_image (it had
+    # learned the format from chat history). Reasoning trades ~2× latency
+    # for materially more reliable tool-following.
     agent_vision:
       provider: grok
-      model: grok-4-fast-non-reasoning
+      model: grok-4-fast-reasoning
       max_tokens: 16000
     # Background fact extraction + cluster-merge compaction for the per-chat
     # knowledge base. Pure text-in / text-out, no tools, no vision — cheap LLM

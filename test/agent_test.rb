@@ -412,6 +412,90 @@ class RunnerTest < BotTest
     assert_equal 'forced final text', result
   end
 
+  # Image-hallucination watchdog: when the agent ends a turn with the
+  # `🎨 <caption>` pattern but never called generate_image, runner should
+  # nudge once and re-loop instead of returning the hallucinated text.
+  def test_watchdog_nudges_when_emoji_caption_in_text_without_tool_call
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'Make a picture',
+      parameters: { 'request' => { type: 'string' } },
+      handler: ->(_a, _c) { 'ok, queued' }
+    )
+    long_caption = 'Бастрыкин в кабинете с лупой над дилдо, нуар-освещение, ' \
+                   'детализированный костюм, сосредоточенное лицо, мрачная атмосфера.'
+    FakeGptMaster.enqueue(
+      anthropic_text("Сейчас нарисуем.\n🎨 #{long_caption}"),  # iter1: hallucination
+      anthropic_tool_call('generate_image', { 'request' => 'бастрыкин с лупой' }, id: 'c1'), # iter2: actual call after nudge
+      anthropic_text('Готово') # iter3: final text
+    )
+    result = build_runner(text: 'нарисуй бастрыкина', user: @user).run
+    assert_equal 'Готово', result
+
+    calls = FakeGptMaster.calls.select { |c| c[:method] == :call_raw }
+    assert_equal 3, calls.size, 'should have made 3 call_raw calls (hallucination + retry + final)'
+
+    # Iter2's messages must contain the assistant hallucination + the nudge user message
+    iter2_messages = calls[1][:messages]
+    nudge = iter2_messages.last
+    nudge_text = nudge[:content].is_a?(Array) ? nudge[:content].first[:text] : nudge[:content]
+    assert_match(/generate_image/, nudge_text)
+  end
+
+  # Watchdog must not fire when generate_image was actually called this turn,
+  # even if final text contains a 🎨 caption.
+  def test_watchdog_does_not_fire_when_generate_image_was_called
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'Make a picture',
+      parameters: { 'request' => { type: 'string' } },
+      handler: ->(_a, _c) { 'ok' }
+    )
+    long_caption = 'A' * 200
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('generate_image', { 'request' => 'cat' }, id: 'c1'),
+      anthropic_text("\n🎨 #{long_caption}")  # final text has 🎨 but the tool was already called
+    )
+    result = build_runner(text: 'draw a cat', user: @user).run
+    calls = FakeGptMaster.calls.select { |c| c[:method] == :call_raw }
+    assert_equal 2, calls.size, 'no retry — generate_image was already called'
+    assert_match(/🎨/, result)
+  end
+
+  # Watchdog must not fire when 🎨 appears inline (not at line start) — that
+  # is normal narration, not the caption pattern.
+  def test_watchdog_skips_inline_emoji_use
+    short_text = "Я уже нарисовал тебе 🎨 кошку и зверя — вот, см. выше."
+    FakeGptMaster.enqueue(anthropic_text(short_text))
+    result = build_runner(text: 'что было?', user: @user).run
+    calls = FakeGptMaster.calls.select { |c| c[:method] == :call_raw }
+    assert_equal 1, calls.size, 'no retry — inline 🎨 is fine'
+    assert_equal short_text, result
+  end
+
+  # Watchdog must not fire when 🎨 is inline AND followed by a long-enough
+  # narration — the line-anchor in the regex (not the length threshold) is
+  # what distinguishes narration from a caption hallucination.
+  def test_watchdog_skips_inline_emoji_even_when_trailing_text_is_long
+    inline_long = "вот тебе котик 🎨 #{'X' * 200} — всё, конец фразы"
+    FakeGptMaster.enqueue(anthropic_text(inline_long))
+    build_runner(text: 'что было?', user: @user).run
+    calls = FakeGptMaster.calls.select { |c| c[:method] == :call_raw }
+    assert_equal 1, calls.size, 'inline 🎨 with long trailing text must not trigger watchdog'
+  end
+
+  # Watchdog must fire only once per turn — if the model still hallucinates
+  # after the nudge, return that text rather than looping forever.
+  def test_watchdog_fires_only_once_per_turn
+    long_caption = 'B' * 200
+    FakeGptMaster.enqueue(
+      anthropic_text("\n🎨 #{long_caption}"),  # iter1: first hallucination
+      anthropic_text("\n🎨 #{long_caption}")   # iter2: still hallucinating after nudge
+    )
+    result = build_runner(text: 'нарисуй', user: @user).run
+    calls = FakeGptMaster.calls.select { |c| c[:method] == :call_raw }
+    assert_equal 2, calls.size, 'must not loop infinitely'
+    assert_match(/🎨/, result)
+  end
+
   # Tool result longer than MAX_TOOL_RESULT_LENGTH is truncated with '...'
   def test_tool_result_truncation
     long_result = 'x' * 3000

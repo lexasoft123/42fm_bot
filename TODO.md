@@ -13,6 +13,8 @@ This file tracks pending work and parking-lot ideas. New entries land at the top
 
 ## Pending
 
+* [ ] Suno cover_audio: bot doesn't send any text alongside the 2 audio clips. `compose_song` (regular Suno generate) sends the lyrics as a text reply after the media group; `cover_audio` skips that step. Either send the cover's lyrics (Suno returns them in the response if vocals were generated) or send a short caption/announcement. Check `lib/task_handlers/suno_handler.rb#send_audio` for the divergent paths.
+
 * [ ] Latency warn for slow agent iterations. Now that `agent` runs DeepSeek V4 Pro thinking, p95 per-iteration time jumps materially (live probe showed ~7s/iter, sometimes 18s+ on hard tasks). `Agent::Runner` already logs `took=Nms` per iter (lib/agent/runner.rb:54,62) but no threshold-warn. Cheap addition: `LOGGER.warn` if `iter_ms > 15_000` so we have a grep target before users complain. Plan also called out a 25s p95 rollback trigger but that needs an automated signal — simplest is a daily aggregator that grep's `iteration .* took=` and reports p95.
 
 * [ ] Per-chat admin permissions (Phase 2 of the admin menu).

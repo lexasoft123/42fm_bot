@@ -44,6 +44,9 @@ module Agent
 
       alog :info, "START user=#{@user.name} (#{@user.role})\nREQUEST: #{@text}"
 
+      generate_image_called = false
+      watchdog_fired        = false
+
       MAX_ITERATIONS.times do |i|
         iter_t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         raw = new_gpt(messages, system_prompt).call_raw(tools: tools)
@@ -55,6 +58,20 @@ module Agent
 
         if tool_calls.empty?
           text = extract_text(raw) || 'жпт не жпт'
+
+          # Image-hallucination watchdog: Grok occasionally imitates the
+          # `🎨 <caption>` format used by image-gen replies in chat history
+          # instead of calling generate_image. If the agent ends the turn
+          # with that pattern but never actually invoked generate_image,
+          # nudge it once and re-loop.
+          if !generate_image_called && !watchdog_fired && hallucinated_image_caption?(text)
+            watchdog_fired = true
+            alog :warn, "watchdog: 🎨 caption in text but no generate_image call — nudging"
+            messages << build_assistant_message(raw)
+            messages << build_image_call_nudge
+            next
+          end
+
           alog :info, "DONE (#{i + 1} iteration#{i > 0 ? 's' : ''}, stop=#{stop}, no tools, took=#{iter_ms}ms)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
           return text
         end
@@ -63,6 +80,7 @@ module Agent
         messages << build_assistant_message(raw)
 
         tool_calls.each do |tc|
+          generate_image_called = true if tc[:name] == 'generate_image'
           tool_t0  = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           result   = execute_tool(tc[:name], tc[:input])
           tool_ms  = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - tool_t0) * 1000).round
@@ -93,6 +111,29 @@ module Agent
             'по-русски прямо сейчас, используя только уже собранную информацию. ' \
             'Не вызывай больше инструменты. Если данных мало — ответь честно по ' \
             'тому, что есть, добавив свою оценку или шутку.'
+      if anthropic?
+        { role: 'user', content: [{ type: 'text', text: msg }] }
+      else
+        { role: 'user', content: msg }
+      end
+    end
+
+    # Heuristic for the "described an image as text instead of calling
+    # generate_image" failure mode (mostly Grok). Triggers only when 🎨
+    # starts a paragraph (line start, possibly indented) and is followed by
+    # ≥80 chars on the same paragraph — short inline uses
+    # ("я нарисовал 🎨 кошку"), even with long trailing text on the same
+    # line, don't match because they aren't paragraph-anchored.
+    HALLUCINATED_IMAGE_CAPTION = /(?:\A|\n)\s*🎨.{80,}/m
+    def hallucinated_image_caption?(text)
+      return false if text.nil? || text.empty?
+      text.match?(HALLUCINATED_IMAGE_CAPTION)
+    end
+
+    def build_image_call_nudge
+      msg = 'Ты описал картинку текстом, но не вызвал инструмент generate_image. ' \
+            'Сейчас вызови generate_image с подходящим request — без описания в тексте, ' \
+            'без 🎨-префикса, картинку отрисует сам инструмент.'
       if anthropic?
         { role: 'user', content: [{ type: 'text', text: msg }] }
       else
