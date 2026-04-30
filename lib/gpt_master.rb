@@ -159,9 +159,13 @@ class GptMaster
       body[:output_config] = symbolize(@output_config) if @output_config
       body
     else
-      messages = @messages
+      # Callers (Agent::Runner, ImageGenTaskHandler) build vision content blocks
+      # in Anthropic shape: {type: 'image', source: {type: 'base64', media_type:, data:}}.
+      # Translate to OpenAI shape for openai-compat providers (DeepSeek, Grok,
+      # OpenAI itself): {type: 'image_url', image_url: {url: 'data:<mt>;base64,<data>'}}.
+      messages = convert_vision_blocks_for_openai(@messages)
       if @system_prompt && !@system_prompt.empty?
-        messages = [{ role: 'system', content: @system_prompt }] + @messages
+        messages = [{ role: 'system', content: @system_prompt }] + messages
       end
       body = {
         model:    @model,
@@ -188,6 +192,29 @@ class GptMaster
     last = cached.last
     cached[-1] = last.merge(cache_control: { type: 'ephemeral' }) if last.is_a?(Hash)
     cached
+  end
+
+  # Translate Anthropic-format vision content blocks to OpenAI-format.
+  # Anthropic: {type: 'image', source: {type: 'base64', media_type:, data:}}
+  # OpenAI:    {type: 'image_url', image_url: {url: 'data:<media_type>;base64,<data>'}}
+  # Plain text blocks and string-content messages pass through unchanged.
+  # No-op for messages that contain no image blocks (most agent calls).
+  def convert_vision_blocks_for_openai(messages)
+    messages.map do |m|
+      content = m[:content] || m['content']
+      next m unless content.is_a?(Array)
+      converted = content.map do |block|
+        next block unless block.is_a?(Hash)
+        type = block[:type] || block['type']
+        next block unless type == 'image'
+        src        = block[:source] || block['source'] || {}
+        media_type = src[:media_type] || src['media_type'] || 'image/jpeg'
+        data       = src[:data]       || src['data']       || ''
+        { type: 'image_url', image_url: { url: "data:#{media_type};base64,#{data}" } }
+      end
+      # Preserve original key style (symbol or string) on the message hash itself.
+      m.key?(:content) ? m.merge(content: converted) : m.merge('content' => converted)
+    end
   end
 
   # YAML loads config hashes with string keys; Anthropic expects symbols via to_json either way,

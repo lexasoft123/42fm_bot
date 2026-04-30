@@ -495,10 +495,9 @@ chat_gpt:
       model: deepseek-v4-pro
       max_tokens: 16000
     agent_vision:                 # Agent::Runner picks this when @image is attached
-      provider: anthropic
-      model: claude-sonnet-4-6
+      provider: grok
+      model: grok-4-fast-non-reasoning
       max_tokens: 16000
-      thinking_budget: 10000
     knowledge:                    # KnowledgeBase extract + compact (background, frequent)
       provider: deepseek
       model: deepseek-v4-pro

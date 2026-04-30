@@ -143,17 +143,15 @@ module Agent
     end
 
     def build_initial_messages(user_content)
-      if @image && anthropic?
+      if @image
+        # Always build the Anthropic-shape vision block. GptMaster.build_body
+        # converts to OpenAI shape ({type: 'image_url', image_url: {url: data-uri}})
+        # at the wire boundary for openai-compat providers (Grok, OpenAI, etc).
+        # Routing decides which model sees it via pick_setting → agent_vision.
         [{ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: @image[:media_type], data: @image[:data] } },
           { type: 'text', text: user_content }
         ] }]
-      elsif @image
-        # Provider has no vision (DeepSeek, most Grok variants). Drop the image
-        # block but tell the agent it existed so the reply can acknowledge the
-        # limitation rather than silently hallucinating about the photo.
-        hint = "\n\n[К сообщению было прикреплено изображение, но текущая модель не умеет его читать — отвечай только по тексту запроса.]"
-        [{ role: 'user', content: user_content + hint }]
       else
         [{ role: 'user', content: user_content }]
       end

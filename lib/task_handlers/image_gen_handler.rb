@@ -47,9 +47,11 @@ class ImageGenTaskHandler
 
       # Image-edit prompt enrichment needs vision (the LLM has to see the source
       # image to write a useful edit instruction). Route to `agent_vision`
-      # (Anthropic) when editing — DeepSeek rejects the {type: 'image', source:
-      # {...}} content block with "unknown variant 'image', expected 'text'"
-      # 400. Text-to-image enrichment stays on the cheaper `agent` setting.
+      # (Grok-4-fast-non-reasoning today) — DeepSeek rejects vision blocks.
+      # The Anthropic-shape vision block we build below is auto-translated to
+      # OpenAI shape in GptMaster#convert_vision_blocks_for_openai when the
+      # provider isn't anthropic. Text-to-image enrichment stays on the cheaper
+      # `agent` setting (no vision needed).
       enrich_setting = editing ? 'agent_vision' : 'agent'
       begin
         p['prompt'] = GptMaster.new(messages, setting: enrich_setting,

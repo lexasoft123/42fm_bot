@@ -23,14 +23,15 @@ chat_gpt:
       thinking:
         type: enabled
     # Used when the user attaches/replies-to an image — DeepSeek doesn't see
-    # images, so vision requests fall back to Anthropic. Same toolset, same
-    # prompt; only the LLM provider differs. Picked automatically by
-    # Agent::Runner when @image is present.
+    # images, so vision requests go through Grok-4-fast. Picked automatically
+    # by Agent::Runner when @image is present, and by ImageGenTaskHandler when
+    # editing (input_image attached). Anthropic is no longer used for vision —
+    # Grok is cheaper, less filtered, and more permissive about named-people
+    # image descriptions which the bot's persona requires.
     agent_vision:
-      provider: anthropic
-      model: claude-sonnet-4-6
+      provider: grok
+      model: grok-4-fast-non-reasoning
       max_tokens: 16000
-      thinking_budget: 10000
     # Background fact extraction + cluster-merge compaction for the per-chat
     # knowledge base. Pure text-in / text-out, no tools, no vision — cheap LLM
     # is the right fit. Runs frequently (every Settings.knowledge.extract_every
@@ -94,6 +95,21 @@ chat_gpt:
       input: 0.14
       output: 0.28
       cache_read: 0.0028
+      cache_write: 0
+    # xAI Grok pricing per 1M tokens (USD). Source: docs.x.ai/docs/models.
+    # cache_write is 0 — xAI caching is implicit (same as DeepSeek).
+    # Confirmed empirically via /v1/chat/completions live probe (2026-04-30).
+    # If pricing changes, observed USD cost is in the response under
+    # `cost_in_usd_ticks` (1 USD = 1e9 ticks) — useful for spot-checking.
+    grok-4-fast-non-reasoning:
+      input: 0.20
+      output: 0.50
+      cache_read: 0.05
+      cache_write: 0
+    grok-4-fast-reasoning:
+      input: 0.20
+      output: 0.50
+      cache_read: 0.05
       cache_write: 0
   agent_prompt: |
     Ты — Жзяцля, бот радиостанции 42FM в Telegram-чате.

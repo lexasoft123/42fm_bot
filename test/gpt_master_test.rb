@@ -382,6 +382,119 @@ class GptMasterBodyBuildingTest < BotTest
     row = ApiUsage.last
     assert_equal 50, row.output_tokens, 'output should be completion=50 (no double-count of reasoning_tokens)'
   end
+
+  # Anthropic-format vision blocks must be auto-translated to OpenAI format
+  # for any openai-compat provider (Grok, DeepSeek vision-capable, OpenAI).
+  def test_openai_branch_converts_anthropic_vision_block_to_image_url
+    captured = nil
+    HTTParty.define_singleton_method(:post) do |_url, opts|
+      captured = JSON.parse(opts[:body])
+      FakeResponse.new(200,
+        'choices' => [{ 'message' => { 'content' => 'a husky' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 100, 'completion_tokens' => 5 })
+    end
+    anthropic_msg = [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'ABCDEF' } },
+        { type: 'text', text: 'what is this?' },
+      ],
+    }]
+    begin
+      GptMaster.new(anthropic_msg, setting: 'openai', chat_id: 1, purpose: 'main_chat').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    block = captured['messages'].first['content'].find { |b| b['type'] == 'image_url' }
+    assert block, 'image block must be converted to image_url type'
+    assert_equal 'data:image/jpeg;base64,ABCDEF', block['image_url']['url']
+    text = captured['messages'].first['content'].find { |b| b['type'] == 'text' }
+    assert_equal 'what is this?', text['text'], 'text blocks pass through unchanged'
+    assert(captured['messages'].first['content'].none? { |b| b['type'] == 'image' },
+      'no Anthropic-style image blocks should reach the openai wire')
+  end
+
+  def test_openai_branch_passes_through_string_content_messages
+    captured = nil
+    HTTParty.define_singleton_method(:post) do |_url, opts|
+      captured = JSON.parse(opts[:body])
+      FakeResponse.new(200,
+        'choices' => [{ 'message' => { 'content' => 'k' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 })
+    end
+    begin
+      GptMaster.new([{ role: 'user', content: 'plain text' }], setting: 'openai',
+                    chat_id: 1, purpose: 'main_chat').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    assert_equal 'plain text', captured['messages'].first['content'],
+      'string-content messages must pass through the conversion unchanged'
+  end
+
+  def test_openai_branch_handles_string_keyed_anthropic_image_block
+    # Provider responses come back parsed as JSON (string keys). Make sure
+    # conversion handles both symbol and string keys on the input.
+    captured = nil
+    HTTParty.define_singleton_method(:post) do |_url, opts|
+      captured = JSON.parse(opts[:body])
+      FakeResponse.new(200,
+        'choices' => [{ 'message' => { 'content' => 'k' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 })
+    end
+    string_keyed = [{
+      'role' => 'user',
+      'content' => [
+        { 'type' => 'image', 'source' => { 'type' => 'base64', 'media_type' => 'image/png', 'data' => 'XYZ' } },
+        { 'type' => 'text', 'text' => 'go' },
+      ],
+    }]
+    begin
+      GptMaster.new(string_keyed, setting: 'openai', chat_id: 1, purpose: 'main_chat').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    block = captured['messages'].first['content'].find { |b| b['type'] == 'image_url' }
+    assert_equal 'data:image/png;base64,XYZ', block['image_url']['url']
+  end
+
+  # Multi-iteration regression: when an assistant turn with tool_calls + nil
+  # content gets appended back into @messages, the conversion helper must
+  # tolerate `content: nil` and not crash. Mirrors what Agent::Runner does on
+  # its second iteration with openai api_type.
+  def test_openai_branch_passes_through_assistant_message_with_nil_content
+    captured = nil
+    HTTParty.define_singleton_method(:post) do |_url, opts|
+      captured = JSON.parse(opts[:body])
+      FakeResponse.new(200,
+        'choices' => [{ 'message' => { 'content' => 'final' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 })
+    end
+    history = [
+      { role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'ZZZ' } },
+          { type: 'text',  text: 'see this' },
+        ] },
+      { 'role' => 'assistant', 'content' => nil,
+        'tool_calls' => [{ 'id' => 'call_1', 'type' => 'function',
+                           'function' => { 'name' => 'echo', 'arguments' => '{}' } }] },
+      { role: 'tool', tool_call_id: 'call_1', content: 'echoed' },
+    ]
+    begin
+      GptMaster.new(history, setting: 'openai', chat_id: 1, purpose: 'main_chat').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    # User turn 0: image converted
+    assert_equal 'data:image/jpeg;base64,ZZZ',
+      captured['messages'][0]['content'].find { |b| b['type'] == 'image_url' }['image_url']['url']
+    # Assistant turn 1: content stays nil, tool_calls preserved
+    assert_nil captured['messages'][1]['content']
+    assert_equal 'echo', captured['messages'][1]['tool_calls'][0]['function']['name']
+    # Tool turn 2: string content passes through
+    assert_equal 'echoed', captured['messages'][2]['content']
+  end
 end
 
 class GptMasterClassMethodsTest < BotTest

@@ -483,8 +483,9 @@ class HandlerAdapterIntegrationTest < BotTest
   # provider. Pre-fix, the handler hardcoded `setting: 'agent'` (DeepSeek),
   # which rejects the {type: 'image', source: {...}} content block with
   # `400 unknown variant 'image', expected 'text'`. Fix routes editing to
-  # `agent_vision` (Anthropic Sonnet 4.6) and keeps text-to-image on cheap
-  # `agent` (DeepSeek) where no image is sent.
+  # `agent_vision` (Grok-4-fast-non-reasoning today; Anthropic-shape blocks are
+  # auto-translated to OpenAI shape at the GptMaster boundary) and keeps
+  # text-to-image on the cheaper `agent` setting where no image is sent.
   def test_image_edit_uses_agent_vision_setting
     task = fresh_task(input_image: Base64.strict_encode64('fakebytes'))
     ImageGenTaskHandler.new.call(task, @bot)
