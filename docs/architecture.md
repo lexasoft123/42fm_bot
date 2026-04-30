@@ -116,10 +116,15 @@ bin/bot
 │   ├── chat_context.rb        # ChatContext module: shared chat context + knowledge lookup for handlers
 │   ├── task_handlers/
 │   │   ├── suno_handler.rb    # Suno background task: LLM parse → GPT lyrics → submit → poll → deliver
-│   │   └── image_gen_handler.rb # FLUX background task: LLM prompt → submit → poll → deliver photo
+│   │   └── image_gen_handler.rb # Image-gen background task: LLM prompt → adapter.submit → poll → deliver photo (provider-agnostic)
 │   ├── task_runner.rb         # Generic DB-backed task poller + handler registry
 │   ├── suno_client.rb         # Suno AI API client (submit, poll, compose)
-│   ├── flux_client.rb         # FLUX 2 image generation API client (submit, poll)
+│   ├── atlas_client.rb        # Generic Atlas Cloud HTTP client (auth + post/get); reusable across services
+│   ├── image_gen.rb           # Top-level facade: ADAPTERS registry + current_adapter / adapter_for(snapshot)
+│   ├── image_gen/
+│   │   ├── adapter.rb         # Base class: submit / poll_once / prompt_template(:t2i|:edit) / name
+│   │   ├── flux_adapter.rb    # FLUX 2 via api.bfl.ai (absorbs former FluxClient + FLUX-tuned templates)
+│   │   └── atlas_adapter.rb   # Atlas Cloud (default Wan 2.7) via AtlasClient + Wan-tuned templates
 │   └── robot/
 │       └── robocoder.rb       # Base64+XOR encode/decode util
 ├── models/
@@ -326,11 +331,14 @@ HTTP client for the Suno AI song generation API (`sunoapi.org`), using V5 model.
 - `SunoClient.resolve_genre(text)` — maps Russian genre names to English style tags (~50 genres)
 - **Important:** Suno blocks artist names in tags — describe sound characteristics instead
 
-### FluxClient — `lib/flux_client.rb`
-HTTP client for the FLUX 2 image generation API (`api.bfl.ai`). Async: submit → poll.
-- `submit(prompt:, width:, height:)` — POST to `/v1/{model}`, returns `task_id`
-- `poll_once(task_id)` — GET `/v1/get_result`, returns `:pending`, `:failed`, or `{ url: "..." }`
-- Uses `safety_tolerance: 5` (max without special auth) and `output_format: 'jpeg'`
+### Image generation — `lib/image_gen/` + `lib/atlas_client.rb`
+Service-adapter layer. The `ImageGenTaskHandler` is provider-agnostic; concrete backends live as `ImageGen::Adapter` subclasses, picked at runtime from `Settings.image_gen['provider']`.
+
+- **`ImageGen::Adapter`** (`lib/image_gen/adapter.rb`) — base class. Three abstract methods: `submit(prompt:, input_image:, input_media_type:)`, `poll_once(external_id)`, `prompt_template(:text_to_image|:edit)`. Plus `name` (returns `self.class::NAME`) for the provider-snapshot dispatch.
+- **`ImageGen` facade** (`lib/image_gen.rb`) — `ADAPTERS = { 'flux' => FluxAdapter, 'atlas' => AtlasAdapter }.freeze`. Submit-side: `current_adapter` reads `Settings.image_gen['provider']`. Poll-side: `adapter_for(snapshot)` resolves by the value snapshotted into `task.params['provider']` at submit time, so a config flip mid-flight doesn't reroute polling to a different prediction id space (legacy rows fall back to `current_adapter`).
+- **`ImageGen::FluxAdapter`** (`lib/image_gen/flux_adapter.rb`) — FLUX 2 via `api.bfl.ai`. Submit POST to `/v1/{model}`, poll GET `/v1/get_result`. Uses `safety_tolerance: 5` and `output_format: 'jpeg'`. Owns the FLUX-tuned prompt-enrichment templates. Auth header is `x-key`. NOT built on AtlasClient (different host + auth scheme). Has a one-release back-compat shim that reads top-level `Settings.flux` if `image_gen.providers.flux` is absent — removed once prod settings.yml is migrated.
+- **`ImageGen::AtlasAdapter`** (`lib/image_gen/atlas_adapter.rb`) — Atlas Cloud (default model: `alibaba/wan-2.7/text-to-image` + `alibaba/wan-2.7/image-edit`, configurable). Submit POST to `/api/v1/model/generateImage`, poll GET `/api/v1/model/prediction/{id}`. **Request body is FLAT**: `{model, prompt, width, height}` for T2I, `{model, prompt, image: 'data:image/<type>;base64,<b64>'}` for edit (the `image:` field also accepts URLs; min resolution 240×240). Atlas's published `input.{...}` example shape silently fails — submit returns 200+id but poll instantly returns masked "Field required" — so we use the flat shape, confirmed via live probe. Status mapping: `processing|queued` → `:pending`, `completed|succeeded` → `{url:}`, `failed` → `:failed`, anything else → log once + `:pending`. Response wraps under `data.{...}`; adapter accepts both wrapped and unwrapped defensively. Submit-response id resolution accepts both `data.id` (canonical) and top-level `id`. Owns Wan-tuned prompt templates.
+- **`AtlasClient`** (`lib/atlas_client.rb`) — generic HTTP wrapper for Atlas Cloud's API surface. Constructor takes a config dict (`api_url`, `api_key`) + `tag:` for greppable logs (`AtlasClient` default; `AtlasLLM`/`AtlasEmbed` for future Atlas-backed services). Asymmetry: `post` raises on non-2xx (so handler `bail_or_retry` engages); `get` returns `[code, body]` and swallows `OpenSSL::SSL::SSLError`/`Net::OpenTimeout`/`Errno::ECONNRESET` (so polling degrades to `:pending` on transient blips). `post` does NOT swallow SSL errors — preserves FluxAdapter's existing behavior; submit-side TLS resilience can be retrofitted with a per-call retry wrapper if needed.
 
 ### TtsService — `lib/tts_service.rb`
 Facade over Polly. `TtsService.speak(text, voice:, speed:, minus:, track_id:)` generates OGG and returns the public URL.
@@ -381,6 +389,7 @@ Inline-keyboard menu in the super-admin's private chat for runtime bot administr
 | lenta.ru | RSS | None |
 | Suno AI (sunoapi.org) | REST/HTTParty | Bearer token |
 | FLUX 2 (api.bfl.ai) | REST/HTTParty | x-key header |
+| Atlas Cloud (api.atlascloud.ai) | REST via AtlasClient | Bearer token |
 
 ---
 
@@ -523,9 +532,23 @@ suno:
   api_key: ...
   model: V5
 flux:
-  api_url: https://api.bfl.ai
+  api_url: https://api.bfl.ai     # legacy top-level block (read by FluxAdapter back-compat shim)
   api_key: ...
   model: flux-2-pro
+image_gen:
+  provider: atlas                 # 'atlas' | 'flux' (default: atlas)
+  providers:
+    atlas:
+      api_url: https://api.atlascloud.ai
+      api_key: ...
+      text_to_image_model: alibaba/wan-2.7/text-to-image
+      image_edit_model:    alibaba/wan-2.7/image-edit
+      width:  1024
+      height: 1024
+    flux:
+      api_url: https://api.bfl.ai
+      api_key: ...
+      model: flux-2-pro
 replies:
   admin_denied:            # random denial messages for unauthorized admin commands
     - "а ты кто такой вообще?!"
@@ -564,7 +587,7 @@ All output is unified in a single log file configured via `settings.yml`:
 
 `AppConfigurator#setup_logging` runs first in `configure`, builds the loggers from settings, and passes the main logger to `DatabaseConnector`. The global `LOGGER` and `COMPACT_LOGGER` constants are assigned in `bot.rb` after `configure` returns.
 
-**Chat-id prefix convention.** Every per-message / per-chat / per-task log line is prefixed with `[chat=<id>]` so one grep reconstructs the full timeline for a single chat (e.g. `grep 'chat=-1001273623296' log/bot.log`). Agent turns carry an additional `[AGENT]` tag. Generic / singleton services without chat context (radio socket, FluxClient, SunoClient, Gogolmogol, Polly, etc.) intentionally log without the prefix — their per-call context is already surrounded by chat-tagged lines from the caller.
+**Chat-id prefix convention.** Every per-message / per-chat / per-task log line is prefixed with `[chat=<id>]` so one grep reconstructs the full timeline for a single chat (e.g. `grep 'chat=-1001273623296' log/bot.log`). Agent turns carry an additional `[AGENT]` tag. Generic / singleton services without chat context (radio socket, FluxAdapter, AtlasClient, SunoClient, Gogolmogol, Polly, etc.) intentionally log without the prefix — their per-call context is already surrounded by chat-tagged lines from the caller.
 
 Log rotation: size-based — rotates at `max_size_mb`, keeps `keep_files` old files (e.g. `bot.log.0`, `bot.log.1`). The `log/` directory is created automatically at startup.
 

@@ -147,6 +147,27 @@ flux:
   api_url: 'https://api.bfl.ai'
   model: 'flux-2-pro'
 
+# Image generation provider registry. The handler picks the active adapter from
+# `provider` and snapshots the chosen name into background_tasks.params at
+# submit time (so a config flip mid-flight doesn't reroute polling). Switching
+# providers = edit `provider` and restart the container.
+#
+# `flux:` block above is read by FluxAdapter as a back-compat fallback during
+# transition; once prod is on `image_gen.providers.flux.api_key`, both the
+# top-level block and the shim get removed (plan step 16).
+image_gen:
+  provider: atlas                # 'atlas' | 'flux'
+  providers:
+    atlas:
+      api_url: 'https://api.atlascloud.ai'
+      text_to_image_model: 'alibaba/wan-2.7/text-to-image'
+      image_edit_model:    'alibaba/wan-2.7/image-edit'
+      width:  1024
+      height: 1024
+    flux:
+      api_url: 'https://api.bfl.ai'
+      model: 'flux-2-pro'
+
 radio:
   path: '/home/radio/content/music'
   # host_path: '/content/music'  # override if Liquidsoap sees a different path than the container

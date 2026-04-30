@@ -25,7 +25,9 @@ TEST_FILES := \
 	test/cover_art_tool_test.rb \
 	test/admin_menu_test.rb \
 	test/bot_dispatcher_test.rb \
-	test/rate_limiter_test.rb
+	test/rate_limiter_test.rb \
+	test/atlas_client_test.rb \
+	test/image_gen_adapter_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \

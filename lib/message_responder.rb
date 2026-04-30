@@ -16,7 +16,7 @@ require './lib/agent/tool_registry'
 require './lib/agent/runner'
 Dir['./lib/agent/tools/*.rb'].each { |f| require f }
 require './lib/suno_client'
-require './lib/flux_client'
+require './lib/image_gen'
 require './lib/polly'
 require './lib/tts_service'
 require './lib/rate_limiter'

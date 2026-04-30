@@ -236,7 +236,7 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 | Add/modify a bot command | `lib/commands/new_cmd.rb` + `message_responder.rb` (require) + `registry.rb` (position) |
 | Add a service/API integration | `lib/new_service.rb` + `config/boot.rb` (or `message_responder.rb`) |
 | Add a background task handler | `lib/task_handlers/my_handler.rb` + `TaskRunner.register(...)` |
-| FLUX image generation | `lib/flux_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/agent/tools/image_gen.rb` (agent-only, no direct command) |
+| Image generation (FLUX / Atlas Cloud) | `lib/image_gen/*.rb` + `lib/atlas_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/agent/tools/image_gen.rb` (agent-only, no direct command). Backend chosen by `Settings.image_gen['provider']`; provider snapshotted into `task.params['provider']` at submit time. |
 | Suno song generation | `lib/suno_client.rb` + `lib/task_handlers/suno_handler.rb` + `lib/agent/tools/suno.rb` (agent-only, no direct command) |
 | Suno add-vocals (sing along to user audio) | `lib/agent/tools/add_vocals.rb` → `suno_add_vocals` task (handled by `SunoTaskHandler`); 1 clip output |
 | Suno upload-cover (musical cover) | `lib/agent/tools/cover_audio.rb` → `suno_cover_audio` task (handled by `SunoTaskHandler`); 2 clip output |
