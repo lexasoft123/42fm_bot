@@ -167,6 +167,18 @@ class SunoClient
     when 'SENSITIVE_WORD_ERROR'
       :failed # permanent — content flagged
     else
+      # Status can stay PENDING for minutes after Suno has already rejected
+      # the input (e.g. uploadUrl audio matched a copyrighted work — Suno
+      # surfaces error 413 / "Uploaded audio matches existing work of art"
+      # in errorCode/errorMessage while status lingers on PENDING). Mirror
+      # the poll_cover_art_once handling so we don't burn 6+ minutes of
+      # polling before the retry cap marks the task failed.
+      err_code = data['errorCode']
+      err_msg  = data['errorMessage']
+      if (err_code && err_code.to_i != 0) || (err_msg && !err_msg.to_s.empty?)
+        LOGGER.warn "#{self.class.name}#poll_once Suno error: code=#{err_code} msg=#{err_msg.inspect}"
+        return :failed
+      end
       :pending
     end
   rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e

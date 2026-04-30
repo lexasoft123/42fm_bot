@@ -171,4 +171,38 @@ class SunoClientTest < Minitest::Test
     assert_equal :pending,
                  with_stubbed_get(body: body) { SunoClient.new.poll_cover_art_once('any-id') }
   end
+
+  # poll_once (song endpoint): mirror of cover-art error-field handling.
+  # Suno can leave status='PENDING' for minutes while errorCode/errorMessage
+  # already report a permanent rejection (e.g. uploaded audio matched a
+  # copyrighted work — error 413). Detect early instead of polling out.
+
+  def test_poll_once_returns_pending_for_unknown_status_with_no_error
+    body = { 'data' => { 'status' => 'PENDING',
+                         'errorCode' => nil, 'errorMessage' => nil } }
+    assert_equal :pending,
+                 with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+  end
+
+  def test_poll_once_returns_failed_when_pending_status_carries_error_code
+    body = { 'data' => { 'status' => 'PENDING',
+                         'errorCode' => 413,
+                         'errorMessage' => 'Uploaded audio matches existing work of art' } }
+    assert_equal :failed,
+                 with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+  end
+
+  def test_poll_once_returns_failed_when_pending_status_carries_error_message_only
+    body = { 'data' => { 'status' => 'PENDING',
+                         'errorCode' => 0, 'errorMessage' => 'copyright violation' } }
+    assert_equal :failed,
+                 with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+  end
+
+  def test_poll_once_treats_zero_errorcode_and_empty_message_as_not_an_error
+    body = { 'data' => { 'status' => 'PENDING',
+                         'errorCode' => 0, 'errorMessage' => '' } }
+    assert_equal :pending,
+                 with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+  end
 end
