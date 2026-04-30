@@ -134,6 +134,7 @@ class SunoTaskHandler
 
       begin
         lyrics = GptMaster.new([{ role: 'user', content: prompt }],
+                               setting: 'lyrics',
                                chat_id: task.chat_id, user_uid: p['user_uid'],
                                purpose: 'suno_lyrics').call
         raise "GPT lyrics failed" unless lyrics && lyrics != 'жпт не жпт'

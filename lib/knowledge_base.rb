@@ -55,7 +55,7 @@ class KnowledgeBase
       formatted = messages.map { |m| ChatContext.serialize_msg(m) }.to_json
       prompt    = EXTRACTION_PROMPT.gsub('{MESSAGES}', formatted)
 
-      raw = GptMaster.ask('', prompt: prompt, chat_id: chat_id, purpose: 'knowledge_extract')
+      raw = GptMaster.ask('', prompt: prompt, setting: 'knowledge', chat_id: chat_id, purpose: 'knowledge_extract')
       return if raw.nil? || raw.strip.empty? || raw == 'жпт не жпт'
       json_str = raw.gsub(/\A```(?:json)?\n?|\n?```\z/, '').strip
       facts    = JSON.parse(json_str)
@@ -123,7 +123,7 @@ class KnowledgeBase
       entries  = group.map { |k| "- [#{k.topic}]: #{k.content}" }.join("\n")
       prompt   = MERGE_PROMPT.gsub('{ENTRIES}', entries)
       COMPACT_LOGGER.info "merge_cluster ids=#{group.map(&:id)}\nBEFORE (#{group.size} entries):\n#{entries}\nPROMPT:\n#{prompt}"
-      raw = GptMaster.ask('', prompt: prompt, chat_id: chat_id, purpose: 'knowledge_compact')
+      raw = GptMaster.ask('', prompt: prompt, setting: 'knowledge', chat_id: chat_id, purpose: 'knowledge_compact')
       COMPACT_LOGGER.info "RAW RESPONSE:\n#{raw}"
       json_str = raw.gsub(/\A```(?:json)?\n?|\n?```\z/, '').strip
       result   = JSON.parse(json_str)

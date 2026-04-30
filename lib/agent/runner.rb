@@ -18,11 +18,23 @@ module Agent
       @radio     = radio
       @chat_id   = chat_id
       @user      = user
-      @setting   = 'agent'
+      # When the user attached/replied with an image, route through `agent_vision`
+      # (typically Anthropic with vision) so the model can actually see it. The
+      # text-only `agent` setting (typically DeepSeek for cheaper tool-loop runs)
+      # doesn't accept image content blocks. Falls back to `agent` if the chosen
+      # setting isn't configured — preserves backward compat for envs / tests
+      # that haven't defined an `agent_vision` setting.
+      @setting   = pick_setting
       @api_type  = GptMaster.resolve_setting(@setting)[:api_type]
       @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, bot: bot,
                      image: image, audio: audio,
                      reply_to_message_id: reply_to_message_id }
+    end
+
+    def pick_setting
+      return 'agent' unless @image
+      has_vision = Settings.chat_gpt&.dig('settings')&.key?('agent_vision')
+      has_vision ? 'agent_vision' : 'agent'
     end
 
     def run
@@ -131,11 +143,17 @@ module Agent
     end
 
     def build_initial_messages(user_content)
-      if @image
+      if @image && anthropic?
         [{ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: @image[:media_type], data: @image[:data] } },
           { type: 'text', text: user_content }
         ] }]
+      elsif @image
+        # Provider has no vision (DeepSeek, most Grok variants). Drop the image
+        # block but tell the agent it existed so the reply can acknowledge the
+        # limitation rather than silently hallucinating about the photo.
+        hint = "\n\n[К сообщению было прикреплено изображение, но текущая модель не умеет его читать — отвечай только по тексту запроса.]"
+        [{ role: 'user', content: user_content + hint }]
       else
         [{ role: 'user', content: user_content }]
       end

@@ -18,10 +18,35 @@ chat_gpt:
       max_tokens: 16000
       thinking_budget: 10000
     agent:
+      provider: deepseek
+      model: deepseek-v4-pro
+      max_tokens: 16000
+    # Used when the user attaches/replies-to an image — DeepSeek doesn't see
+    # images, so vision requests fall back to Anthropic. Same toolset, same
+    # prompt; only the LLM provider differs. Picked automatically by
+    # Agent::Runner when @image is present.
+    agent_vision:
       provider: anthropic
       model: claude-sonnet-4-6
       max_tokens: 16000
       thinking_budget: 10000
+    # Background fact extraction + cluster-merge compaction for the per-chat
+    # knowledge base. Pure text-in / text-out, no tools, no vision — cheap LLM
+    # is the right fit. Runs frequently (every Settings.knowledge.extract_every
+    # user messages per chat, plus periodic compactions when fact count crosses
+    # the threshold). KnowledgeBase passes setting: 'knowledge' explicitly.
+    knowledge:
+      provider: deepseek
+      model: deepseek-v4-pro
+      max_tokens: 16000
+    # Suno song lyrics generation — creative long-form text-out call, biggest
+    # output of the three Suno LLM steps. Pulled out of `main` so it can be
+    # tuned independently (e.g. flip to a different model or adjust max_tokens
+    # for longer prog-rock tracks). suno_handler passes setting: 'lyrics'.
+    lyrics:
+      provider: deepseek
+      model: deepseek-v4-pro
+      max_tokens: 16000
     embedder:
       provider: openai
       model: text-embedding-3-small
@@ -52,6 +77,22 @@ chat_gpt:
       input: 0.02
       output: 0
       cache_read: 0
+      cache_write: 0
+    # DeepSeek pricing per 1M tokens (USD). Source: api-docs.deepseek.com/quick_start/pricing.
+    # V4-Pro is in 75% promo discount through 2026-05-31 — values below are the
+    # discounted (currently-billed) rates. After 2026-05-31 update to the post-
+    # promo rates: input 1.74, output 3.48, cache_read 0.0145.
+    # cache_write is 0 — DeepSeek caching is implicit (no separate write fee,
+    # unlike Anthropic where cache_write is the 5m-TTL ephemeral write rate).
+    deepseek-v4-pro:
+      input: 0.435
+      output: 0.87
+      cache_read: 0.003625
+      cache_write: 0
+    deepseek-v4-flash:
+      input: 0.14
+      output: 0.28
+      cache_read: 0.0028
       cache_write: 0
   agent_prompt: |
     Ты — Жзяцля, бот радиостанции 42FM в Telegram-чате.
