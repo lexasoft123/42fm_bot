@@ -148,7 +148,7 @@ chat_gpt:
     <%- if phrase -%>
     Пользователь написал "бот ты ...". Вот случайная фраза из коллекции чата: "<%= phrase %>". Используй её как основу или вдохновение для своего ответа — обыграй, разверни или используй как обзывалку.
     <%- end -%>
-    Запрос из чата: [{REQUEST}]
+    Запрос из чата от {USER} (msg id={MESSAGE_ID}): [{REQUEST}]
 
 translator:
   api_url: https://translate.yandex.net/api/v1.5/tr.json/translate

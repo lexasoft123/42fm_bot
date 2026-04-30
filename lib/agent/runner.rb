@@ -8,16 +8,17 @@ module Agent
     MAX_TOOL_RESULT_LENGTH = 2000
     TOOL_RESULT_PREVIEW_CHARS = 600
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil)
-      @text      = text
-      @context   = context
-      @knowledge = knowledge
-      @image     = image
-      @phrase    = phrase
-      @audio     = audio
-      @radio     = radio
-      @chat_id   = chat_id
-      @user      = user
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil)
+      @text       = text
+      @context    = context
+      @knowledge  = knowledge
+      @image      = image
+      @phrase     = phrase
+      @audio      = audio
+      @radio      = radio
+      @chat_id    = chat_id
+      @user       = user
+      @message_id = message_id
       # When the user attached/replied with an image, route through `agent_vision`
       # (typically Anthropic with vision) so the model can actually see it. The
       # text-only `agent` setting (typically DeepSeek for cheaper tool-loop runs)
@@ -162,12 +163,26 @@ module Agent
       scratchpad = Agent::Scratchpad.render(@chat_id)
       rendered = ERB.new(Settings.chat_gpt['agent_prompt'], trim_mode: '-').result(binding)
       content = rendered
+        .gsub('{USER}')       { trigger_user_display }
+        .gsub('{MESSAGE_ID}') { @message_id.to_s }
         .gsub('{REQUEST}')    { @text.to_s }
         .gsub('{CONTEXT}')    { @context.to_s }
         .gsub('{KNOWLEDGE}')  { @knowledge.to_s }
         .gsub('{SCRATCHPAD}') { scratchpad }
       content += "\n\n#{audio_hint}" if @audio
       GptMaster.split_cache_break(content)
+    end
+
+    # Display name for the user who triggered this turn — same `name (Full Name)`
+    # format used by ChatContext.serialize_msg's `who` field, so the agent sees
+    # one consistent identity across context entries and the trigger line.
+    # Pre-fix the trigger line was just `Запрос из чата: [...]` with no
+    # attribution, and the agent occasionally addressed the wrong user when
+    # multiple participants had recent messages in the context window.
+    def trigger_user_display
+      return 'неизвестный' unless @user
+      full_name = [@user.first_name, @user.last_name].compact.reject(&:empty?).join(' ')
+      full_name.empty? ? @user.name.to_s : "#{@user.name} (#{full_name})"
     end
 
     # When the user attaches audio, hint the model so it picks add_vocals /

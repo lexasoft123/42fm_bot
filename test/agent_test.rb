@@ -96,7 +96,7 @@ module AgentTestHelpers
       radio: { 'path' => '/music', 'host_path' => nil },
       telegram: { 'token' => '123456:ABCDEF' },
       chat_gpt: {
-        'agent_prompt' => "<%- if image -%>[IMAGE]\n<%- end -%><%- if phrase -%>PHRASE: <%= phrase %>\n<%- end -%>{REQUEST} | {CONTEXT} | {KNOWLEDGE}",
+        'agent_prompt' => "<%- if image -%>[IMAGE]\n<%- end -%><%- if phrase -%>PHRASE: <%= phrase %>\n<%- end -%>FROM={USER} | {REQUEST} | {CONTEXT} | {KNOWLEDGE}",
         'context_messages_size' => 10,
         'providers' => { 'anthropic' => { 'api_key' => 'fake', 'api_type' => 'anthropic' } },
         'settings' => { 'agent' => { 'provider' => 'anthropic', 'model' => 'fake', 'max_tokens' => 100 } }
@@ -608,6 +608,57 @@ class RunnerTest < BotTest
     first_call = FakeGptMaster.calls.first
     content = first_call[:messages].first[:content]
     assert_match(/PHRASE: жирный хомяк/, content)
+  end
+
+  # Trigger user attribution: the prompt must include the actual sender so
+  # the agent doesn't address the wrong participant when multiple users have
+  # recent messages in the context window. Pre-fix the prompt was
+  # `Запрос из чата: [...]` with no sender, and the agent occasionally
+  # addressed e.g. snels when the trigger came from lexasoft.
+  def test_build_messages_includes_trigger_user_username
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    build_runner(text: 'hi', user: @user).run
+    content = FakeGptMaster.calls.first[:messages].first[:content]
+    assert_match(/FROM=testuser\b/, content, 'prompt must identify the trigger user by username')
+  end
+
+  def test_build_messages_includes_full_name_when_present
+    user_with_name = member_user(uid: 9999, name: 'snels', first_name: 'Snels', last_name: 'Doe')
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    build_runner(text: 'hi', user: user_with_name).run
+    content = FakeGptMaster.calls.first[:messages].first[:content]
+    assert_match(/FROM=snels \(Snels Doe\)/, content,
+                 "trigger user line should match ChatContext.serialize_msg's `who` format")
+  end
+
+  def test_build_messages_falls_back_when_no_full_name
+    user_no_full = member_user(uid: 9998, name: 'minimal_uid')
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    build_runner(text: 'hi', user: user_no_full).run
+    content = FakeGptMaster.calls.first[:messages].first[:content]
+    assert_match(/FROM=minimal_uid \|/, content,
+                 'no first/last name → fall back to bare username (no parentheses)')
+  end
+
+  # Message_id substitution: gives the agent an unambiguous handle on the
+  # exact context entry that triggered this turn (so it can read `who`,
+  # `reply_to`, `thread`, etc. without guessing). Wired separately from
+  # {USER} so callers without a real message (e.g. agent_event handler)
+  # can leave it nil.
+  def test_build_messages_substitutes_message_id_when_provided
+    Settings.chat_gpt['agent_prompt'] = '{REQUEST}|MID={MESSAGE_ID}'
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    build_runner(text: 'hi', user: @user, message_id: 544688).run
+    content = FakeGptMaster.calls.first[:messages].first[:content]
+    assert_match(/MID=544688\b/, content)
+  end
+
+  def test_build_messages_message_id_blank_when_nil
+    Settings.chat_gpt['agent_prompt'] = '{REQUEST}|MID={MESSAGE_ID}'
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    build_runner(text: 'hi', user: @user).run
+    content = FakeGptMaster.calls.first[:messages].first[:content]
+    assert_match(/MID=$/, content, 'nil message_id should render as empty string, not "MID=" literal')
   end
 
   # --- ERB injection regression ---

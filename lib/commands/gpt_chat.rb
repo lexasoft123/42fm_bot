@@ -26,7 +26,8 @@ module Commands
         knowledge: get_relevant_knowledge(text),
         radio: radio, chat_id: chat_id, user: user, bot: bot,
         image: replied_image, phrase: phrase, audio: audio,
-        reply_to_message_id: message.reply_to_message&.message_id
+        reply_to_message_id: message.reply_to_message&.message_id,
+        message_id: message.message_id
       ).run
       CommandResult.text(reply, reply_to_message_id: message.message_id, persist_as_bot_reply: true)
     end
