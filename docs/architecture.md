@@ -93,7 +93,6 @@ bin/bot
 │   │   ├── help.rb
 │   │   ├── gpt_chat.rb
 │   │   ├── news.rb
-│   │   ├── translate.rb       # GPT-based translation (no Yandex)
 │   │   ├── dice.rb
 │   │   ├── phrase_top.rb
 │   │   ├── knowledge_add.rb
@@ -435,18 +434,8 @@ Inline-keyboard menu in the super-admin's private chat for runtime bot administr
 | `ублюдки / бот скажи [ганс] [минус] [track#] [text]` | Text-to-speech (Maxim or Hans voice, optional karaoke) |
 | `бобёр [минус] [track#]` | Random phrase as TTS |
 
-### Translation (GPT-powered)
-| Command | Description |
-|---------|-------------|
-| `бот пиздани [text]` | Translate to Ukrainian |
-| `бот бульбани [text]` | Translate to Belarusian |
-| `бот шпрехни [text]` | Translate to German |
-| `бот пшекни [text]` | Translate to Polish |
-| `бот блгрни [text]` | Translate to Bulgarian |
-| `бот татарни [text]` | Translate to Tatar |
-| `бот казахни [text]` | Translate to Kazakh |
-| `бот грекни [text]` | Translate to Greek |
-| `бот сербни [text]` | Translate to Serbian |
+### Translation (inline by agent)
+No dedicated command, no tool. Users say `бот переведи на немецкий: …` or use slang aliases (`пиздани` → ukrainian, `бульбани` → belarusian, `шпрехни` → german, `пшекни` → polish, `блгрни` → bulgarian, `татарни` → tatar, `казахни` → kazakh, `грекни` → greek, `сербни` → serbian) and `Agent::Runner` translates inline in a single LLM turn — the `agent_prompt` in `config/settings.common.yml` enumerates the slang aliases and instructs the agent to return only the raw translation without persona wrapping. DeepSeek V4 Pro speaks all those languages natively, so routing through a tool would just add round-trips for zero benefit.
 
 ### Info / Entertainment
 | Command | Description |
@@ -497,16 +486,28 @@ chat_gpt:
       api_type: openai
       api_url: https://api.deepseek.com/v1/chat/completions
   settings:
-    main:                         # used for GptMaster.ask (translate, knowledge, suno, image prompt)
+    # `main` was deprecated 2026-04 — every consumer now passes setting:
+    # explicitly. The kwarg default in GptMaster.new/.ask still says 'main'
+    # so any forgotten caller fails loudly with `Unknown chat_gpt setting:
+    # main` at first call rather than silently picking some other model.
+    agent:                        # Agent::Runner tool loop, suno tags/parse, image-gen prompt enrich
+      provider: deepseek
+      model: deepseek-v4-pro
+      max_tokens: 16000
+    agent_vision:                 # Agent::Runner picks this when @image is attached
       provider: anthropic
       model: claude-sonnet-4-6
       max_tokens: 16000
-      thinking_budget: 10000      # optional: Anthropic extended thinking
-    agent:                        # used for Agent::Runner tool-calling loop
-      provider: anthropic
-      model: claude-haiku-4-5
-      max_tokens: 4096
-    embedder:                     # used for EmbeddingService
+      thinking_budget: 10000
+    knowledge:                    # KnowledgeBase extract + compact (background, frequent)
+      provider: deepseek
+      model: deepseek-v4-pro
+      max_tokens: 16000
+    lyrics:                       # suno_handler song lyrics generation
+      provider: deepseek
+      model: deepseek-v4-pro
+      max_tokens: 16000
+    embedder:                     # EmbeddingService — text→vector
       provider: openai
       model: text-embedding-3-small
   pricing:                        # USD per 1M tokens; used by ApiUsage.compute_cost

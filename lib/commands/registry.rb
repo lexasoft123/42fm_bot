@@ -22,7 +22,6 @@ module Commands
     KnowledgeList,
     KnowledgeDelete,
     KnowledgeCompact,
-    Translate,
     News,
     Dice,
     PhraseTop,

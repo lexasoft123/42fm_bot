@@ -137,7 +137,7 @@ class E2ETranslateTest < BotTest
       }))
     end
     begin
-      GptMaster.ask('hello', prompt: 'Translate to RU: {REQUEST}', chat_id: 7, purpose: 'translate')
+      GptMaster.ask('hello', prompt: 'Translate to RU: {REQUEST}', setting: 'agent', chat_id: 7, purpose: 'translate')
     ensure
       HTTParty.singleton_class.remove_method(:post)
     end

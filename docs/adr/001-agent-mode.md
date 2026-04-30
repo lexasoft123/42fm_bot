@@ -6,6 +6,8 @@
 
 > **Superseded 2026-04-17:** the `chat_gpt.agent_mode` toggle has been removed and agent mode is now the only mode. `Commands::ReplyYou` and `GptMaster.chat` (the non-agent code paths) are gone. The rest of the ADR is retained for historical context; the architecture it describes is still accurate minus the toggle.
 
+> **Updated 2026-04-30:** the `chat_gpt.settings` layout in this ADR (`main` / `agent` / `embedder`) has evolved. `main` was deprecated; current settings are `agent` (DeepSeek V4 Pro by default), `agent_vision` (Anthropic — auto-picked when an image is attached), `knowledge` (DeepSeek), `lyrics` (DeepSeek), and `embedder`. The "two-level providers/settings" pattern from this ADR is unchanged; only the named-setting roster has grown. `GptMaster.ask` defaults `setting: 'main'` for the kwarg, but `main` is no longer defined — any forgotten caller fails loudly. See [docs/architecture.md](../architecture.md) for the current settings shape.
+
 ## Context
 
 The bot has multiple services (radio control via Liquidsoap, weather, Google search, knowledge base, horoscope) accessible only through hardcoded command patterns. When a user writes `бот <text>`, the GPT handler generates a text-only response — it cannot interact with any of these services. This means GPT cannot answer questions like "what's playing on the radio?" or "put on some Metallica" even though the bot already has the infrastructure to do so.
