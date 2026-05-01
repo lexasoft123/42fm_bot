@@ -91,12 +91,16 @@ class SunoClient
 
   # Submit upload-cover request: musical reinterpretation of a user-provided
   # audio URL in a new style. Returns 2 clips on success.
-  def cover_audio(upload_url:, style:, title:, prompt: '', negative_tags: '', vocal_gender: nil)
-    body = { uploadUrl: upload_url, customMode: true, instrumental: false,
+  # `instrumental: true` tells Suno to skip vocals — needed when the input
+  # is itself instrumental and the user wants the cover to stay that way
+  # (otherwise Suno hallucinates vocals based on `prompt` and prior chat
+  # context).
+  def cover_audio(upload_url:, style:, title:, prompt: '', negative_tags: '', vocal_gender: nil, instrumental: false)
+    body = { uploadUrl: upload_url, customMode: true, instrumental: instrumental,
              style: style, title: title, prompt: prompt,
              negativeTags: negative_tags, model: @model,
              callBackUrl: 'https://example.com/noop' }
-    body[:vocalGender] = vocal_gender if vocal_gender
+    body[:vocalGender] = vocal_gender if vocal_gender && !instrumental
     post_for_task_id('/api/v1/generate/upload-cover', **body)
   end
 

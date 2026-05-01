@@ -71,6 +71,38 @@ class SunoClientTest < Minitest::Test
     assert_equal 'neon nights', req[:body]['prompt']
   end
 
+  # Instrumental cover: when the input is itself instrumental (or the user
+  # explicitly asked for "минус"), pass `instrumental: true` so Suno skips
+  # vocal generation. Without this, Suno hallucinates vocals based on
+  # `prompt` and prior chat context — exactly what dropped a real user
+  # request today (lex's "переделай чтоб был минус без гитары").
+  def test_cover_audio_passes_instrumental_true_to_api
+    captured = []
+    with_stubbed_post(captured: captured) do
+      SunoClient.new.cover_audio(
+        upload_url: 'https://example.com/in.mp3',
+        style: 'instrumental, ambient', title: 'Minus', prompt: '',
+        instrumental: true
+      )
+    end
+    assert_equal true, captured.last[:body]['instrumental']
+  end
+
+  # vocal_gender is meaningless when there's no vocal; drop it to avoid
+  # confusing Suno's pipeline.
+  def test_cover_audio_omits_vocal_gender_when_instrumental
+    captured = []
+    with_stubbed_post(captured: captured) do
+      SunoClient.new.cover_audio(
+        upload_url: 'https://example.com/in.mp3',
+        style: 'instrumental', title: 'Minus', prompt: '',
+        instrumental: true, vocal_gender: 'm'
+      )
+    end
+    refute captured.last[:body].key?('vocalGender'),
+           'vocalGender must not be sent when instrumental=true'
+  end
+
   def test_cover_art_posts_with_just_task_id
     captured = []
     with_stubbed_post(captured: captured) do

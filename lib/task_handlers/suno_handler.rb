@@ -55,7 +55,8 @@ class SunoTaskHandler
         title:         p['title'],
         prompt:        p['prompt'].to_s,
         negative_tags: p['negative_tags'].to_s,
-        vocal_gender:  p['vocal_gender']
+        vocal_gender:  p['vocal_gender'],
+        instrumental:  p['instrumental'] == true
       )
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit cover_audio: #{e.message}", raise_on_retry: e)
