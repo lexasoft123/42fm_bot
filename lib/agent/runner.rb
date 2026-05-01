@@ -7,6 +7,11 @@ module Agent
     MAX_ITERATIONS = 5
     MAX_TOOL_RESULT_LENGTH = 2000
     TOOL_RESULT_PREVIEW_CHARS = 600
+    # Per-iteration latency above this threshold gets a WARN-level log so
+    # slow API calls show up in `grep WARN log/bot.log` without having to
+    # parse every iteration line. Pile-up of slow iterations is what
+    # backs up `bot.listen`'s single-threaded queue.
+    SLOW_ITERATION_MS = 5_000
 
     def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil)
       @text       = text
@@ -56,6 +61,7 @@ module Agent
         stop       = extract_stop_reason(raw)
         tool_calls = extract_tool_calls(raw)
         iter_ms    = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - iter_t0) * 1000).round
+        alog :warn, "slow iteration #{i + 1}: took=#{iter_ms}ms (threshold #{SLOW_ITERATION_MS}ms)" if iter_ms > SLOW_ITERATION_MS
 
         if tool_calls.empty?
           text = extract_text(raw) || 'жпт не жпт'

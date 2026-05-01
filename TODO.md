@@ -4,6 +4,7 @@ This file tracks pending work and parking-lot ideas. New entries land at the top
 
 ## Done
 
+* [x] Latency warn for slow agent iterations — `Agent::Runner` now WARN-logs any iteration exceeding `SLOW_ITERATION_MS` (5s). Earlier version of this TODO suggested 15s; lowered to 5s after a 40s queue pile-up dropped a `!track` message via the stale-message filter. Aggregating p95 across days is a separate ask if it ever becomes useful.
 * [x] Add agent tool to get knowledge
 * [x] Add agent tool to get phrases
 * [x] Refactor Google search
@@ -12,8 +13,6 @@ This file tracks pending work and parking-lot ideas. New entries land at the top
 * [x] Add telegram Bot interactive interface for admins — Phase 1: super-admin menu (`/admin` in private chat) for managing authorized chats, per-chat rate limits, global `users.role` admins. See `lib/admin_menu/`.
 
 ## Pending
-
-* [ ] Latency warn for slow agent iterations. Now that `agent` runs DeepSeek V4 Pro thinking, p95 per-iteration time jumps materially (live probe showed ~7s/iter, sometimes 18s+ on hard tasks). `Agent::Runner` already logs `took=Nms` per iter (lib/agent/runner.rb:54,62) but no threshold-warn. Cheap addition: `LOGGER.warn` if `iter_ms > 15_000` so we have a grep target before users complain. Plan also called out a 25s p95 rollback trigger but that needs an automated signal — simplest is a daily aggregator that grep's `iteration .* took=` and reports p95.
 
 * [ ] Per-chat admin permissions (Phase 2 of the admin menu).
   - **Today**: `users.role == 'admin'` is global — being admin in one chat means admin everywhere.
