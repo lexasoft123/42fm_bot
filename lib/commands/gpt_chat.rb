@@ -103,7 +103,9 @@ module Commands
       return nil unless row
       { file_id:   row.attachment_file_id,
         mime_type: row.attachment_mime_type,
-        duration:  nil, title: nil, performer: nil }
+        duration:  row.attachment_duration,
+        title:     row.attachment_title,
+        performer: row.attachment_performer }
     end
 
     def audio_metadata_from(msg)
@@ -112,11 +114,18 @@ module Commands
       src ||= (msg.document if msg.document&.mime_type&.start_with?('audio/'))
       return nil unless src
 
+      # Title fallback chain: Audio.title (ID3) → Document.file_name minus
+      # extension. The agent uses this to name the output cover/vocals
+      # track; without a title hint it falls back to inferring the name
+      # from prior chat context, which gets wrong when the user uploads
+      # a fresh track unrelated to earlier conversation.
+      title = (src.respond_to?(:title) ? src.title : nil)
+      title = File.basename(src.file_name.to_s, '.*').strip if (title.nil? || title.empty?) && src.respond_to?(:file_name) && !src.file_name.to_s.empty?
       {
         file_id:   src.file_id,
         mime_type: src.respond_to?(:mime_type) ? src.mime_type : nil,
         duration:  src.respond_to?(:duration)  ? src.duration  : nil,
-        title:     src.respond_to?(:title)     ? src.title     : nil,
+        title:     title.to_s.empty? ? nil : title,
         performer: src.respond_to?(:performer) ? src.performer : nil,
       }
     end

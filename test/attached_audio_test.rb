@@ -29,11 +29,13 @@ class AttachedAudioHarness
     src ||= (msg.document if msg.document&.mime_type&.start_with?('audio/'))
     return nil unless src
 
+    title = (src.respond_to?(:title) ? src.title : nil)
+    title = File.basename(src.file_name.to_s, '.*').strip if (title.nil? || title.empty?) && src.respond_to?(:file_name) && !src.file_name.to_s.empty?
     {
       file_id:   src.file_id,
       mime_type: src.respond_to?(:mime_type) ? src.mime_type : nil,
       duration:  src.respond_to?(:duration)  ? src.duration  : nil,
-      title:     src.respond_to?(:title)     ? src.title     : nil,
+      title:     title.to_s.empty? ? nil : title,
       performer: src.respond_to?(:performer) ? src.performer : nil,
     }
   end
@@ -48,7 +50,9 @@ class AttachedAudioHarness
     return nil unless row
     { file_id:   row.attachment_file_id,
       mime_type: row.attachment_mime_type,
-      duration:  nil, title: nil, performer: nil }
+      duration:  row.attachment_duration,
+      title:     row.attachment_title,
+      performer: row.attachment_performer }
   end
 end
 
@@ -90,6 +94,36 @@ class AttachedAudioTest < Minitest::Test
     result = AttachedAudioHarness.new(message: msg(document: d)).attached_audio
     refute_nil result
     assert_equal 'audio/wav', result[:mime_type]
+  end
+
+  # Document-uploaded mp3 (Telegram desktop default) has no `title`, only
+  # `file_name`. Fall back to the file_name minus extension so the agent
+  # has something to anchor the cover's title on, instead of inventing
+  # one from prior chat context.
+  DocumentWithFilename = Struct.new(:file_id, :mime_type, :file_name, keyword_init: true)
+
+  def test_document_uses_file_name_as_title_fallback
+    d = DocumentWithFilename.new(file_id: 'DOC2', mime_type: 'audio/mpeg', file_name: 'Rebreather Romance.mp3')
+    result = AttachedAudioHarness.new(message: msg(document: d)).attached_audio
+    refute_nil result
+    assert_equal 'Rebreather Romance', result[:title], 'extension stripped, base used as title'
+  end
+
+  def test_document_with_no_filename_returns_nil_title
+    d = DocumentWithFilename.new(file_id: 'DOC3', mime_type: 'audio/mpeg', file_name: nil)
+    result = AttachedAudioHarness.new(message: msg(document: d)).attached_audio
+    assert_nil result[:title]
+  end
+
+  AudioWithFilename = Struct.new(:file_id, :mime_type, :duration, :title, :performer, :file_name, keyword_init: true)
+
+  def test_audio_title_takes_precedence_over_file_name
+    # Audio struct has both title (ID3) and a separate file_name attribute
+    # (some clients populate both). Title wins.
+    a = AudioWithFilename.new(file_id: 'AUD9', mime_type: 'audio/mpeg', duration: 100,
+                               title: 'Real Title', performer: 'P', file_name: 'wrong.mp3')
+    result = AttachedAudioHarness.new(message: msg(audio: a)).attached_audio
+    assert_equal 'Real Title', result[:title]
   end
 
   def test_document_with_non_audio_mime_returns_nil

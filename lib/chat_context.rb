@@ -2,6 +2,8 @@ module ChatContext
   SELECT_COLS = 'messages.id, messages.message_id, messages.reply_to_message_id, ' \
                 'messages.message_thread_id, messages.forwarded, messages.edited_at, ' \
                 'messages.role, messages.body, messages.attachment_file_id, ' \
+                'messages.attachment_mime_type, messages.attachment_title, ' \
+                'messages.attachment_performer, messages.attachment_duration, ' \
                 'users.name, users.first_name, users.last_name'.freeze
 
   def get_chat_context(chat_id, thread_id: nil)
@@ -50,12 +52,20 @@ module ChatContext
     h[:thread] = r.message_thread_id if r.message_thread_id
     h[:fwd] = true if r.forwarded
     h[:edited] = true if r.try(:edited_at)
-    # Surface the presence of an audio attachment so the agent can locate
-    # an earlier upload in the chat thread when the user later asks for a
-    # cover without a Telegram-reply pointing at it. Value is just `true`
-    # — the bot resolves the file_id internally; no need to expose it to
-    # the LLM.
-    h[:audio] = true if r.try(:attachment_file_id)
+    # Surface the audio attachment + its known metadata so the agent can
+    # both locate an earlier upload (cover_audio without a Telegram-reply)
+    # AND name the output cover after the actual track instead of
+    # inferring from prior chat context. The flag is `audio: true` for
+    # back-compat; the metadata sub-fields are nil-safe.
+    if r.try(:attachment_file_id)
+      h[:audio] = true
+      meta = {}
+      meta[:title]     = r.attachment_title     if r.try(:attachment_title)
+      meta[:performer] = r.attachment_performer if r.try(:attachment_performer)
+      meta[:duration]  = r.attachment_duration  if r.try(:attachment_duration)
+      meta[:mime]      = r.attachment_mime_type if r.try(:attachment_mime_type)
+      h[:audio_meta] = meta unless meta.empty?
+    end
     if r.role == 'bot'
       h[:who] = 'Жзяцля'
     else

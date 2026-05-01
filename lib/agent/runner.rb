@@ -194,6 +194,9 @@ module Agent
     # When the user attaches audio, hint the model so it picks add_vocals /
     # cover_audio when the caption is ambiguous. Includes title/duration when
     # Telegram provided them so the agent has something to caption with.
+    # When a title is present, also tell the agent EXPLICITLY to use it —
+    # otherwise it tends to invent one from prior chat context (e.g. yesterday's
+    # cover) and the user gets a track named after the wrong song.
     def audio_hint
       bits = []
       bits << "title=#{@audio[:title].inspect}" if @audio[:title]
@@ -201,7 +204,8 @@ module Agent
       bits << "duration=#{@audio[:duration]}s" if @audio[:duration]
       bits << "mime=#{@audio[:mime_type]}" if @audio[:mime_type]
       desc = bits.empty? ? '' : " (#{bits.join(', ')})"
-      "[К сообщению прикреплён аудиофайл#{desc}. Если непонятно, что с ним делать — спроси: подпеть (add_vocals), сделать кавер (cover_audio), или другое.]"
+      use_title = @audio[:title] ? " Используй title (и performer если есть) как основу для названия выходного трека — НЕ выдумывай имя из контекста чата." : ''
+      "[К сообщению прикреплён аудиофайл#{desc}.#{use_title} Если непонятно, что с ним делать — спроси: подпеть (add_vocals), сделать кавер (cover_audio), или другое.]"
     end
 
     def build_initial_messages(user_content)

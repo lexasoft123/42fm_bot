@@ -189,7 +189,10 @@ class MessageResponder
       forwarded: !message.forward_origin.nil?,
       edited_at: (message.edit_date ? Time.at(message.edit_date) : nil),
       attachment_file_id:   audio_src&.file_id,
-      attachment_mime_type: (audio_src.respond_to?(:mime_type) ? audio_src.mime_type : nil)
+      attachment_mime_type: (audio_src.respond_to?(:mime_type) ? audio_src.mime_type : nil),
+      attachment_title:     attachment_title_from(audio_src),
+      attachment_performer: (audio_src.respond_to?(:performer) ? audio_src.performer : nil),
+      attachment_duration:  (audio_src.respond_to?(:duration)  ? audio_src.duration  : nil)
     )
     # Audio-only rows have body=`[аудио]` placeholder — feeding them to the
     # knowledge extractor adds noise AND bumps `count % extract_every`
@@ -227,6 +230,18 @@ class MessageResponder
       user.last_name = message.from.last_name
       user.save
     end
+  end
+
+  # Title fallback chain for the persisted column: Audio.title (ID3) →
+  # Document.file_name minus extension. Mirrors the in-memory computation
+  # in Commands::GptChat#audio_metadata_from so chat context and runtime
+  # decision-making see the same value.
+  def attachment_title_from(src)
+    return nil unless src
+    title = (src.respond_to?(:title) ? src.title : nil).to_s
+    return title unless title.empty?
+    return nil unless src.respond_to?(:file_name) && !src.file_name.to_s.empty?
+    File.basename(src.file_name.to_s, '.*').strip.then { |s| s.empty? ? nil : s }
   end
 
   # On restart Telegram replays the last few hours of unread updates via
