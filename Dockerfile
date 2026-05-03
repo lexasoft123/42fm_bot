@@ -17,7 +17,6 @@ WORKDIR /app
 
 COPY Gemfile Gemfile.lock ./
 RUN bundle config set --local without development \
- && bundle config set --local clean true \
  && bundle install --jobs 4 \
  && rm -rf /usr/local/bundle/cache \
            /usr/local/bundle/ruby/*/cache
