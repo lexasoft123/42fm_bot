@@ -277,6 +277,15 @@ Auto-extraction is triggered by `MessageResponder#maybe_extract_knowledge` every
 
 Auto-compaction is triggered by `maybe_trigger_compact` after each extraction batch. Uses an adaptive threshold: if the last compaction found only small clusters (avg ≤ 2 entries), the effective threshold scales up to 3× `compact_at` before the next run. Threshold settings: `knowledge.compact_at` (entry count trigger, default 100), `knowledge.compact_threshold` (cosine similarity, default 0.85). Logs to `log/knowledge_compact.log`.
 
+### Agent Scratchpad — `lib/agent/scratchpad.rb` + `models/chat_state.rb`
+Per-chat working memory distinct from the knowledge base — knowledge = facts about the world, scratchpad = agent's own intentions/expectations/notes. Stored in `chat_states.scratchpad` (JSON), one row per chat. Three categories: `intentions`, `notes`, `expectations`. Hard cap 6000 chars (~1500 tokens) with FIFO eviction from the largest category. Rendered as `{SCRATCHPAD}` placeholder in `agent_prompt`. Agent manages it via `remember`/`forget` tools (`lib/agent/tools/scratchpad.rb`). See ADR-003 for the full architecture rationale.
+
+**Compaction** (`Agent::Scratchpad.compact(chat_id, max_age_days:)`): pure-Ruby pruning of entries past `expires_at` plus entries older than `max_age_days` (default 30). Runs inline on every `Scratchpad.add` for expiry-based pruning. Manual run: `rake scratchpad:compact [MAX_AGE_DAYS=N] [CHAT_ID=...]`. No LLM calls — at the 6000-char cap, semantic compaction isn't worth the cost. The `бот сожми знания` (admin only) command triggers compaction immediately for the current chat.
+
+**Time-deferred intentions — `CronScheduler` (`lib/cron_scheduler.rb`)**: thread that wakes every 60s, finds chats with scratchpad intentions whose `due_at` has passed, and emits one `agent_event(cron_tick)` per chat carrying the due intent ids. Marks them `acted: true` so the next tick doesn't re-dispatch. Subject to the same per-chat 10/hour `agent_event` rate cap. Lets the agent act on time-deferred intentions (e.g. retry a rate-limited image after the cooldown). Started from `lib/bot.rb` alongside `TaskRunner.start`.
+
+**`Agent::ToolResult`** — structured tool-result protocol. Tool handlers may return either a String (passthrough) or `Agent::ToolResult.deferred(user_text:, intent:, retry_in_min:)` for rate-limited / retry-later outcomes. `Agent::Runner` auto-writes the intent to the chat's scratchpad on `:deferred` (with `due_at = now + retry_in_min`) and forwards a `[deferred retry_in=Nmin, intent saved to scratchpad] <user_text>` prefix to the LLM. New deferred-style tools just call `Agent::ToolResult.deferred(...)` — no per-tool prompt scaffolding required.
+
 ### Agent Mode — `lib/agent/`
 `GptChat` and `GptQuestion` always route through `Agent::Runner`. The runner implements an agentic tool-use loop:
 
@@ -297,6 +306,11 @@ Auto-compaction is triggered by `maybe_trigger_compact` after each extraction ba
 Admin-only tools are filtered from definitions AND checked at execution time (denial messages pulled from `Settings.replies['admin_denied']`). Tool results are truncated to 2000 chars.
 
 **Vision support:** When a user replies to a photo with a bot-addressed message (e.g. "бот что тут?"), `GptChat` downloads the photo via Telegram API, base64-encodes it, and passes it to `Agent::Runner`. The runner builds a multi-modal message with an `image` content block for the Anthropic API. Falls back to text-only if the download fails or there's no photo.
+
+### Agent Event Loop — `lib/task_handlers/agent_event_handler.rb`
+When image_gen / suno tasks hit interesting outcomes (failure after retries, success after retries), the handler emits an `agent_event` BackgroundTask via the `lib/task_handlers/agent_event_emitter.rb` mixin. `AgentEventHandler` runs `Agent::Runner` with a synthetic `[СЛУЖЕБНОЕ СОБЫТИЕ]` text describing what happened; the agent decides whether to comment, retry via tools, or `(skip)`.
+
+Per-chat rate limit: 10 emits per rolling hour. Loop protection: only image_gen/suno emit; agent_event itself doesn't (single-hop). See ADR-003 PR-2.
 
 ### Background Task Queue — `lib/task_runner.rb` + `lib/task_handlers/`
 Generic DB-backed persistent task system for long-running operations. A poller thread runs inside the bot process (started in `Telegram::Bot::Client.run`, reusing `bot.api`).
@@ -329,6 +343,26 @@ HTTP client for the Suno AI song generation API (`sunoapi.org`), using V5 model.
 - `compose(...)` — blocking convenience (submit + poll loop)
 - `SunoClient.resolve_genre(text)` — maps Russian genre names to English style tags (~50 genres)
 - **Important:** Suno blocks artist names in tags — describe sound characteristics instead
+
+#### Cover Audio mode resolution
+The `/api/v1/generate/upload-cover` endpoint takes a `customMode` flag + a `prompt` field whose meaning depends on mode — `customMode: true` sings `prompt` verbatim as lyrics (≤5000 chars on V5); `customMode: false` treats `prompt` as a "core idea" theme and Suno auto-generates fresh lyrics from it (≤500 chars). Suno does NOT preserve the original mp3's lyrics in either mode. The tool exposes two explicit args: `lyrics` (verbatim user-provided text → custom mode) and `topic` (short Russian theme phrase → auto mode).
+
+`SunoTaskHandler#resolve_cover_prompt` resolution order: `instrumental=true` → auto-mode + title-as-prompt (lyrics/topic ignored — prompt isn't sung under instrumental but Suno still requires a value); else `lyrics` (truncated to 5000) → `topic` (truncated to 500) → legacy `prompt` if present (back-compat for in-flight tasks at deploy time, treated as topic) → `title` fallback.
+
+**Reply-target source-lyrics auto-fallback**: when the user replies to a previously-bot-generated Suno song asking for a remix without supplying explicit `lyrics`, `cover_audio` resolves `ctx[:reply_to_message_id]` → `Message.bg_task_external_id` → source `BackgroundTask` and copies lyrics from `params['lyrics']` (compose_song path) or first clip's `result.lyrics` (add_vocals/cover_audio path). Mirrors `cover_art`'s reply-target chain — robust against the lyrics scrolling out of the 50-msg chat-context window.
+
+#### Cover Art source resolution
+`cover_art` resolution chain: (1) explicit `args['suno_task_id']`; (2) `ctx[:reply_to_message_id]` → `Message.bg_task_external_id` (populated by both Suno handlers when persisting bot media rows); (3) most recent `done` task in chat across `suno_generate` / `suno_add_vocals` / `suno_cover_audio`. The reply-target step is what makes "бот, нарисуй обложку" resolve to a specific bot song instead of always the latest one.
+
+`SunoCoverArtHandler` polls via `SunoClient#poll_cover_art_once` against a **different endpoint** (`/api/v1/suno/cover/record-info`, not `/api/v1/generate/record-info` — separate ID spaces) with a different response shape (`successFlag`, `response.images`, `errorCode`/`errorMessage`). Failures emit `cover_art_failed` agent_event so the agent can comment.
+
+#### Suno WAV export
+`convert_to_wav` agent tool, `suno_wav_convert` task type, `SunoWavConvertHandler`. Uses `POST /api/v1/wav/generate` (requires both `taskId` AND `audioId` — the per-clip id from `response.sunoData[].id`, NOT the song's task id) + `GET /api/v1/wav/record-info`. `successFlag` enum: `PENDING` / `SUCCESS` / `CREATE_TASK_FAILED` / `GENERATE_WAV_FAILED` / `CALLBACK_EXCEPTION`.
+
+Source resolution mirrors `cover_art` (explicit `suno_task_id` → reply target's `bg_task_external_id` → most recent done song). `clip_index` (1 or 2, default 1) picks which of the two Suno clips to convert; the handler re-fetches the source's `record-info` via `SunoClient#fetch_audio_ids` to map `clip_index` → `audioId` since clip ids aren't persisted in `BackgroundTask.result`. Output sent as Telegram audio (`sendAudio`) named `Performer_-_Title.wav`.
+
+#### Combined "song + cover art" requests
+All three song-producing tools (`compose_song`, `add_vocals`, `cover_audio`) accept `with_cover_art: true`. After the song's `:done` polling, `SunoTaskHandler#maybe_chain_cover_art` enqueues a chained `suno_cover_art` task pointing at the just-completed song's `external_id`. Dedup via `json_extract(params, '$.source_task_id')` lookup. Charged against the `suno` rate-limit bucket (RateLimiter counts all `suno_*` task types); silently dropped at chain time if the bucket is exhausted.
 
 ### Image generation — `lib/image_gen/` + `lib/atlas_client.rb`
 Service-adapter layer. The `ImageGenTaskHandler` is provider-agnostic; concrete backends live as `ImageGen::Adapter` subclasses, picked at runtime from `Settings.image_gen['provider']`.
@@ -600,3 +634,25 @@ Log rotation: size-based — rotates at `max_size_mb`, keeps `keep_files` old fi
 - **Process management:** `daemons` gem — PID file in `pids/42fm_bot.pid`. `:monitor => false` — the bot's own `rescue/retry` loop handles restarts.
 - **Starting/stopping:** always use `./bin/bot start|stop|restart|status`
 - **SOCKS proxy:** configured in `settings.yml`, applied globally in `AppConfigurator#setup_proxy` via `socksify` (patches `Net::HTTP`)
+
+---
+
+## Operations
+
+### Backing up the prod DB
+
+```bash
+make backup                    # keeps 5 newest snapshots on prod host (default)
+make backup BACKUP_KEEP=10     # keep 10 newest
+```
+
+Runs [bin/backup.sh](../bin/backup.sh) remotely via `ssh bash -exs`. Uses SQLite's online backup API (`sqlite3 db/bot.db ".backup db/bot.db.bak-<utc_ts>"`), so the snapshot is consistent **even in WAL mode under concurrent writes** — a plain `cp` would miss writes still sitting in the `-wal` file. The resulting `.bak` is a standalone SQLite DB; no `-wal` or `-shm` sidecars needed. After writing, it prunes older snapshots so only the most recent N remain.
+
+**When to run:** before a deploy that includes a new migration under `db/migrate/`. Code-only deploys don't touch schema or data, so no backup.
+
+**Restoring** (if a migration or deploy goes bad):
+```bash
+ssh $DEPLOY_HOST 'cd ~/bot && docker compose down && \
+  cp db/bot.db.bak-<ts> db/bot.db && \
+  git reset --hard <previous-sha> && docker compose up -d --build'
+```
