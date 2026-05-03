@@ -7,6 +7,7 @@ require_relative '../lib/media_download'
 require_relative '../lib/chat_context'
 require_relative '../lib/task_runner'
 require_relative '../lib/task_handlers/agent_event_emitter'
+require_relative '../lib/gpt_master'
 require_relative '../lib/suno_client'
 require_relative '../lib/task_handlers/suno_handler'
 
@@ -271,6 +272,52 @@ class SunoHandlerChainTest < BotTest
     assert_equal true,          kw[:instrumental]
     assert_equal 'jazz',        kw[:style]
   ensure
+    SunoClient.singleton_class.send(:alias_method, :new, :__new) rescue nil
+    SunoClient.singleton_class.send(:remove_method, :__new)      rescue nil
+  end
+
+  # Pins the regression that motivated the compose_song theme/lyrics split:
+  # when params['lyrics'] is nil, compose_and_submit_generate must call
+  # GptMaster.new(setting: 'lyrics') (the dedicated Sonnet composer). Pre-
+  # split, the agent always inline-composed via the `agent` setting
+  # (DeepSeek), bypassing the Sonnet upgrade entirely. We assert the
+  # `setting:` kwarg by stubbing GptMaster.new and capturing it.
+  def test_compose_and_submit_generate_uses_lyrics_setting_when_lyrics_empty
+    Settings.singleton_class.send(:define_method, :suno) {
+      { 'lyrics_prompt' => 'Compose: {REQUEST} | {GENRE} | {ARTIST} | {CONTEXT} | {KNOWLEDGE}' }
+    } unless Settings.respond_to?(:suno)
+
+    captured_settings = []
+    fake_gpt = Object.new
+    fake_gpt.define_singleton_method(:call) {
+      "[Verse]\nfake composed lyrics\n[Chorus]\nfor test"
+    }
+    GptMaster.singleton_class.send(:alias_method, :__new, :new)
+    GptMaster.singleton_class.send(:define_method, :new) do |_msgs, **opts|
+      captured_settings << opts[:setting]
+      fake_gpt
+    end
+
+    suno_stub = Object.new
+    suno_stub.define_singleton_method(:submit) { |**_| 'fake-suno-id' }
+    SunoClient.singleton_class.send(:alias_method, :__new, :new)
+    SunoClient.singleton_class.send(:define_method, :new) { suno_stub }
+
+    # Mirror what compose_song agent tool persists post-split: lyrics nil,
+    # topic populated from the agent's `theme` arg.
+    task = BackgroundTask.create!(
+      task_type: 'suno_generate', chat_id: CHAT, max_attempts: 60,
+      params: { tags: 'jazz, smooth', title: 'Test', lyrics: nil,
+                topic: 'про шефа', genre: 'поп', user_uid: 1 }.to_json
+    )
+    api = OpenStruct.new
+    @handler.send(:compose_and_submit_generate, task, api)
+
+    assert_includes captured_settings, 'lyrics',
+                    "expected GptMaster.new(setting: 'lyrics') for Sonnet composition; got #{captured_settings.inspect}"
+  ensure
+    GptMaster.singleton_class.send(:alias_method, :new, :__new)  rescue nil
+    GptMaster.singleton_class.send(:remove_method, :__new)       rescue nil
     SunoClient.singleton_class.send(:alias_method, :new, :__new) rescue nil
     SunoClient.singleton_class.send(:remove_method, :__new)      rescue nil
   end

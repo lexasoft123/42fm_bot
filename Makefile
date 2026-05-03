@@ -32,7 +32,8 @@ TEST_FILES := \
 	test/chat_context_serialize_test.rb \
 	test/convert_to_wav_tool_test.rb \
 	test/cover_audio_tool_test.rb \
-	test/suno_language_policy_test.rb
+	test/suno_language_policy_test.rb \
+	test/compose_song_tool_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \
