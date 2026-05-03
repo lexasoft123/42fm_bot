@@ -1,0 +1,32 @@
+# Repo metadata / editor / tooling
+.git
+.gitignore
+.github
+.bundle
+.ruby-lsp
+.vscode
+.claude
+.env
+.env.example
+
+# Runtime state — bind-mounted at runtime, doesn't belong in the image
+db
+log
+pids
+web
+tmp
+
+# Dev-only
+test
+docs
+README.md
+TODO.md
+CLAUDE.md
+debug.log
+*.log
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*.swo
+*~
