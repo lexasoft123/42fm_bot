@@ -111,6 +111,63 @@ class SunoClient
       taskId: suno_task_id, callBackUrl: 'https://example.com/noop')
   end
 
+  # Submit WAV-conversion request for one specific clip of an existing Suno
+  # song task. Both `taskId` (the source song's Suno taskId) and `audioId`
+  # (the per-clip id from response.sunoData[].id) are required.
+  def convert_to_wav(task_id:, audio_id:)
+    post_for_task_id('/api/v1/wav/generate',
+      taskId: task_id, audioId: audio_id, callBackUrl: 'https://example.com/noop')
+  end
+
+  # Poll once for WAV conversion. Returns :pending, :failed, :retry, or
+  # { wav_url: '...' }. Response shape:
+  #
+  #   { data: { successFlag: 'PENDING' | 'SUCCESS' | 'CREATE_TASK_FAILED'
+  #             | 'GENERATE_WAV_FAILED' | 'CALLBACK_EXCEPTION',
+  #             response: { audioWavUrl: '...' },
+  #             errorCode, errorMessage } }
+  def poll_wav_once(task_id)
+    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    resp = HTTParty.get("#{@base_url}/api/v1/wav/record-info",
+      query: { taskId: task_id }, headers: headers, timeout: 30)
+    took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
+    return :pending unless resp.code == 200
+    data = resp.parsed_response['data']
+    return :pending unless data
+    LOGGER.debug "#{self.class.name}#poll_wav_once took=#{took_ms}ms successFlag=#{data['successFlag'].inspect}"
+
+    case data['successFlag']
+    when 'SUCCESS'
+      url = data.dig('response', 'audioWavUrl')
+      url.to_s.empty? ? :retry : { wav_url: url }
+    when 'CREATE_TASK_FAILED', 'GENERATE_WAV_FAILED', 'CALLBACK_EXCEPTION'
+      err = data['errorMessage'] || data['successFlag']
+      LOGGER.warn "#{self.class.name}#poll_wav_once Suno error: code=#{data['errorCode']} msg=#{err.inspect}"
+      :failed
+    else
+      :pending
+    end
+  rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
+    LOGGER.warn "#{self.class.name} poll_wav_once: #{e.class}: #{e.message}"
+    :pending
+  end
+
+  # Helper: fetch the per-clip `id` array for a completed Suno song task.
+  # Used by the WAV-convert handler — `convert_to_wav` requires `audioId`,
+  # but we don't currently persist clip ids when a song completes
+  # (`SunoClient#poll_once` strips them). Re-fetching `record-info` is a
+  # cheap GET; cleaner than retrofitting persistence for old rows.
+  def fetch_audio_ids(task_id)
+    resp = HTTParty.get("#{@base_url}/api/v1/generate/record-info",
+      query: { taskId: task_id }, headers: headers, timeout: 30)
+    return [] unless resp.code == 200
+    songs = resp.parsed_response.dig('data', 'response', 'sunoData') || []
+    songs.map { |s| s['id'] }.compact
+  rescue => e
+    LOGGER.warn "#{self.class.name} fetch_audio_ids: #{e.class}: #{e.message}"
+    []
+  end
+
   # Poll once for cover-art task. Cover-art uses a different polling
   # endpoint (`/api/v1/suno/cover/record-info`) and response shape than
   # song generation. The shape is:

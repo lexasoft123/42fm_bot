@@ -238,6 +238,63 @@ class SunoClientTest < Minitest::Test
                  with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
   end
 
+  # --- WAV-convert endpoints ---
+
+  def test_convert_to_wav_posts_taskid_and_audioid
+    captured = []
+    with_stubbed_post(captured: captured) do
+      SunoClient.new.convert_to_wav(task_id: 'task-1', audio_id: 'audio-1')
+    end
+    req = captured.last
+    assert_match %r{/api/v1/wav/generate\z}, req[:url]
+    assert_equal 'task-1',  req[:body]['taskId']
+    assert_equal 'audio-1', req[:body]['audioId']
+    assert_equal 'https://example.com/noop', req[:body]['callBackUrl']
+  end
+
+  def test_poll_wav_once_returns_url_on_success
+    body = { 'data' => { 'successFlag' => 'SUCCESS',
+                         'response' => { 'audioWavUrl' => 'https://cdn/song.wav' } } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_wav_once('any-id') }
+    assert_kind_of Hash, result
+    assert_equal 'https://cdn/song.wav', result[:wav_url]
+  end
+
+  def test_poll_wav_once_returns_pending_for_pending_flag
+    body = { 'data' => { 'successFlag' => 'PENDING' } }
+    assert_equal :pending,
+                 with_stubbed_get(body: body) { SunoClient.new.poll_wav_once('any-id') }
+  end
+
+  def test_poll_wav_once_returns_failed_on_failed_flag
+    %w[CREATE_TASK_FAILED GENERATE_WAV_FAILED CALLBACK_EXCEPTION].each do |flag|
+      body = { 'data' => { 'successFlag' => flag, 'errorCode' => 500, 'errorMessage' => 'boom' } }
+      assert_equal :failed,
+                   with_stubbed_get(body: body) { SunoClient.new.poll_wav_once('any-id') },
+                   "expected :failed for flag=#{flag}"
+    end
+  end
+
+  # SUCCESS but empty url → :retry so the handler re-submits a fresh job.
+  def test_poll_wav_once_returns_retry_when_success_url_missing
+    body = { 'data' => { 'successFlag' => 'SUCCESS', 'response' => { 'audioWavUrl' => '' } } }
+    assert_equal :retry,
+                 with_stubbed_get(body: body) { SunoClient.new.poll_wav_once('any-id') }
+  end
+
+  def test_fetch_audio_ids_extracts_ids_from_record_info
+    body = { 'data' => { 'response' => { 'sunoData' => [
+      { 'id' => 'aud-1', 'audioUrl' => 'x' },
+      { 'id' => 'aud-2', 'audioUrl' => 'y' },
+    ] } } }
+    assert_equal %w[aud-1 aud-2],
+                 with_stubbed_get(body: body) { SunoClient.new.fetch_audio_ids('any-id') }
+  end
+
+  def test_fetch_audio_ids_returns_empty_on_missing_data
+    assert_equal [], with_stubbed_get(body: {}) { SunoClient.new.fetch_audio_ids('any-id') }
+  end
+
   # poll_once must surface the lyrics Suno used in the clip via the
   # `prompt` field, mapped to `:lyrics` in the result hash. This is the
   # only path by which add_vocals / cover_audio (which don't compose

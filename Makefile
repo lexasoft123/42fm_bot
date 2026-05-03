@@ -29,7 +29,8 @@ TEST_FILES := \
 	test/atlas_client_test.rb \
 	test/image_gen_adapter_test.rb \
 	test/knowledge_base_test.rb \
-	test/chat_context_serialize_test.rb
+	test/chat_context_serialize_test.rb \
+	test/convert_to_wav_tool_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \
