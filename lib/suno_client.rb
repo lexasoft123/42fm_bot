@@ -271,9 +271,22 @@ class SunoClient
     when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED'
       :retry # Suno-side transient — worker died; re-submitting usually works
     when 'SENSITIVE_WORD_ERROR'
-      # Permanent — content flagged. Hard-coded user-facing detail so the
-      # agent can suggest a rephrase rather than blind-retry.
-      { failed: true, error: 'Suno: контент помечен как чувствительный (SENSITIVE_WORD_ERROR) — нужна переформулировка темы/текста' }
+      # Permanent — content flagged. Suno's `status` is the categorical
+      # bucket but its actual `errorMessage` is what the agent needs:
+      # observed real messages like "Your tags contain artist name kuban
+      # — we don't reference specific artists on Our, please change your
+      # tags and try again." That tells the agent to rewrite TAGS, not
+      # theme. Hardcoding "контент помечен как чувствительный" hid the
+      # actionable info and sent the agent on a wrong-direction rephrase
+      # spree (prod 2026-05-03 chat=-1001273623296). Prefer actual
+      # errorMessage; fall back to the static line only if Suno omits it.
+      err_code = data['errorCode']
+      err_msg  = data['errorMessage']
+      if err_msg && !err_msg.to_s.strip.empty?
+        { failed: true, error: format_suno_error(err_code || 'SENSITIVE_WORD_ERROR', err_msg) }
+      else
+        { failed: true, error: 'Suno: контент помечен как чувствительный (SENSITIVE_WORD_ERROR) — нужна переформулировка темы/текста' }
+      end
     else
       # Status can stay PENDING for minutes after Suno has already rejected
       # the input (e.g. uploadUrl audio matched a copyrighted work — Suno

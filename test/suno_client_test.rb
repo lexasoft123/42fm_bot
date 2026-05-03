@@ -267,10 +267,29 @@ class SunoClientTest < Minitest::Test
     assert_match(/copyright violation/, result[:error])
   end
 
-  # SENSITIVE_WORD_ERROR is a permanent reject — return a failure hash with a
-  # static, agent-actionable detail. Pre-detail era this returned bare :failed
-  # so the agent never knew it was a content-flag (vs network hiccup, etc.).
-  def test_poll_once_returns_failure_hash_for_sensitive_word_error
+  # SENSITIVE_WORD_ERROR is a permanent reject. Suno's status is the
+  # categorical bucket; the actual `errorMessage` carries the actionable
+  # reason. Always prefer it when present.
+  def test_poll_once_sensitive_word_error_prefers_actual_error_message
+    # Real-world prod failure: "kuban" in tags read as artist name. The
+    # agent must see the actionable reason ("change tags"), not a
+    # hardcoded "rephrase theme" line that misdirects the next iteration.
+    body = { 'data' => { 'status' => 'SENSITIVE_WORD_ERROR',
+                         'errorCode' => 0,
+                         'errorMessage' => "Your tags contain artist name kuban - we don't reference specific artists on Our, please change your tags and try again." } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+    assert_equal true, result[:failed]
+    assert_match(/artist name kuban/, result[:error],
+                 'must surface the actual Suno errorMessage so the agent fixes tags, not theme')
+    assert_match(/change your tags/,  result[:error])
+    refute_match(/нужна переформулировка темы/, result[:error],
+                 'static fallback string must not override real Suno message')
+  end
+
+  # Fallback: when Suno gives no errorMessage (status only), use the
+  # static line as last resort so the agent at least knows it's a
+  # content flag rather than a network hiccup.
+  def test_poll_once_sensitive_word_error_falls_back_to_static_line_when_no_message
     body = { 'data' => { 'status' => 'SENSITIVE_WORD_ERROR' } }
     result = with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
     assert_equal true, result[:failed]
