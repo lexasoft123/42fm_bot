@@ -46,13 +46,24 @@ chat_gpt:
       provider: deepseek
       model: deepseek-v4-pro
       max_tokens: 16000
-    # Suno song lyrics generation — creative long-form text-out call, biggest
-    # output of the three Suno LLM steps. Pulled out of `main` so it can be
-    # tuned independently (e.g. flip to a different model or adjust max_tokens
-    # for longer prog-rock tracks). suno_handler passes setting: 'lyrics'.
+    # Suno song lyrics generation — creative long-form text-out call. Sonnet
+    # > DeepSeek for creative songwriting in our testing (better rhyme
+    # accuracy, meter, adherence to genre-specific conventions: chastushka
+    # AABB, blues AAB, rap internal rhymes).
+    #
+    # When this fires: only when `params['lyrics']` is empty at task-submit
+    # time (suno_handler.rb's `unless p['lyrics']` branch). In practice
+    # that's the rare path — most agent compose_song calls precompose
+    # lyrics inline via the `agent` setting (DeepSeek). This branch covers
+    # the legacy direct `бот спой` command and any agent calls where the
+    # `lyrics` arg was left empty.
+    #
+    # Cost: typical ~$0.05–0.10 per song (5k input ctx + 3-5k output
+    # lyrics @ $3/$15 per Mtok). Worst case at max_tokens=16000 output is
+    # ~$0.24 — bounded but worth knowing.
     lyrics:
-      provider: deepseek
-      model: deepseek-v4-pro
+      provider: anthropic
+      model: claude-sonnet-4-6
       max_tokens: 16000
     embedder:
       provider: openai
@@ -187,6 +198,7 @@ suno:
     Сочини песню на тему: "{REQUEST}"
     Жанр: {GENRE}
     {ARTIST}
+    ЯЗЫК ТЕКСТА — по жанру, а не по языку запроса: русско-говорящие жанры (частушка, шансон, бардовская, советский рок/панк/эстрада) → русский; остальные (rock, metal, pop, surf rock, blues, jazz, hip-hop, country, electronic, punk, folk и т.д.) → английский по умолчанию, даже если запрос пользователя на русском. Section markers ([Verse], [Chorus] и т.д.) и parenthetical stage directions внутри блоков ВСЕГДА на английском (Suno натренирован на английском словаре стилей). Если пользователь явно требует другой язык ("сделай рэп НА РУССКОМ") — слушайся override'а.
     Выбери структуру и длину песни, подходящую жанру. Несколько примеров для ориентира:
     - Рок/метал/поп: [Verse] [Chorus] [Verse] [Chorus] [Outro]
     - Рэп/хип-хоп: [Verse] [Hook] [Verse] [Hook] [Verse] [Hook] — больше куплетов, короткий хук, внутренние рифмы

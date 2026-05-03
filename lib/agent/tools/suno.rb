@@ -1,8 +1,10 @@
+require_relative '_suno_language_rule'
+
 Agent::ToolRegistry.register(
   name: 'compose_song',
-  description: 'Генерирует песню через Suno AI. Сочини текст песни с тегами [Verse], [Chorus] и укажи стиль на английском. Песня будет отправлена в чат как аудио. Если пользователь просит "с обложкой" / "и обложку" — установи with_cover_art=true, после песни автоматически придёт арт.',
+  description: 'Генерирует песню через Suno AI. Сочини текст песни с тегами [Verse], [Chorus] и укажи стиль на английском. Песня будет отправлена в чат как аудио. Если пользователь просит "с обложкой" / "и обложку" — установи with_cover_art=true, после песни автоматически придёт арт. ' + SUNO_LANGUAGE_RULE_RU,
   parameters: {
-    'lyrics' => { type: 'string', description: 'Текст песни с тегами [Verse], [Chorus], [Outro]' },
+    'lyrics' => { type: 'string', description: 'Текст песни с тегами [Verse], [Chorus], [Outro]. ' + SUNO_LANGUAGE_RULE_RU },
     'tags'   => { type: 'string', description: 'Стиль музыки на английском для Suno AI. Опиши жанр, настроение, инструменты, вокал. НИКОГДА не включай имена артистов — Suno их блокирует! Вместо имени опиши звучание (e.g. "industrial metal, Neue Deutsche Härte, heavy distorted riffs, deep German male vocals, aggressive, martial drums, stomping rhythm")' },
     'title'  => { type: 'string', description: 'Название песни' },
     'artist' => { type: 'string', description: 'Исполнитель/группа, если песня в их стиле (e.g. "Rammstein", "Цой"). Пустая строка если не указан.' },
