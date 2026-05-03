@@ -205,18 +205,26 @@ class SunoClientTest < Minitest::Test
     assert_equal :pending, result
   end
 
-  def test_poll_cover_art_once_returns_failed_on_error_code
+  # Failure with detail: poll_* methods return { failed: true, error: '...' }
+  # so the handler can thread the Suno-reported reason into the agent_event
+  # summary. Bare `:failed` symbol is reserved for paths with no detail.
+
+  def test_poll_cover_art_once_returns_failure_hash_with_detail_on_error_code
     body = { 'data' => { 'successFlag' => 2, 'response' => nil,
                          'errorCode' => 405, 'errorMessage' => 'rate limited' } }
     result = with_stubbed_get(body: body) { SunoClient.new.poll_cover_art_once('any-id') }
-    assert_equal :failed, result
+    assert_kind_of Hash, result
+    assert_equal true, result[:failed]
+    assert_match(/405/,         result[:error])
+    assert_match(/rate limited/, result[:error])
   end
 
-  def test_poll_cover_art_once_returns_failed_on_error_message_only
+  def test_poll_cover_art_once_returns_failure_hash_with_detail_on_error_message_only
     body = { 'data' => { 'successFlag' => 2, 'response' => nil,
                          'errorCode' => 0, 'errorMessage' => 'sensitive content' } }
     result = with_stubbed_get(body: body) { SunoClient.new.poll_cover_art_once('any-id') }
-    assert_equal :failed, result
+    assert_equal true, result[:failed]
+    assert_match(/sensitive content/, result[:error])
   end
 
   def test_poll_cover_art_once_treats_zero_errorcode_as_not_an_error
@@ -238,19 +246,52 @@ class SunoClientTest < Minitest::Test
                  with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
   end
 
-  def test_poll_once_returns_failed_when_pending_status_carries_error_code
+  def test_poll_once_returns_failure_hash_with_detail_when_pending_status_carries_error_code
     body = { 'data' => { 'status' => 'PENDING',
                          'errorCode' => 413,
                          'errorMessage' => 'Uploaded audio matches existing work of art' } }
-    assert_equal :failed,
-                 with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+    assert_equal true, result[:failed]
+    # Real prod failure mode: copyright reject. The detail must reach the
+    # agent so it can suggest the user pick a different source rather than
+    # blind-retry.
+    assert_match(/413/,                                       result[:error])
+    assert_match(/Uploaded audio matches existing work of art/, result[:error])
   end
 
-  def test_poll_once_returns_failed_when_pending_status_carries_error_message_only
+  def test_poll_once_returns_failure_hash_with_detail_when_pending_status_carries_error_message_only
     body = { 'data' => { 'status' => 'PENDING',
                          'errorCode' => 0, 'errorMessage' => 'copyright violation' } }
-    assert_equal :failed,
-                 with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+    assert_equal true, result[:failed]
+    assert_match(/copyright violation/, result[:error])
+  end
+
+  # SENSITIVE_WORD_ERROR is a permanent reject — return a failure hash with a
+  # static, agent-actionable detail. Pre-detail era this returned bare :failed
+  # so the agent never knew it was a content-flag (vs network hiccup, etc.).
+  def test_poll_once_returns_failure_hash_for_sensitive_word_error
+    body = { 'data' => { 'status' => 'SENSITIVE_WORD_ERROR' } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+    assert_equal true, result[:failed]
+    assert_match(/SENSITIVE_WORD_ERROR|чувствительн/, result[:error])
+  end
+
+  # SECURITY: Suno's errorMessage on certain 4xx paths can echo the input
+  # URL back. For cover_audio/add_vocals that URL is the Telegram file URL
+  # containing the bot token (`api.telegram.org/file/bot<id>:<token>/...`).
+  # The detail flows into agent_event summary (DB-persisted, LLM-context),
+  # so a leaked token has wide blast radius. format_suno_error must strip
+  # URLs before composing.
+  def test_poll_once_redacts_urls_in_error_detail_to_protect_bot_token
+    body = { 'data' => { 'status' => 'PENDING', 'errorCode' => 400,
+                         'errorMessage' => 'Failed to fetch https://api.telegram.org/file/bot1234:SECRETTOKEN/file.mp3 — bad gateway' } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+    assert_equal true, result[:failed]
+    refute_match(/SECRETTOKEN/,                  result[:error], 'must not leak bot token')
+    refute_match(%r{https?://api\.telegram\.org}, result[:error], 'must redact Telegram URL')
+    assert_match(/<url-redacted>/,               result[:error])
+    assert_match(/bad gateway/,                   result[:error], 'non-URL context must remain so the agent can still reason')
   end
 
   def test_poll_once_treats_zero_errorcode_and_empty_message_as_not_an_error
@@ -288,12 +329,12 @@ class SunoClientTest < Minitest::Test
                  with_stubbed_get(body: body) { SunoClient.new.poll_wav_once('any-id') }
   end
 
-  def test_poll_wav_once_returns_failed_on_failed_flag
+  def test_poll_wav_once_returns_failure_hash_with_detail_on_failed_flag
     %w[CREATE_TASK_FAILED GENERATE_WAV_FAILED CALLBACK_EXCEPTION].each do |flag|
       body = { 'data' => { 'successFlag' => flag, 'errorCode' => 500, 'errorMessage' => 'boom' } }
-      assert_equal :failed,
-                   with_stubbed_get(body: body) { SunoClient.new.poll_wav_once('any-id') },
-                   "expected :failed for flag=#{flag}"
+      result = with_stubbed_get(body: body) { SunoClient.new.poll_wav_once('any-id') }
+      assert_equal true, result[:failed], "expected failure hash for flag=#{flag}, got #{result.inspect}"
+      assert_match(/boom|500/, result[:error], "expected error detail for flag=#{flag}")
     end
   end
 

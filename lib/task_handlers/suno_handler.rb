@@ -228,7 +228,10 @@ class SunoTaskHandler
     ActiveRecord::Base.connection_pool.with_connection { task.update!(params: params.to_json) }
     if params[counter] >= max
       LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]} (max #{max}), giving up: #{reason}"
-      mark_failed_and_notify(task, api, "#{counter}_after_retries")
+      # Pass the underlying exception/reason as error_detail so the agent
+      # event summary distinguishes "Suno API rejected with 4xx" vs
+      # "transient network failure" vs "submit_failed_after_retries".
+      mark_failed_and_notify(task, api, "#{counter}_after_retries", error_detail: reason.to_s)
       return :failed
     end
     LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]}/#{max} — will retry: #{reason}"
@@ -261,6 +264,13 @@ class SunoTaskHandler
       :failed
     when :failed
       mark_failed_and_notify(task, api, 'suno_failed')
+      :failed
+    when Hash
+      # Failure-with-detail from poll_once (see SunoClient#format_suno_error).
+      # The detail makes it into the agent_event summary so the agent knows
+      # WHY (copyright, content flagged, etc.) rather than just generic
+      # "suno_failed", and can pick a meaningful next move.
+      mark_failed_and_notify(task, api, 'suno_failed', error_detail: result[:error])
       :failed
     when Array
       LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result.size} clips"
@@ -316,8 +326,15 @@ class SunoTaskHandler
     LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: chain cover_art failed: #{e.class}: #{e.message}"
   end
 
-  def mark_failed_and_notify(task, api, reason)
-    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno generation #{reason} for #{task.external_id}"
+  # `error_detail` is the human-readable Suno error string (e.g. "Suno [413]:
+  # Uploaded audio matches existing work of art") from
+  # SunoClient#format_suno_error. When present it gets appended to the
+  # summary that reaches the agent via agent_event — lets the agent
+  # distinguish copyright reject vs content flag vs worker hiccup vs
+  # rate-limit, and pick a meaningful next move (rephrase, suggest
+  # different source, retry later, etc.) rather than blind-retry.
+  def mark_failed_and_notify(task, api, reason, error_detail: nil)
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno generation #{reason} for #{task.external_id}#{error_detail ? " (#{error_detail})" : ''}"
     ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(reason) }
     text = "Не удалось сгенерировать песню"
     begin
@@ -329,6 +346,7 @@ class SunoTaskHandler
     p = task.params_hash
     event_type = reason.to_s.include?('after_retries') ? 'song_failed_after_retries' : 'song_failed'
     summary = "Тема: #{(p['topic'] || p['request']).to_s[0..150]} | Жанр: #{p['genre']} | Артист: #{p['artist']} | Причина: #{reason}"
+    summary += " | #{error_detail}" if error_detail && !error_detail.to_s.empty?
     emit_agent_event(task, event_type, summary: summary)
   end
 

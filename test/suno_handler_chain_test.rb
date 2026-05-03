@@ -282,6 +282,86 @@ class SunoHandlerChainTest < BotTest
   # split, the agent always inline-composed via the `agent` setting
   # (DeepSeek), bypassing the Sonnet upgrade entirely. We assert the
   # `setting:` kwarg by stubbing GptMaster.new and capturing it.
+  # --- Error-detail propagation: Suno errorCode/errorMessage → agent ---
+  #
+  # Pre-fix, mark_failed_and_notify built the agent_event summary from
+  # generic categorical reason ('suno_failed', 'wav_failed', ...) only —
+  # the actual Suno error (e.g. "[413] Uploaded audio matches existing
+  # work of art") was logged with WARN and discarded. The agent had to
+  # guess copyright reject vs content flag vs worker hiccup. Now poll_*
+  # methods return { failed: true, error: '<detail>' } and handlers thread
+  # error_detail through to the summary.
+  #
+  # These tests pin the contract from the Suno API response down to the
+  # agent_event params['summary'] string.
+
+  # Stub api.sendMessage — mark_failed_and_notify sends a user-facing chat
+  # message via api.sendMessage; tests don't need a real bot, just a
+  # responder. Returns a minimal Response-shaped object so
+  # Message.persist_bot_reply doesn't crash.
+  def silent_api
+    Class.new {
+      def sendMessage(**); OpenStruct.new(result: OpenStruct.new(message_id: 999)); end
+    }.new
+  end
+
+  def test_mark_failed_and_notify_appends_error_detail_to_agent_event_summary
+    task = BackgroundTask.create!(
+      task_type: 'suno_generate', chat_id: CHAT, max_attempts: 60,
+      external_id: 'sun-task-failed',
+      params: { topic: 'про любовь', genre: 'рок', artist: '', user_uid: 1 }.to_json
+    )
+    @handler.send(:mark_failed_and_notify, task, silent_api,
+                  'suno_failed',
+                  error_detail: 'Suno [413]: Uploaded audio matches existing work of art')
+
+    event = BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').last
+    refute_nil event, 'mark_failed_and_notify must emit agent_event'
+    summary = event.params_hash['summary']
+    assert_match(/Тема: про любовь/,                            summary)
+    assert_match(/Причина: suno_failed/,                         summary)
+    assert_match(/413/,                                          summary)
+    assert_match(/Uploaded audio matches existing work of art/,  summary)
+  end
+
+  def test_mark_failed_and_notify_summary_omits_detail_block_when_nil
+    task = BackgroundTask.create!(
+      task_type: 'suno_generate', chat_id: CHAT, max_attempts: 60,
+      external_id: 'sun-task-bare', params: { topic: 'X', genre: 'pop' }.to_json
+    )
+    @handler.send(:mark_failed_and_notify, task, silent_api, 'suno_failed')
+    event = BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').last
+    summary = event.params_hash['summary']
+    refute_match(/\| Suno/, summary, 'must not append empty detail block when error_detail is nil')
+  end
+
+  # End-to-end through poll_and_deliver: feed a stubbed poll_once that
+  # returns { failed: true, error: '...' } and assert the same detail
+  # reaches the agent_event summary.
+  def test_poll_and_deliver_propagates_failure_hash_detail_to_agent_event
+    task = BackgroundTask.create!(
+      task_type: 'suno_generate', chat_id: CHAT, max_attempts: 60,
+      external_id: 'sun-task-e2e',
+      params: { topic: 'про шефа', genre: 'pop', artist: '', user_uid: 1 }.to_json
+    )
+
+    suno_stub = Object.new
+    suno_stub.define_singleton_method(:poll_once) { |_id|
+      { failed: true, error: 'Suno [413]: Copyright reject' }
+    }
+    SunoClient.singleton_class.send(:alias_method, :__new, :new)
+    SunoClient.singleton_class.send(:define_method, :new) { suno_stub }
+
+    @handler.send(:poll_and_deliver, task, silent_api)
+
+    event = BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').last
+    refute_nil event
+    assert_match(/Copyright reject/, event.params_hash['summary'])
+  ensure
+    SunoClient.singleton_class.send(:alias_method, :new, :__new) rescue nil
+    SunoClient.singleton_class.send(:remove_method, :__new)      rescue nil
+  end
+
   def test_compose_and_submit_generate_uses_lyrics_setting_when_lyrics_empty
     Settings.singleton_class.send(:define_method, :suno) {
       { 'lyrics_prompt' => 'Compose: {REQUEST} | {GENRE} | {ARTIST} | {CONTEXT} | {KNOWLEDGE}' }

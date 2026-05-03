@@ -73,6 +73,10 @@ class SunoCoverArtHandler
     when :failed
       mark_failed_and_notify(task, api, 'cover_art_failed')
       :failed
+    when Hash
+      # Failure-with-detail from poll_cover_art_once. See SunoClient#format_suno_error.
+      mark_failed_and_notify(task, api, 'cover_art_failed', error_detail: result[:error])
+      :failed
     when Array
       LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result.size} images"
       delivered = send_images(api, task.chat_id, result, task.params_hash, bg_task_external_id: task.external_id)
@@ -162,8 +166,11 @@ class SunoCoverArtHandler
     LOGGER.warn "[chat=#{chat_id}] #{self.class.name} persist_bot_media_rows failed: #{e.class}: #{e.message}"
   end
 
-  def mark_failed_and_notify(task, api, reason)
-    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: cover-art #{reason} for #{task.external_id}"
+  # See SunoTaskHandler#mark_failed_and_notify for `error_detail` rationale —
+  # threads Suno's actual errorCode/errorMessage into the agent_event
+  # summary so the agent can pick a meaningful next move.
+  def mark_failed_and_notify(task, api, reason, error_detail: nil)
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: cover-art #{reason} for #{task.external_id}#{error_detail ? " (#{error_detail})" : ''}"
     ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(reason) }
 
     # User-facing chat notification — same two-channel pattern as
@@ -179,6 +186,7 @@ class SunoCoverArtHandler
 
     p = task.params_hash
     summary = "Обложка для «#{p['source_title']}» (source #{p['source_task_id']}): #{reason}"
+    summary += " | #{error_detail}" if error_detail && !error_detail.to_s.empty?
     emit_agent_event(task, 'cover_art_failed', summary: summary)
   end
 end

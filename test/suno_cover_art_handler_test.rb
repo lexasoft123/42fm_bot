@@ -84,4 +84,22 @@ class SunoCoverArtHandlerTest < BotTest
     task.reload
     assert_equal 'pending', task.status
   end
+
+  # Failure-with-detail propagates from poll_cover_art_once's Hash return
+  # to mark_failed_and_notify's agent_event summary. Mirror of the
+  # SunoTaskHandler test in suno_handler_chain_test.rb — pins the same
+  # contract for the cover-art path so a refactor in either handler
+  # can't silently drop the summary-append.
+  def test_failure_hash_propagates_error_detail_to_agent_event_summary
+    task = make_task
+    failure_hash = { failed: true, error: 'Suno [403]: Image content blocked' }
+    stub_poll(failure_hash) { @handler.send(:poll_and_deliver, task, @api) }
+
+    event = BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').last
+    refute_nil event, 'cover_art Hash failure must emit agent_event'
+    summary = event.params_hash['summary']
+    assert_match(/cover_art_failed/,        summary)
+    assert_match(/Image content blocked/,   summary,
+                 'Suno error detail must reach the agent_event summary verbatim')
+  end
 end

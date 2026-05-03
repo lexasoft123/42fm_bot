@@ -91,13 +91,29 @@ class SunoWavConvertHandler
       mark_failed_and_notify(task, api, 'wav_failed')
       :failed
     when Hash
-      LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result[:wav_url]}"
-      delivered = send_wav(api, task.chat_id, result[:wav_url], task.params_hash, bg_task_external_id: task.external_id)
-      if delivered
-        ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
-        :done
+      # Hash is overloaded for this poll: { wav_url: '...' } on success
+      # vs { failed: true, error: '...' } on Suno-reported failure.
+      # Discriminate explicitly by key — falling through on an unknown
+      # shape (future Suno change, parser regression) into the success
+      # branch with `result[:wav_url] = nil` would crash deep inside
+      # send_wav. Better to log + fail loudly here.
+      if result[:failed]
+        mark_failed_and_notify(task, api, 'wav_failed', error_detail: result[:error])
+        :failed
+      elsif result[:wav_url]
+        LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result[:wav_url]}"
+        delivered = send_wav(api, task.chat_id, result[:wav_url], task.params_hash, bg_task_external_id: task.external_id)
+        if delivered
+          ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
+          :done
+        else
+          mark_failed_and_notify(task, api, 'wav_delivery_failed')
+          :failed
+        end
       else
-        mark_failed_and_notify(task, api, 'wav_delivery_failed')
+        LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: unknown poll_wav_once Hash shape: #{result.inspect}"
+        mark_failed_and_notify(task, api, 'wav_unknown_response_shape',
+                               error_detail: "unexpected poll Hash: #{result.inspect}")
         :failed
       end
     end
@@ -167,8 +183,9 @@ class SunoWavConvertHandler
     LOGGER.warn "[chat=#{chat_id}] #{self.class.name} persist_bot_media_row failed: #{e.class}: #{e.message}"
   end
 
-  def mark_failed_and_notify(task, api, reason)
-    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: WAV #{reason} for #{task.external_id}"
+  # See SunoTaskHandler#mark_failed_and_notify for `error_detail` rationale.
+  def mark_failed_and_notify(task, api, reason, error_detail: nil)
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: WAV #{reason} for #{task.external_id}#{error_detail ? " (#{error_detail})" : ''}"
     ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(reason) }
 
     text = 'Не удалось сконвертировать в WAV'
@@ -181,6 +198,7 @@ class SunoWavConvertHandler
 
     p = task.params_hash
     summary = "WAV для «#{p['source_title']}» (source #{p['source_task_id']}, audio #{p['audio_id']}): #{reason}"
+    summary += " | #{error_detail}" if error_detail && !error_detail.to_s.empty?
     emit_agent_event(task, 'wav_failed', summary: summary)
   end
 end

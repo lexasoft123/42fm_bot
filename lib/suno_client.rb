@@ -147,9 +147,10 @@ class SunoClient
       url = data.dig('response', 'audioWavUrl')
       url.to_s.empty? ? :retry : { wav_url: url }
     when 'CREATE_TASK_FAILED', 'GENERATE_WAV_FAILED', 'CALLBACK_EXCEPTION'
-      err = data['errorMessage'] || data['successFlag']
-      LOGGER.warn "#{self.class.name}#poll_wav_once Suno error: code=#{data['errorCode']} msg=#{err.inspect}"
-      :failed
+      err_code = data['errorCode']
+      err_msg  = data['errorMessage'] || data['successFlag']
+      LOGGER.warn "#{self.class.name}#poll_wav_once Suno error: code=#{err_code} msg=#{err_msg.inspect}"
+      { failed: true, error: format_suno_error(err_code, err_msg) }
     else
       :pending
     end
@@ -202,13 +203,45 @@ class SunoClient
     err_msg  = data['errorMessage']
     if (err_code && err_code.to_i != 0) || (err_msg && !err_msg.to_s.empty?)
       LOGGER.warn "#{self.class.name}#poll_cover_art_once Suno error: code=#{err_code} msg=#{err_msg.inspect}"
-      return :failed
+      return { failed: true, error: format_suno_error(err_code, err_msg) }
     end
 
     :pending
   rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
     LOGGER.warn "#{self.class.name} poll_cover_art_once: #{e.class}: #{e.message}"
     :pending
+  end
+
+  # Compose a single human-readable error string from Suno's
+  # errorCode/errorMessage pair for inclusion in agent_event summaries.
+  # Either field may be nil/blank — pick whatever is present and tag with
+  # the code if both exist. The agent sees this through
+  # mark_failed_and_notify's summary, so it should read as a hint, not a
+  # log line.
+  #
+  # SECURITY: agent_event summaries are persisted in background_tasks.params
+  # (DB), forwarded to the LLM, and echoed in WARN logs. Suno's
+  # errorMessage on certain 4xx paths echoes back the input URL, which for
+  # cover_audio/add_vocals is the Telegram file URL containing the bot
+  # token (`api.telegram.org/file/bot<id>:<token>/...`). Strip URLs out
+  # before they enter the summary chain — the agent doesn't need the URL,
+  # and a leaked bot token is a credential. Defense-in-depth: the input
+  # could still leak via WARN logs from the `LOGGER.warn` lines in the
+  # poll_* methods, but those are on a single host and not in DB / LLM
+  # context.
+  URL_REDACT_RE = %r{https?://\S+}.freeze
+  def format_suno_error(err_code, err_msg)
+    msg = err_msg.to_s.gsub(URL_REDACT_RE, '<url-redacted>').strip
+    code = err_code.to_s.strip
+    if !msg.empty? && !code.empty? && code != '0'
+      "Suno [#{code}]: #{msg}"
+    elsif !msg.empty?
+      "Suno: #{msg}"
+    elsif !code.empty?
+      "Suno error code #{code}"
+    else
+      'Suno: неизвестная ошибка'
+    end
   end
 
   # Single non-blocking poll. Returns :pending, :failed, or { audio_url:, title:, duration: }
@@ -238,7 +271,9 @@ class SunoClient
     when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED'
       :retry # Suno-side transient — worker died; re-submitting usually works
     when 'SENSITIVE_WORD_ERROR'
-      :failed # permanent — content flagged
+      # Permanent — content flagged. Hard-coded user-facing detail so the
+      # agent can suggest a rephrase rather than blind-retry.
+      { failed: true, error: 'Suno: контент помечен как чувствительный (SENSITIVE_WORD_ERROR) — нужна переформулировка темы/текста' }
     else
       # Status can stay PENDING for minutes after Suno has already rejected
       # the input (e.g. uploadUrl audio matched a copyrighted work — Suno
@@ -250,7 +285,7 @@ class SunoClient
       err_msg  = data['errorMessage']
       if (err_code && err_code.to_i != 0) || (err_msg && !err_msg.to_s.empty?)
         LOGGER.warn "#{self.class.name}#poll_once Suno error: code=#{err_code} msg=#{err_msg.inspect}"
-        return :failed
+        return { failed: true, error: format_suno_error(err_code, err_msg) }
       end
       :pending
     end

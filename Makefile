@@ -33,7 +33,8 @@ TEST_FILES := \
 	test/convert_to_wav_tool_test.rb \
 	test/cover_audio_tool_test.rb \
 	test/suno_language_policy_test.rb \
-	test/compose_song_tool_test.rb
+	test/compose_song_tool_test.rb \
+	test/suno_wav_convert_handler_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \
