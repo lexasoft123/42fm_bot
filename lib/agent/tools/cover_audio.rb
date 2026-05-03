@@ -4,7 +4,7 @@ Agent::ToolRegistry.register(
   parameters: {
     'style'         => { type: 'string', description: 'Целевой стиль на английском, через запятую. Без имён артистов. Пример: "synthwave, retro 80s, analog synth, neon, nostalgic". НЕ дублируй сюда стиль из lyrics/topic — стиль идёт ТОЛЬКО в этот параметр.' },
     'title'         => { type: 'string', description: 'Название будущего трека.' },
-    'lyrics'        => { type: 'string', description: 'ЛИТЕРАЛЬНЫЕ стихи, которые Suno будет петь дословно (custom mode). Указывай ТОЛЬКО если: (а) пользователь дал явный текст песни в этом сообщении, ИЛИ (б) пользователь просит переделать ранее СГЕНЕРИРОВАННЫЙ ботом трек (видишь в контексте "[песня: ...]" + ответ бота с полным текстом) с изменениями в музыке/стиле/части слов — тогда СКОПИРУЙ исходный текст из контекста (с правками если просят), чтобы Suno спел тот же текст в новом стиле. НИКОГДА не пихай сюда описание стиля/жанра — это будет спето как лирика. Если ничего из этого нет — оставь пустым и заполни `topic`.' },
+    'lyrics'        => { type: 'string', description: 'ЛИТЕРАЛЬНЫЕ стихи, которые Suno будет петь дословно (custom mode). Указывай когда: (а) пользователь дал явный текст песни в этом сообщении, ИЛИ (б) хочешь изменить часть слов ранее сгенерированной ботом песни — тогда СКОПИРУЙ исходный текст с правками. Если пользователь просит ТОЛЬКО изменить музыку/стиль ранее сгенерированной песни и отвечает реплаем на её аудио — оставь `lyrics` пустым: хендлер сам подтянет оригинальный текст из исходной задачи. НИКОГДА не пихай сюда описание стиля/жанра — это будет спето как лирика. Если ничего из этого нет (новый трек постороннего источника) — оставь пустым и заполни `topic`.' },
     'topic'         => { type: 'string', description: 'Короткая русская тема/идея (≤500 символов) для авто-генерации НОВОГО текста песни. Используй когда пользователь сказал "сделай кавер про X" или попросил кавер постороннего трека без явных стихов и без видимого исходного текста. Примеры: "про любовь и фронт", "про усталого программиста", "пятница, бар, отвал". НИКОГДА не описывай здесь стиль/жанр/инструменты (это идёт в `style`). Если оставлен пустым и `lyrics` тоже пуст — будет использован `title`.' },
     'upload_url'    => { type: 'string', description: 'Опциональный URL аудио, если пользователь дал ссылку. Если пустой — берётся URL прикреплённого файла.' },
     'vocal_gender'  => { type: 'string', description: 'Опционально: "m" или "f". Игнорируется если instrumental=true.' },
@@ -35,6 +35,35 @@ Agent::ToolRegistry.register(
       )
     end
 
+    # Source-lyrics fallback: when user replied to a previously-generated
+    # bot Suno song and didn't provide explicit `lyrics`, copy them from
+    # the source task. Mirrors `cover_art`'s reply-target resolution. Lets
+    # "ответь на песню → бот, сделай этот трек в стиле джаза" reuse the
+    # original lyrics even when they've scrolled past the chat-context
+    # window. Source priority: source.params['lyrics'] (compose_song's
+    # locally-composed text) → first clip's :lyrics in source.result
+    # (add_vocals/cover_audio paths, mapped from Suno's response).
+    resolved_lyrics = args['lyrics'].to_s
+    if resolved_lyrics.strip.empty? && ctx[:reply_to_message_id]
+      bot_msg = Message.find_by(chat_id: ctx[:chat_id], role: 'bot',
+                                message_id: ctx[:reply_to_message_id])
+      if bot_msg && bot_msg.bg_task_external_id
+        source = BackgroundTask.where(chat_id: ctx[:chat_id],
+                                      task_type: SONG_TASK_TYPES, status: 'done')
+                               .where(external_id: bot_msg.bg_task_external_id).first
+        if source
+          src_lyrics = source.params_hash['lyrics'].to_s
+          if src_lyrics.strip.empty?
+            clips = (JSON.parse(source.result || '[]') rescue nil)
+            if clips.is_a?(Array) && clips.first.is_a?(Hash)
+              src_lyrics = clips.first['lyrics'].to_s
+            end
+          end
+          resolved_lyrics = src_lyrics unless src_lyrics.strip.empty?
+        end
+      end
+    end
+
     BackgroundTask.create!(
       task_type: 'suno_cover_audio',
       chat_id: ctx[:chat_id],
@@ -43,7 +72,7 @@ Agent::ToolRegistry.register(
         upload_url:     upload_url,
         style:          args['style'].to_s,
         title:          args['title'] || 'Кавер от 42FM',
-        lyrics:         args['lyrics'].to_s,
+        lyrics:         resolved_lyrics,
         topic:          args['topic'].to_s,
         vocal_gender:   args['vocal_gender'],
         negative_tags:  args['negative_tags'].to_s,

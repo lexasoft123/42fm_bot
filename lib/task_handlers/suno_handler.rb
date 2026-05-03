@@ -73,24 +73,38 @@ class SunoTaskHandler
     :pending
   end
 
-  # Returns [custom_mode, prompt]. Priority:
-  #   lyrics non-empty  → custom_mode=true,  prompt=<lyrics verbatim>
-  #   topic non-empty   → custom_mode=false, prompt=<topic, ≤500 chars>
-  #   both empty        → custom_mode=false, prompt=<title or fallback string>
-  # Back-compat: if a legacy task has only `prompt` (pre-split schema, e.g.
-  # an in-flight task at deploy time), treat it as `topic` (auto mode) — the
-  # safe interpretation since we no longer trust the agent to put real
-  # lyrics there.
+  # Returns [custom_mode, prompt] for Suno's upload-cover endpoint.
+  #
+  # Suno requires `prompt` to be non-empty in BOTH modes (≤5000 chars in
+  # custom mode on V5, ≤500 chars in auto mode), and has no "preserve
+  # original lyrics" option. The fallback chain guarantees a sensible
+  # non-empty prompt regardless of what the agent supplied.
+  #
+  # Resolution order:
+  #   instrumental=true → auto mode + title-as-prompt (lyrics/topic ignored
+  #     per the tool description; prompt isn't sung under instrumental but
+  #     Suno still needs a value).
+  #   lyrics non-empty  → custom mode, prompt=lyrics (truncated to 5000).
+  #   topic non-empty   → auto mode, prompt=topic (truncated to 500).
+  #   legacy `prompt`   → auto mode, treated as topic. Triggered only when
+  #     neither `lyrics` nor `topic` keys are present in params (i.e.
+  #     in-flight task created against the pre-split schema). Post-split
+  #     tasks always serialise both keys, so this branch is dead for fresh
+  #     tasks but keeps an at-deploy in-flight task afloat.
+  #   nothing usable    → auto mode + title fallback.
   def resolve_cover_prompt(p)
+    title = p['title'].to_s.strip
+    title_fallback = (title.empty? ? 'Кавер' : title).slice(0, 500)
+
+    return [false, title_fallback] if p['instrumental'] == true
+
     lyrics = p['lyrics'].to_s.strip
     topic  = p['topic'].to_s.strip
-    legacy = p['prompt'].to_s.strip if !p.key?('lyrics') && !p.key?('topic')
-    return [true, lyrics] unless lyrics.empty?
-    return [false, topic.slice(0, 500)] unless topic.empty?
-    return [false, legacy.slice(0, 500)] if legacy && !legacy.empty?
-    fallback = p['title'].to_s.strip
-    fallback = 'Кавер' if fallback.empty?
-    [false, fallback.slice(0, 500)]
+    legacy = (!p.key?('lyrics') && !p.key?('topic')) ? p['prompt'].to_s.strip : ''
+    return [true,  lyrics.slice(0, 5000)] unless lyrics.empty?
+    return [false, topic.slice(0, 500)]   unless topic.empty?
+    return [false, legacy.slice(0, 500)]  unless legacy.empty?
+    [false, title_fallback]
   end
 
   PARSE_PROMPT = <<~PROMPT.freeze

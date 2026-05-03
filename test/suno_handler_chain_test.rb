@@ -1,4 +1,5 @@
 require_relative 'test_helper'
+require 'ostruct'
 LOGGER = Logger.new(IO::NULL) unless defined?(LOGGER)
 require_relative '../lib/agent/tool_result'
 require_relative '../lib/rate_limiter'
@@ -6,6 +7,7 @@ require_relative '../lib/media_download'
 require_relative '../lib/chat_context'
 require_relative '../lib/task_runner'
 require_relative '../lib/task_handlers/agent_event_emitter'
+require_relative '../lib/suno_client'
 require_relative '../lib/task_handlers/suno_handler'
 
 # Tests for the with_cover_art chaining logic in SunoTaskHandler#poll_and_deliver.
@@ -190,5 +192,86 @@ class SunoHandlerChainTest < BotTest
       { 'lyrics' => '', 'topic' => '', 'prompt' => 'old style desc',
         'title' => 'New Title' })
     assert_equal 'New Title', prompt
+  end
+
+  # Suno V5 caps custom-mode prompt at ≤5000 chars. Long lyrics from a
+  # paste-heavy agent (e.g. concatenated multi-song lyrics) must be
+  # truncated rather than being rejected by Suno + burning retries.
+  def test_resolve_cover_prompt_truncates_lyrics_to_5000_chars
+    long_lyrics = '[Verse 1]' + 'а' * 10_000
+    custom, prompt = @handler.send(:resolve_cover_prompt,
+      { 'lyrics' => long_lyrics, 'topic' => '' })
+    assert_equal true, custom
+    assert_equal 5000, prompt.length
+  end
+
+  # Tool description claims `lyrics`/`topic` are ignored when
+  # `instrumental=true`. Handler must honor that contract: force
+  # auto-mode + a sensible non-empty prompt (Suno still requires `prompt`
+  # to exist; it just won't sing it under instrumental).
+  def test_resolve_cover_prompt_instrumental_forces_auto_mode_and_uses_title
+    custom, prompt = @handler.send(:resolve_cover_prompt,
+      { 'instrumental' => true,
+        'lyrics' => "[Verse 1]\nshould be ignored",
+        'topic'  => 'should also be ignored',
+        'title'  => 'Minus Track' })
+    assert_equal false, custom
+    assert_equal 'Minus Track', prompt
+  end
+
+  def test_resolve_cover_prompt_instrumental_falls_back_when_title_empty
+    custom, prompt = @handler.send(:resolve_cover_prompt,
+      { 'instrumental' => true, 'lyrics' => '', 'topic' => '', 'title' => '' })
+    assert_equal false, custom
+    assert_equal 'Кавер', prompt
+  end
+
+  # JSON-null pinning: an agent that emits {"lyrics": null, "topic": null}
+  # parses to {'lyrics' => nil, 'topic' => nil}. `nil.to_s.strip == ""` so
+  # both branches fall through to the title fallback (NOT to legacy prompt
+  # — the gate `!key?('lyrics')` returns false because the key IS present
+  # with value nil). This pins the desired behaviour.
+  def test_resolve_cover_prompt_handles_json_null_lyrics_and_topic
+    custom, prompt = @handler.send(:resolve_cover_prompt,
+      { 'lyrics' => nil, 'topic' => nil, 'prompt' => 'legacy field',
+        'title' => 'Fresh Title' })
+    assert_equal false, custom
+    assert_equal 'Fresh Title', prompt,
+                 'must not silently fall back to legacy prompt when split keys are present-but-nil'
+  end
+
+  # End-to-end submit_cover_audio test: instrumental=true + lyrics='X' →
+  # SunoClient receives custom_mode=false + prompt=title (NOT prompt=lyrics).
+  # Pins the description-vs-handler contract from finding #2 of the post-hoc
+  # code review of the lyrics/topic split.
+  def test_submit_cover_audio_instrumental_overrides_lyrics_in_suno_payload
+    captured = []
+    suno_stub = Object.new
+    suno_stub.define_singleton_method(:cover_audio) do |**kw|
+      captured << kw
+      'fake-suno-task-id'
+    end
+    SunoClient.singleton_class.send(:alias_method, :__new, :new)
+    SunoClient.singleton_class.send(:define_method, :new) { suno_stub }
+
+    task = BackgroundTask.create!(
+      task_type: 'suno_cover_audio', chat_id: CHAT, max_attempts: 60,
+      params: { upload_url: 'https://example.com/in.mp3',
+                style: 'jazz', title: 'Minus Track',
+                lyrics: "[Verse 1]\nshould not be sung",
+                topic: '', instrumental: true,
+                user_uid: 1 }.to_json
+    )
+    api = OpenStruct.new
+    @handler.send(:submit_cover_audio, task, api)
+
+    kw = captured.last
+    assert_equal false,         kw[:custom_mode], 'instrumental must force auto-mode'
+    assert_equal 'Minus Track', kw[:prompt],     'instrumental must replace lyrics with title'
+    assert_equal true,          kw[:instrumental]
+    assert_equal 'jazz',        kw[:style]
+  ensure
+    SunoClient.singleton_class.send(:alias_method, :new, :__new) rescue nil
+    SunoClient.singleton_class.send(:remove_method, :__new)      rescue nil
   end
 end
