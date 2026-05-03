@@ -46,14 +46,21 @@ class SunoTaskHandler
     :pending
   end
 
+  # Resolve `lyrics`/`topic` from the agent tool into Suno's
+  # `customMode` + `prompt` pair. Suno requires a non-empty prompt in BOTH
+  # modes (and has no "preserve original" mode), so the fallback chain ends
+  # at `title` to guarantee something sensible to send. See
+  # docs.sunoapi.org/suno-api/upload-and-cover-audio for the contract.
   def submit_cover_audio(task, api)
     p = task.params_hash
+    custom_mode, prompt = resolve_cover_prompt(p)
     begin
       suno_task_id = SunoClient.new.cover_audio(
         upload_url:    p['upload_url'],
         style:         p['style'].to_s,
         title:         p['title'],
-        prompt:        p['prompt'].to_s,
+        prompt:        prompt,
+        custom_mode:   custom_mode,
         negative_tags: p['negative_tags'].to_s,
         vocal_gender:  p['vocal_gender'],
         instrumental:  p['instrumental'] == true
@@ -61,9 +68,29 @@ class SunoTaskHandler
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit cover_audio: #{e.message}", raise_on_retry: e)
     end
-    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted cover_audio #{suno_task_id}"
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted cover_audio #{suno_task_id} mode=#{custom_mode ? 'custom' : 'auto'}"
     ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: suno_task_id) }
     :pending
+  end
+
+  # Returns [custom_mode, prompt]. Priority:
+  #   lyrics non-empty  → custom_mode=true,  prompt=<lyrics verbatim>
+  #   topic non-empty   → custom_mode=false, prompt=<topic, ≤500 chars>
+  #   both empty        → custom_mode=false, prompt=<title or fallback string>
+  # Back-compat: if a legacy task has only `prompt` (pre-split schema, e.g.
+  # an in-flight task at deploy time), treat it as `topic` (auto mode) — the
+  # safe interpretation since we no longer trust the agent to put real
+  # lyrics there.
+  def resolve_cover_prompt(p)
+    lyrics = p['lyrics'].to_s.strip
+    topic  = p['topic'].to_s.strip
+    legacy = p['prompt'].to_s.strip if !p.key?('lyrics') && !p.key?('topic')
+    return [true, lyrics] unless lyrics.empty?
+    return [false, topic.slice(0, 500)] unless topic.empty?
+    return [false, legacy.slice(0, 500)] if legacy && !legacy.empty?
+    fallback = p['title'].to_s.strip
+    fallback = 'Кавер' if fallback.empty?
+    [false, fallback.slice(0, 500)]
   end
 
   PARSE_PROMPT = <<~PROMPT.freeze

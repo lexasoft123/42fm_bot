@@ -91,12 +91,18 @@ class SunoClient
 
   # Submit upload-cover request: musical reinterpretation of a user-provided
   # audio URL in a new style. Returns 2 clips on success.
-  # `instrumental: true` tells Suno to skip vocals — needed when the input
-  # is itself instrumental and the user wants the cover to stay that way
-  # (otherwise Suno hallucinates vocals based on `prompt` and prior chat
-  # context).
-  def cover_audio(upload_url:, style:, title:, prompt: '', negative_tags: '', vocal_gender: nil, instrumental: false)
-    body = { uploadUrl: upload_url, customMode: true, instrumental: instrumental,
+  #
+  # Two modes (per docs.sunoapi.org/suno-api/upload-and-cover-audio):
+  # - custom_mode: true  → `prompt` is sung verbatim as lyrics (≤5000 chars on V5).
+  # - custom_mode: false → `prompt` is a "core idea"; Suno auto-generates fresh
+  #   lyrics from it (≤500 chars). Suno does NOT preserve the source mp3's
+  #   original lyrics in either mode — that is not a feature of this endpoint.
+  #
+  # `instrumental: true` skips vocals entirely; `prompt` then describes mood/
+  # instrumentation only (no vocals to sing).
+  def cover_audio(upload_url:, style:, title:, prompt:, custom_mode:,
+                  negative_tags: '', vocal_gender: nil, instrumental: false)
+    body = { uploadUrl: upload_url, customMode: custom_mode, instrumental: instrumental,
              style: style, title: title, prompt: prompt,
              negativeTags: negative_tags, model: @model,
              callBackUrl: 'https://example.com/noop' }

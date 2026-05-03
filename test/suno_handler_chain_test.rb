@@ -127,4 +127,68 @@ class SunoHandlerChainTest < BotTest
     assert_equal '', @handler.send(:resolve_delivery_lyrics, {}, [])
     assert_equal '', @handler.send(:resolve_delivery_lyrics, { 'lyrics' => '' }, nil)
   end
+
+  # --- resolve_cover_prompt: lyrics-vs-topic → customMode mapping ---
+  #
+  # Bug context: pre-split, the cover_audio tool had one `prompt` field that
+  # the agent was filling with style descriptions ("Hungarian prog-rock 80s"),
+  # which Suno literally sang as lyrics under hardcoded customMode=true.
+  # The split forces the agent to pick a lane: literal lyrics → custom; topic
+  # for auto-gen → non-custom.
+
+  def test_resolve_cover_prompt_uses_lyrics_in_custom_mode
+    custom, prompt = @handler.send(:resolve_cover_prompt,
+      { 'lyrics' => "[Verse 1]\nNeon nights\nFading lights",
+        'topic'  => 'про ночь' }) # both set — lyrics wins
+    assert_equal true, custom
+    assert_match(/\[Verse 1\]/, prompt)
+  end
+
+  def test_resolve_cover_prompt_uses_topic_in_auto_mode_when_no_lyrics
+    custom, prompt = @handler.send(:resolve_cover_prompt,
+      { 'lyrics' => '', 'topic' => 'про усталого программиста', 'title' => 'X' })
+    assert_equal false, custom
+    assert_equal 'про усталого программиста', prompt
+  end
+
+  def test_resolve_cover_prompt_truncates_topic_to_500_chars
+    long = 'а' * 800
+    _, prompt = @handler.send(:resolve_cover_prompt,
+      { 'lyrics' => '', 'topic' => long })
+    assert_equal 500, prompt.length
+  end
+
+  def test_resolve_cover_prompt_falls_back_to_title_when_both_empty
+    custom, prompt = @handler.send(:resolve_cover_prompt,
+      { 'lyrics' => '', 'topic' => '', 'title' => 'Кавер от 42FM' })
+    assert_equal false, custom
+    assert_equal 'Кавер от 42FM', prompt
+  end
+
+  def test_resolve_cover_prompt_treats_whitespace_lyrics_as_empty
+    custom, prompt = @handler.send(:resolve_cover_prompt,
+      { 'lyrics' => "   \n  ", 'topic' => 'тема' })
+    assert_equal false, custom
+    assert_equal 'тема', prompt
+  end
+
+  # Back-compat: legacy in-flight tasks created before the split have only
+  # `prompt` (no lyrics/topic keys). Treat as topic — we no longer trust the
+  # agent to put real lyrics there, and topic is the safer interpretation.
+  def test_resolve_cover_prompt_legacy_prompt_treated_as_topic
+    custom, prompt = @handler.send(:resolve_cover_prompt,
+      { 'prompt' => 'про закат', 'title' => 'Sunset' })
+    assert_equal false, custom
+    assert_equal 'про закат', prompt
+  end
+
+  # When lyrics/topic keys exist (post-split task) but are both empty, do NOT
+  # fall back to a stray legacy `prompt` — the new schema is authoritative.
+  # Otherwise an agent-driven empty would silently pick up an old field.
+  def test_resolve_cover_prompt_ignores_legacy_prompt_when_split_keys_present
+    _, prompt = @handler.send(:resolve_cover_prompt,
+      { 'lyrics' => '', 'topic' => '', 'prompt' => 'old style desc',
+        'title' => 'New Title' })
+    assert_equal 'New Title', prompt
+  end
 end

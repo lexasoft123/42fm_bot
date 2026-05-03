@@ -54,34 +54,55 @@ class SunoClientTest < Minitest::Test
     assert_equal 'https://example.com/noop', req[:body]['callBackUrl']
   end
 
-  def test_cover_audio_posts_to_correct_endpoint_with_custom_mode_true
+  # Custom mode (literal-lyrics path): user gave verbatim text → Suno sings
+  # it as-is. Caller is responsible for choosing custom_mode=true; SunoClient
+  # is a thin pass-through.
+  def test_cover_audio_custom_mode_true_passes_prompt_as_lyrics
     captured = []
     with_stubbed_post(captured: captured) do
       SunoClient.new.cover_audio(
         upload_url: 'https://example.com/in.mp3',
-        style: 'synthwave', title: 'Retro', prompt: 'neon nights'
+        style: 'synthwave', title: 'Retro',
+        prompt: "[Verse 1]\nNeon nights\nFading lights",
+        custom_mode: true
       )
     end
     req = captured.last
     assert_match %r{/api/v1/generate/upload-cover\z}, req[:url]
-    assert_equal true, req[:body]['customMode']
+    assert_equal true,  req[:body]['customMode']
     assert_equal false, req[:body]['instrumental']
     assert_equal 'synthwave', req[:body]['style']
     assert_equal 'Retro', req[:body]['title']
-    assert_equal 'neon nights', req[:body]['prompt']
+    assert_match(/\[Verse 1\]/, req[:body]['prompt'])
   end
 
-  # Instrumental cover: when the input is itself instrumental (or the user
-  # explicitly asked for "минус"), pass `instrumental: true` so Suno skips
-  # vocal generation. Without this, Suno hallucinates vocals based on
-  # `prompt` and prior chat context — exactly what dropped a real user
-  # request today (lex's "переделай чтоб был минус без гитары").
+  # Auto mode (topic path): user gave a theme but no actual lyrics → Suno
+  # auto-generates fresh lyrics from the topic. The bug this guards: agent
+  # used to pass style descriptions in `prompt` with hardcoded customMode=true,
+  # so Suno literally sang "Hungarian prog-rock 80s" as the chorus. Now the
+  # tool→handler path picks customMode=false for topic input.
+  def test_cover_audio_custom_mode_false_passes_prompt_as_topic
+    captured = []
+    with_stubbed_post(captured: captured) do
+      SunoClient.new.cover_audio(
+        upload_url: 'https://example.com/in.mp3',
+        style: 'synthwave', title: 'Retro',
+        prompt: 'про ночной город', custom_mode: false
+      )
+    end
+    assert_equal false, captured.last[:body]['customMode']
+    assert_equal 'про ночной город', captured.last[:body]['prompt']
+  end
+
+  # Instrumental cover: `instrumental: true` skips vocals regardless of mode;
+  # pre-existing regression guard for the "переделай чтоб был минус" path.
   def test_cover_audio_passes_instrumental_true_to_api
     captured = []
     with_stubbed_post(captured: captured) do
       SunoClient.new.cover_audio(
         upload_url: 'https://example.com/in.mp3',
-        style: 'instrumental, ambient', title: 'Minus', prompt: '',
+        style: 'instrumental, ambient', title: 'Minus',
+        prompt: 'ambient instrumental', custom_mode: false,
         instrumental: true
       )
     end
@@ -95,7 +116,8 @@ class SunoClientTest < Minitest::Test
     with_stubbed_post(captured: captured) do
       SunoClient.new.cover_audio(
         upload_url: 'https://example.com/in.mp3',
-        style: 'instrumental', title: 'Minus', prompt: '',
+        style: 'instrumental', title: 'Minus',
+        prompt: 'mood ambient', custom_mode: false,
         instrumental: true, vocal_gender: 'm'
       )
     end
