@@ -46,9 +46,14 @@ class Polly
       out   = File.join(WEB_DIR, "#{hex}_mix.mp3")
       norm  = File.join(WEB_DIR, "#{hex}_norm.wav")
       # Polly mp3 is mono/16kHz; backing tracks are stereo/44.1kHz. sox -m needs
-      # matching format on both inputs, so resample voice first, then mix and
-      # normalize peaks to -3 dBFS so loud TTS doesn't clip.
-      exec_command! "sox #{mp3} -r 44100 -c 2 #{norm} && sox -m #{norm} #{track} #{out} gain -n -3 && mv #{out} #{mp3} && rm -f #{norm}"
+      # matching format on both inputs, so resample voice first.
+      exec_command! "sox #{mp3} -r 44100 -c 2 #{norm}"
+      # `trim 0 <voice_duration>` cuts the backing track off when the voice ends
+      # (ffmpeg amerge did this implicitly; sox -m pads to the longest input).
+      # `gain -n -3` normalizes peaks to -3 dBFS so loud TTS doesn't clip.
+      voice_duration = `soxi -D #{norm}`.strip
+      raise "soxi -D returned empty for #{norm}" if voice_duration.empty?
+      exec_command! "sox -m #{norm} #{track} #{out} trim 0 #{voice_duration} gain -n -3 && mv #{out} #{mp3} && rm -f #{norm}"
     end
 
     exec_command! "sox #{mp3} -b 16 -r 44100 -e signed-integer #{wav}"
