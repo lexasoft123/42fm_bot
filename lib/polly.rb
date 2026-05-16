@@ -44,8 +44,11 @@ class Polly
       raise "No minus tracks in #{SAMPLES_DIR}" if samples.empty?
       track = @track_id ? samples[@track_id % samples.size] : samples.sample
       out   = File.join(WEB_DIR, "#{hex}_mix.mp3")
-      # sox -m sums samples; gain -n normalizes peaks to 0 dBFS to avoid clipping
-      exec_command! "sox -m #{mp3} #{track} #{out} gain -n -3 && mv #{out} #{mp3}"
+      norm  = File.join(WEB_DIR, "#{hex}_norm.wav")
+      # Polly mp3 is mono/16kHz; backing tracks are stereo/44.1kHz. sox -m needs
+      # matching format on both inputs, so resample voice first, then mix and
+      # normalize peaks to -3 dBFS so loud TTS doesn't clip.
+      exec_command! "sox #{mp3} -r 44100 -c 2 #{norm} && sox -m #{norm} #{track} #{out} gain -n -3 && mv #{out} #{mp3} && rm -f #{norm}"
     end
 
     exec_command! "sox #{mp3} -b 16 -r 44100 -e signed-integer #{wav}"
