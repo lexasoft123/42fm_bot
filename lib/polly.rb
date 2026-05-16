@@ -36,7 +36,7 @@ class Polly
 
     if @speed
       out = File.join(WEB_DIR, "#{hex}_out.mp3")
-      exec_command! "ffmpeg -i #{mp3} -filter:a \"atempo=#{@speed}\" #{out} && mv #{out} #{mp3}"
+      exec_command! "sox #{mp3} #{out} tempo #{@speed} && mv #{out} #{mp3}"
     end
 
     if @minus
@@ -44,10 +44,11 @@ class Polly
       raise "No minus tracks in #{SAMPLES_DIR}" if samples.empty?
       track = @track_id ? samples[@track_id % samples.size] : samples.sample
       out   = File.join(WEB_DIR, "#{hex}_mix.mp3")
-      exec_command! "ffmpeg -y -i #{mp3} -i #{track} -filter_complex amerge=inputs=2 -ac 2 #{out} && mv #{out} #{mp3}"
+      # sox -m sums samples; gain -n normalizes peaks to 0 dBFS to avoid clipping
+      exec_command! "sox -m #{mp3} #{track} #{out} gain -n -3 && mv #{out} #{mp3}"
     end
 
-    exec_command! "ffmpeg -y -i #{mp3} -acodec pcm_s16le -ar 44100 #{wav}"
+    exec_command! "sox #{mp3} -b 16 -r 44100 -e signed-integer #{wav}"
     exec_command! "opusenc --bitrate #{BITRATE} #{wav} #{ogg}"
     FileUtils.rm_f [mp3, wav]
     "#{hex}.ogg"

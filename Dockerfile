@@ -25,16 +25,16 @@ RUN bundle config set --local without development \
            /usr/local/bundle/gems/numo-linalg-alt-*/vendor/lib/cmake \
            /usr/local/bundle/gems/numo-linalg-alt-*/vendor/lib/pkgconfig \
  && find /usr/local/bundle/gems/numo-linalg-alt-*/vendor/lib -name '*.a' -delete \
+ && find /usr/local/bundle/gems/numo-linalg-alt-*/vendor/lib -name 'libopenblas*.so*' -delete \
  && find /usr/local/bundle -name '*.so' -exec strip --strip-unneeded {} + 2>/dev/null || true
 
 # ---- Runtime: slim image with only what's needed at run time ----
 FROM ruby:4.0-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
+    sox \
+    libsox-fmt-mp3 \
     opus-tools \
-    sqlite3 \
-    libsqlite3-0 \
     libopenblas0-pthread \
     liblapack3 \
     && rm -rf /var/lib/apt/lists/*
