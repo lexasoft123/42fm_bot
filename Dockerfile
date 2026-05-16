@@ -19,7 +19,13 @@ COPY Gemfile Gemfile.lock ./
 RUN bundle config set --local without development \
  && bundle install --jobs 4 \
  && rm -rf /usr/local/bundle/cache \
-           /usr/local/bundle/ruby/*/cache
+           /usr/local/bundle/ruby/*/cache \
+ && rm -rf /usr/local/bundle/gems/numo-linalg-alt-*/vendor/tmp \
+           /usr/local/bundle/gems/numo-linalg-alt-*/vendor/include \
+           /usr/local/bundle/gems/numo-linalg-alt-*/vendor/lib/cmake \
+           /usr/local/bundle/gems/numo-linalg-alt-*/vendor/lib/pkgconfig \
+ && find /usr/local/bundle/gems/numo-linalg-alt-*/vendor/lib -name '*.a' -delete \
+ && find /usr/local/bundle -name '*.so' -exec strip --strip-unneeded {} + 2>/dev/null || true
 
 # ---- Runtime: slim image with only what's needed at run time ----
 FROM ruby:4.0-slim
