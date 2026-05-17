@@ -809,7 +809,7 @@ class ChatContextTest < BotTest
     @user = member_user(first_name: 'Ivan', last_name: 'Petrov')
   end
 
-  # get_chat_context includes last_name in user name formatting
+  # get_chat_context exposes first/last name in the structured `who` object
   def test_context_includes_full_name
     user_message(chat_id: 100, body: 'привет', user: @user)
     obj = Object.new
@@ -817,21 +817,24 @@ class ChatContextTest < BotTest
     result = obj.get_chat_context(100)
     parsed = JSON.parse(result)
     assert_equal 1, parsed.size
-    assert_includes parsed.first['who'], 'Ivan'
-    assert_includes parsed.first['who'], 'Petrov'
+    who = parsed.first['who']
+    assert_equal 'Ivan',   who['first_name']
+    assert_equal 'Petrov', who['last_name']
   end
 
-  # get_chat_context formats bot messages with "Жзяцля" name
+  # Bot rows render `who` as {name: 'Жзяцля'} (no uid/username); role: 'bot'
+  # is the structural disambiguator.
   def test_context_bot_messages_use_bot_name
     bot_message(chat_id: 100, body: 'bot reply')
     obj = Object.new
     obj.extend(ChatContext)
     result = obj.get_chat_context(100)
     parsed = JSON.parse(result)
-    assert_equal 'Жзяцля', parsed.first['who']
+    assert_equal({ 'name' => 'Жзяцля' }, parsed.first['who'])
+    assert_equal 'bot', parsed.first['role']
   end
 
-  # get_chat_context falls back to username when first/last name are nil
+  # User with only a username and no first/last: who object has just uid + username.
   def test_context_falls_back_to_username
     user_no_name = member_user(uid: 2000, name: 'cooluser', first_name: nil, last_name: nil)
     user_message(chat_id: 100, body: 'hi', user: user_no_name)
@@ -839,7 +842,7 @@ class ChatContextTest < BotTest
     obj.extend(ChatContext)
     result = obj.get_chat_context(100)
     parsed = JSON.parse(result)
-    assert_equal 'cooluser', parsed.first['who']
+    assert_equal({ 'uid' => 2000, 'username' => 'cooluser' }, parsed.first['who'])
   end
 
   # get_chat_context returns empty string on error (rescue wrapper)

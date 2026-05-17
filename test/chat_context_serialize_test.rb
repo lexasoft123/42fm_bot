@@ -18,7 +18,7 @@ class ChatContextSerializeTest < BotTest
                    :forwarded, :edited_at, :role, :body,
                    :attachment_file_id, :attachment_mime_type,
                    :attachment_title, :attachment_performer, :attachment_duration,
-                   :name, :first_name, :last_name, keyword_init: true) do
+                   :uid, :name, :first_name, :last_name, keyword_init: true) do
     def try(attr); respond_to?(attr) ? send(attr) : nil; end
   end
 
@@ -26,7 +26,7 @@ class ChatContextSerializeTest < BotTest
     defaults = { reply_to_message_id: nil, message_thread_id: nil, forwarded: false,
                  edited_at: nil, attachment_file_id: nil, attachment_mime_type: nil,
                  attachment_title: nil, attachment_performer: nil, attachment_duration: nil,
-                 name: 'theuser', first_name: 'F', last_name: 'L' }
+                 uid: 111, name: 'theuser', first_name: 'F', last_name: 'L' }
     Row.new(message_id: message_id, role: role, body: body, **defaults.merge(attrs))
   end
 
@@ -47,14 +47,72 @@ class ChatContextSerializeTest < BotTest
     refute h.key?(:audio)
   end
 
-  def test_who_falls_back_to_username_when_no_full_name
-    h = ChatContext.serialize_msg(make(first_name: nil, last_name: nil))
-    assert_equal 'theuser', h[:who]
+  def test_role_user_set_for_user_row
+    h = ChatContext.serialize_msg(make)
+    assert_equal 'user', h[:role]
   end
 
-  def test_bot_role_renders_constant_who
+  def test_role_bot_set_for_bot_row
     h = ChatContext.serialize_msg(make(role: 'bot'))
-    assert_equal 'Жзяцля', h[:who]
+    assert_equal 'bot', h[:role]
+  end
+
+  def test_who_object_includes_all_present_fields
+    h = ChatContext.serialize_msg(make(uid: 663625, name: 'lxbelle',
+                                       first_name: 'Alexander', last_name: 'Tarasov'))
+    assert_equal({ uid: 663625, username: 'lxbelle',
+                   first_name: 'Alexander', last_name: 'Tarasov' }, h[:who])
+  end
+
+  def test_who_object_omits_blank_username
+    # name='' should not produce {username: ''} — orphan-paren bug regression.
+    h = ChatContext.serialize_msg(make(uid: 222, name: '',
+                                       first_name: 'MC Boa', last_name: nil))
+    assert_equal({ uid: 222, first_name: 'MC Boa' }, h[:who])
+  end
+
+  def test_who_object_omits_blank_first_last
+    h = ChatContext.serialize_msg(make(uid: 333, name: 'just_a_handle',
+                                       first_name: '', last_name: nil))
+    assert_equal({ uid: 333, username: 'just_a_handle' }, h[:who])
+  end
+
+  def test_who_object_returns_unknown_when_everything_blank
+    # uid nil + all names blank → {unknown:true}.
+    h = ChatContext.serialize_msg(make(uid: nil, name: nil,
+                                       first_name: nil, last_name: nil))
+    assert_equal({ unknown: true }, h[:who])
+  end
+
+  def test_who_object_strips_whitespace_only_first_name
+    h = ChatContext.serialize_msg(make(uid: 444, name: 'u', first_name: '   ', last_name: 'L'))
+    assert_equal({ uid: 444, username: 'u', last_name: 'L' }, h[:who])
+  end
+
+  def test_who_bot_row_returns_name_object
+    # Bot row gets a structurally distinct object; no uid/username — the role
+    # field disambiguates, and the bot's own uid isn't a meaningful mention.
+    h = ChatContext.serialize_msg(make(role: 'bot'))
+    assert_equal({ name: 'Жзяцля' }, h[:who])
+  end
+
+  # display_name is shared with Agent::Runner#trigger_user_display so the
+  # trigger line and the history `who` agree on every edge case.
+  def test_display_name_combined_when_both_present
+    assert_equal 'lxbelle (Alex T)', ChatContext.display_name(name: 'lxbelle', first_name: 'Alex', last_name: 'T')
+  end
+
+  def test_display_name_username_only
+    assert_equal 'lxbelle', ChatContext.display_name(name: 'lxbelle', first_name: nil, last_name: nil)
+  end
+
+  def test_display_name_full_name_only
+    # Blank username — no leading space + paren regression.
+    assert_equal 'Alex T', ChatContext.display_name(name: '', first_name: 'Alex', last_name: 'T')
+  end
+
+  def test_display_name_unknown_when_all_blank
+    assert_equal 'unknown', ChatContext.display_name(name: '', first_name: nil, last_name: '')
   end
 
   # audio_meta surfaces title/performer/duration/mime so the agent can

@@ -640,6 +640,18 @@ class RunnerTest < BotTest
                  'no first/last name → fall back to bare username (no parentheses)')
   end
 
+  # Blank username + present first/last → trigger renders 'First Last' (no
+  # leading-space + orphan-paren regression). Locks the trigger-line invariant
+  # to ChatContext.display_name's logic, shared with serialize_msg.
+  def test_build_messages_blank_username_with_full_name
+    user_no_uname = member_user(uid: 9997, name: '', first_name: 'MC Boa', last_name: nil)
+    FakeGptMaster.enqueue(anthropic_text('ok'))
+    build_runner(text: 'hi', user: user_no_uname).run
+    content = FakeGptMaster.calls.first[:messages].first[:content]
+    assert_match(/FROM=MC Boa \|/, content,
+                 'blank username + names present → "First Last" (no orphan paren)')
+  end
+
   # Message_id substitution: gives the agent an unambiguous handle on the
   # exact context entry that triggered this turn (so it can read `who`,
   # `reply_to`, `thread`, etc. without guessing). Wired separately from

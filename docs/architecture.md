@@ -332,9 +332,11 @@ Generic DB-backed persistent task system for long-running operations. A poller t
 
 ### ChatContext — `lib/chat_context.rb`
 Single source of truth for chat context and knowledge lookup. Included by task handlers (directly) and by `GptHelpers` (which delegates with auto-passed `chat_id` + current `message_thread_id`). Provides:
-- `get_chat_context(chat_id, thread_id: nil)` — fetches the last N messages as a JSON array. Each entry is `{id, who, msg}` with optional `reply_to`, `thread`, `fwd`, `edited`. When `thread_id` is set, scopes the query to the same forum topic. When any in-window `reply_to` points to a `message_id` that isn't in the window, the helper fetches that one row from DB and prepends it (one-hop out-of-window backfill). Rescues to `''` on error.
+- `get_chat_context(chat_id, thread_id: nil)` — fetches the last N messages as a JSON array. Each entry is `{id, role: 'bot'|'user', who, msg}` with optional `reply_to`, `thread`, `fwd`, `edited`, `audio`, `audio_meta`. `role` is the structural disambiguator between user input and the bot's own prior outputs (replaces name-string matching against the bot's display name). `who` is a structured object — for users `{uid, username?, first_name?, last_name?}` (only present fields, or `{unknown:true}` when nothing is known); for the bot `{name: 'Жзяцля'}`. `uid` is included so the agent can mention users without a Telegram username via Markdown `[Name](tg://user?id=UID)`. When `thread_id` is set, scopes the query to the same forum topic. When any in-window `reply_to` points to a `message_id` that isn't in the window, the helper fetches that one row from DB and prepends it (one-hop out-of-window backfill). Rescues to `''` on error.
 - `get_relevant_knowledge(query, chat_id)` — embeds query, retrieves top-K knowledge facts as JSON; rescues to `''` on error
-- `ChatContext.serialize_msg(row)` — module method shared by `get_chat_context` and the `load_messages` agent tool to produce the `{id, reply_to, thread, fwd, edited, who, msg}` hash from a row.
+- `ChatContext.serialize_msg(row)` — module method shared by `get_chat_context` and the `load_messages` agent tool to produce the hash described above.
+- `ChatContext.identity_for_row(row)` — module helper: builds the `who` object (only includes non-blank fields; falls back to `{unknown:true}`).
+- `ChatContext.display_name(name:, first_name:, last_name:)` — module helper: flat-string label used by `Agent::Runner#trigger_user_display`. Shared with `serialize_msg` so the trigger line and history rows agree on every formatting edge case.
 
 ### SunoClient — `lib/suno_client.rb`
 HTTP client for the Suno AI song generation API (`sunoapi.org`), using V5 model. Key methods:

@@ -4,7 +4,7 @@ module ChatContext
                 'messages.role, messages.body, messages.attachment_file_id, ' \
                 'messages.attachment_mime_type, messages.attachment_title, ' \
                 'messages.attachment_performer, messages.attachment_duration, ' \
-                'users.name, users.first_name, users.last_name'.freeze
+                'users.uid, users.name, users.first_name, users.last_name'.freeze
 
   def get_chat_context(chat_id, thread_id: nil)
     # thread_id kept for signature stability; not used as a filter.
@@ -45,9 +45,36 @@ module ChatContext
     ''
   end
 
+  # Structured identity object for a user row. Only includes fields that
+  # carry a non-blank value, so the agent never has to defend against
+  # empty strings or orphan parens. `uid` lets the agent mention users
+  # without a Telegram username via `[Name](tg://user?id=UID)`.
+  def self.identity_for_row(r)
+    o = {}
+    o[:uid]        = r.uid.to_i              if r.try(:uid)
+    o[:username]   = r.name.to_s.strip       if r.try(:name)       && !r.name.to_s.strip.empty?
+    o[:first_name] = r.first_name.to_s.strip if r.try(:first_name) && !r.first_name.to_s.strip.empty?
+    o[:last_name]  = r.last_name.to_s.strip  if r.try(:last_name)  && !r.last_name.to_s.strip.empty?
+    o.empty? ? { unknown: true } : o
+  end
+
+  # Flat human-readable label, used by the agent_prompt trigger line.
+  # Same precedence as identity_for_row but collapsed to a string for
+  # one-line contexts. Shared with Agent::Runner#trigger_user_display so
+  # the trigger line and serialize_msg rows agree on every edge case.
+  def self.display_name(name:, first_name:, last_name:)
+    uname = name.to_s.strip
+    full  = [first_name, last_name].compact.map { |s| s.to_s.strip }.reject(&:empty?).join(' ')
+    return 'unknown' if uname.empty? && full.empty?
+    return full     if uname.empty?
+    return uname    if full.empty?
+    "#{uname} (#{full})"
+  end
+
   def self.serialize_msg(r)
     h = {}
     h[:id] = r.message_id if r.message_id
+    h[:role] = (r.role == 'bot') ? 'bot' : 'user'
     h[:reply_to] = r.reply_to_message_id if r.reply_to_message_id
     h[:thread] = r.message_thread_id if r.message_thread_id
     h[:fwd] = true if r.forwarded
@@ -66,12 +93,7 @@ module ChatContext
       meta[:mime]      = r.attachment_mime_type if r.try(:attachment_mime_type)
       h[:audio_meta] = meta unless meta.empty?
     end
-    if r.role == 'bot'
-      h[:who] = 'Жзяцля'
-    else
-      full_name = [r.first_name, r.last_name].compact.join(' ')
-      h[:who] = full_name.empty? ? r.name : "#{r.name} (#{full_name})"
-    end
+    h[:who] = (r.role == 'bot') ? { name: 'Жзяцля' } : identity_for_row(r)
     h[:msg] = r.body
     h
   end

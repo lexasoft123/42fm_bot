@@ -179,16 +179,12 @@ module Agent
       GptMaster.split_cache_break(content)
     end
 
-    # Display name for the user who triggered this turn — same `name (Full Name)`
-    # format used by ChatContext.serialize_msg's `who` field, so the agent sees
-    # one consistent identity across context entries and the trigger line.
-    # Pre-fix the trigger line was just `Запрос из чата: [...]` with no
-    # attribution, and the agent occasionally addressed the wrong user when
-    # multiple participants had recent messages in the context window.
+    # Flat label for the trigger line (single source of truth: shared with
+    # ChatContext.serialize_msg's `who` field via ChatContext.display_name,
+    # so trigger and history rows agree on every edge case).
     def trigger_user_display
-      return 'неизвестный' unless @user
-      full_name = [@user.first_name, @user.last_name].compact.reject(&:empty?).join(' ')
-      full_name.empty? ? @user.name.to_s : "#{@user.name} (#{full_name})"
+      return 'unknown' unless @user
+      ChatContext.display_name(name: @user.name, first_name: @user.first_name, last_name: @user.last_name)
     end
 
     # When the user attaches audio, hint the model so it picks add_vocals /
