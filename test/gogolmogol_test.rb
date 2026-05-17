@@ -55,6 +55,15 @@ class GogolmogolTest < BotTest
     refute captured[:opts].key?('imgSize'),    'text search must not set imgSize'
   end
 
+  def test_safe_search_is_disabled_for_all_media_types
+    %w[text photo gif].each do |mt|
+      captured = with_captured_opts do
+        Gogolmogol.new('q', media_type: mt).search_results(limit: 1)
+      end
+      assert_equal 'off', captured[:opts]['safe'], "safe=off must be set for media_type=#{mt}"
+    end
+  end
+
   def test_download_results_returns_tempfiles_for_successful_links
     items = [
       OpenStruct.new(title: 'a', link: 'http://example.com/a.jpg', snippet: ''),

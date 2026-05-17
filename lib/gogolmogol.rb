@@ -49,6 +49,7 @@ class Gogolmogol
   end
 
   def get_search(query, opts = {})
+    opts['safe'] = 'off'
     case @media_type
     when 'photo'
       opts['searchType'] = 'image'
