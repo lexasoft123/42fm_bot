@@ -382,7 +382,7 @@ Facade over Polly. `TtsService.speak(text, voice:, speed:, minus:, track_id:)` g
 AWS Polly TTS synthesis (region: `eu-west-1`). Voices: `Maxim` (Russian), `Hans` (German). Post-processes MP3 with FFmpeg to OGG Opus at 32 kbps. Supports karaoke mode: mixes speech over an MP3 backing track from `lib/samples/`.
 
 ### Gogolmogol — `lib/gogolmogol.rb`
-Google Custom Search API. Supports image and GIF queries. Falls back across a pool of API key pairs when rate-limited.
+Google Custom Search API. Constructor takes `media_type:` (`'text'`/`'photo'`/`'gif'`); the intent is set explicitly by the caller (the agent picks via the `media_type` tool param), never sniffed from the query string. Two output methods: `search_results(limit:)` returns `{title:, link:, snippet:}` hashes; `download_results(limit:)` searches + scrapes each result link to a Tempfile and returns `{tmp:, mime:, link:}` (caller owns lifecycle, failed downloads are dropped). The scraper has an SSRF guard (`safe_url?`): http(s) only; literal-IP hosts in loopback/private/link-local ranges are refused before any HTTP call. Falls back across a pool of API key pairs when rate-limited.
 
 ### Horoscope — `lib/horoscope.rb`
 Scrapes XML from `img.ignio.com` for zodiac horoscopes. Also scrapes `newsler.ru` for erotic horoscopes. Uses Nokogiri.
