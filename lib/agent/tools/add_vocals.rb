@@ -9,7 +9,7 @@ Agent::ToolRegistry.register(
     'title'         => { type: 'string', description: 'Название будущего трека (для caption и filename).' },
     'upload_url'    => { type: 'string', description: 'Опциональный URL аудио, если пользователь дал ссылку (а не прикрепил файл). Если оставить пустым — берётся URL прикреплённого файла.' },
     'vocal_gender'  => { type: 'string', description: 'Опционально: "m" или "f" — пол вокалиста.' },
-    'negative_tags' => { type: 'string', description: 'Опционально: чего НЕ хотим в вокале/стиле, через запятую на английском.' },
+    'negative_tags' => { type: 'string', description: SUNO_NEGATIVE_TAGS_DESC },
     'with_cover_art' => { type: 'boolean', description: 'true если пользователь хочет ещё и обложку. См. compose_song.' },
   },
   handler: ->(args, ctx) {

@@ -401,4 +401,43 @@ class SunoHandlerChainTest < BotTest
     SunoClient.singleton_class.send(:alias_method, :new, :__new) rescue nil
     SunoClient.singleton_class.send(:remove_method, :__new)      rescue nil
   end
+
+  # Pins the end-to-end thread of `negative_tags` from BackgroundTask.params
+  # (written by compose_song agent tool) → SunoClient#submit kwarg → Suno's
+  # `negativeTags` POST field. Regression guard for the post-review fix that
+  # moved negatives out of TAGS_PROMPT's inline ladder into a structured
+  # channel.
+  def test_compose_and_submit_generate_threads_negative_tags_to_suno_submit
+    Settings.singleton_class.send(:define_method, :suno) {
+      { 'lyrics_prompt' => 'Compose: {REQUEST} | {GENRE} | {ARTIST} | {CONTEXT} | {KNOWLEDGE}' }
+    } unless Settings.respond_to?(:suno)
+
+    fake_gpt = Object.new
+    fake_gpt.define_singleton_method(:call) { '[Verse]\nfake\n[Chorus]\nfake' }
+    GptMaster.singleton_class.send(:alias_method, :__new, :new)
+    GptMaster.singleton_class.send(:define_method, :new) { |_msgs, **_opts| fake_gpt }
+
+    captured = []
+    suno_stub = Object.new
+    suno_stub.define_singleton_method(:submit) { |**kw| captured << kw; 'fake-suno-id' }
+    SunoClient.singleton_class.send(:alias_method, :__new, :new)
+    SunoClient.singleton_class.send(:define_method, :new) { suno_stub }
+
+    task = BackgroundTask.create!(
+      task_type: 'suno_generate', chat_id: CHAT, max_attempts: 60,
+      params: { tags: 'rock, anthemic', negative_tags: 'female vocals, slow tempo',
+                title: 'Test', lyrics: nil, topic: 'про шефа',
+                genre: 'рок', user_uid: 1 }.to_json
+    )
+    api = OpenStruct.new
+    @handler.send(:compose_and_submit_generate, task, api)
+
+    assert_equal 'female vocals, slow tempo', captured.last[:negative_tags],
+                 'compose_and_submit_generate must thread params.negative_tags into SunoClient#submit'
+  ensure
+    GptMaster.singleton_class.send(:alias_method, :new, :__new)  rescue nil
+    GptMaster.singleton_class.send(:remove_method, :__new)       rescue nil
+    SunoClient.singleton_class.send(:alias_method, :new, :__new) rescue nil
+    SunoClient.singleton_class.send(:remove_method, :__new)      rescue nil
+  end
 end

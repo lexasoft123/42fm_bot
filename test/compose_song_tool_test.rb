@@ -98,6 +98,24 @@ class ComposeSongToolTest < BotTest
     assert_equal 'про шефа', p['topic']
   end
 
+  # --- negative_tags (structured Suno negativeTags channel) ---
+
+  def test_negative_tags_arg_persists_in_task_params
+    call_tool('theme' => 'про море', 'tags' => 'surf rock',
+              'title' => 'Surf', 'genre' => 'рок',
+              'negative_tags' => 'female vocals, acoustic guitar')
+    assert_equal 'female vocals, acoustic guitar',
+                 last_song_params['negative_tags']
+  end
+
+  def test_omitted_negative_tags_persists_as_empty_string
+    call_tool('theme' => 'про лето', 'tags' => 'pop',
+              'title' => 'Summer', 'genre' => 'поп')
+    # Empty string (not nil) so SunoClient#submit's `unless empty?` guard
+    # cleanly skips the negativeTags POST field.
+    assert_equal '', last_song_params['negative_tags']
+  end
+
   # --- schema/registration ---
 
   def test_tool_schema_advertises_theme_parameter

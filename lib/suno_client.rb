@@ -68,11 +68,15 @@ class SunoClient
   end
 
   # Submit song generation request. Returns task_id string.
-  def submit(title:, lyrics:, tags:, instrumental: false)
-    post_for_task_id('/api/v1/generate',
-      customMode: true, prompt: lyrics, style: tags, title: title,
-      model: @model, instrumental: instrumental,
-      callBackUrl: 'https://example.com/noop')
+  # `negative_tags` is omitted from the POST body when empty (consistent
+  # with add_vocals/cover_audio — all three drop optional fields rather
+  # than send empty-string).
+  def submit(title:, lyrics:, tags:, negative_tags: '', instrumental: false)
+    body = { customMode: true, prompt: lyrics, style: tags, title: title,
+             model: @model, instrumental: instrumental,
+             callBackUrl: 'https://example.com/noop' }
+    body[:negativeTags] = negative_tags unless negative_tags.to_s.empty?
+    post_for_task_id('/api/v1/generate', **body)
   end
 
   # Submit add-vocals request: layer AI vocals over a user-provided audio URL.
@@ -83,9 +87,9 @@ class SunoClient
   # the input, no opt-out), so we omit them deliberately.
   def add_vocals(upload_url:, prompt:, title:, style:, negative_tags: '', vocal_gender: nil)
     body = { uploadUrl: upload_url, prompt: prompt, title: title, style: style,
-             negativeTags: negative_tags, model: @model,
-             callBackUrl: 'https://example.com/noop' }
-    body[:vocalGender] = vocal_gender if vocal_gender
+             model: @model, callBackUrl: 'https://example.com/noop' }
+    body[:negativeTags] = negative_tags unless negative_tags.to_s.empty?
+    body[:vocalGender]  = vocal_gender  if vocal_gender
     post_for_task_id('/api/v1/generate/add-vocals', **body)
   end
 
@@ -104,9 +108,9 @@ class SunoClient
                   negative_tags: '', vocal_gender: nil, instrumental: false)
     body = { uploadUrl: upload_url, customMode: custom_mode, instrumental: instrumental,
              style: style, title: title, prompt: prompt,
-             negativeTags: negative_tags, model: @model,
-             callBackUrl: 'https://example.com/noop' }
-    body[:vocalGender] = vocal_gender if vocal_gender && !instrumental
+             model: @model, callBackUrl: 'https://example.com/noop' }
+    body[:negativeTags] = negative_tags unless negative_tags.to_s.empty?
+    body[:vocalGender]  = vocal_gender  if vocal_gender && !instrumental
     post_for_task_id('/api/v1/generate/upload-cover', **body)
   end
 

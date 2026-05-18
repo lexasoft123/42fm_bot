@@ -125,13 +125,19 @@ class SunoTaskHandler
   PROMPT
 
   TAGS_PROMPT = <<~PROMPT.freeze
-    Опиши музыкальный стиль для Suno AI — через запятую на английском: жанр, поджанр, инструменты, характер вокала, настроение, темп.
+    Опиши музыкальный стиль для Suno AI — через запятую на английском В ПОРЯДКЕ:
+    1) жанр и поджанр (например "industrial metal, Neue Deutsche Härte"),
+    2) настроение/эмоция (aggressive, melancholic, dreamy, anthemic, dark, powerful),
+    3) инструменты (heavy distorted riffs, jangly guitar, analog synth, martial drums),
+    4) характер вокала (deep German male vocals, raspy, falsetto, choir, baritone),
+    5) описание сведения — необязательно, добавляй если уместно жанру (polished production, lo-fi, wet reverb, dry mix, punchy drums, radio-ready, wide stereo, 80s tape hiss).
+    НЕ пиши негативные теги ("no X", "without Y") внутри этой строки — у Suno для них отдельное поле, оно заполняется параметром negative_tags в инструменте, а не здесь.
     ВАЖНО: НИКОГДА не включай имена исполнителей или групп в теги — Suno блокирует имена артистов!
     Вместо имени опиши характерное звучание максимально подробно.
-    Например для Rammstein: "industrial metal, Neue Deutsche Härte, heavy distorted riffs, deep German male vocals, aggressive, martial drums, dark, powerful, stomping rhythm, electronic elements"
-    Например для Цоя: "russian post-punk, new wave, melancholic baritone vocals, jangly guitar, 80s Soviet rock, anthemic, minor key"
+    Например для Rammstein: "industrial metal, Neue Deutsche Härte, aggressive, dark, powerful, stomping rhythm, heavy distorted riffs, martial drums, electronic elements, deep German male vocals, polished production"
+    Например для Цоя: "russian post-punk, new wave, melancholic, anthemic, minor key, jangly guitar, 80s Soviet rock, baritone vocals, dry mix"
     Если даны текст/название песни — определи по ним подходящий стиль.
-    Верни ТОЛЬКО теги через запятую, без пояснений. Минимум 8 тегов. Без имён артистов!
+    Верни ТОЛЬКО теги через запятую, без пояснений. Минимум 8 тегов, целься в 120-180 символов суммарно. Без имён артистов!
 
     Жанр: %{genre}
     Исполнитель (для определения стиля, НЕ включать имя в теги): %{artist}
@@ -209,7 +215,8 @@ class SunoTaskHandler
     tags = SunoClient.resolve_genre(genre) || 'rock' if tags.empty?
 
     begin
-      suno_task_id = SunoClient.new.submit(title: title, lyrics: p['lyrics'], tags: tags)
+      suno_task_id = SunoClient.new.submit(title: title, lyrics: p['lyrics'], tags: tags,
+                                           negative_tags: p['negative_tags'].to_s)
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit: #{e.message}", raise_on_retry: e)
     end

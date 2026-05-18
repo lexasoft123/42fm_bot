@@ -340,11 +340,25 @@ Single source of truth for chat context and knowledge lookup. Included by task h
 
 ### SunoClient — `lib/suno_client.rb`
 HTTP client for the Suno AI song generation API (`sunoapi.org`), using V5 model. Key methods:
-- `submit(title:, lyrics:, tags:)` — POST to `/api/v1/generate`, returns `task_id`
+- `submit(title:, lyrics:, tags:, negative_tags: '')` — POST to `/api/v1/generate`, returns `task_id`. `negative_tags` maps to Suno's `negativeTags` field (exclusions applied after positives); the key is **dropped from the POST body** when the value is empty (mirrors `vocal_gender` conditional in `add_vocals`/`cover_audio`).
 - `poll_once(task_id)` — GET status, returns `:pending`, `:failed`, or `Array<{ audio_url:, title:, duration: }>` (all clip variants)
 - `compose(...)` — blocking convenience (submit + poll loop)
 - `SunoClient.resolve_genre(text)` — maps Russian genre names to English style tags (~50 genres)
 - **Important:** Suno blocks artist names in tags — describe sound characteristics instead
+
+#### Tag-ordering convention (TAGS_PROMPT)
+`SunoTaskHandler::TAGS_PROMPT` instructs the enrichment LLM to emit tags in *genre → mood → instruments → vocals → mix* order, ~120–180 chars total. Mix descriptors (`polished production`, `lo-fi`, `wet reverb`, `dry mix`, `punchy drums`, `radio-ready`) are optional seasoning — composer skips when generic. **Negatives are NOT emitted into the tag string** — they flow exclusively through the structured `negative_tags` agent-tool param → `SunoClient#submit(negative_tags:)` → Suno's `negativeTags` POST field (omitted from the body when empty). Inlining `"no X / without Y"` inside `tags` would let Suno parse them as positive descriptors.
+
+#### Lyric-craft directives (lyrics_prompt)
+`Settings.suno['lyrics_prompt']` carries an "ВЫРАЗИТЕЛЬНЫЕ СРЕДСТВА Suno" block telling the composer LLM to use Suno's vocal-control vocabulary sparingly:
+- Stage directions in parens before lines/sections — `(whispered)`, `(softly)`, `(belted)`, `(building)`, `(sad)`, `(emotional vocals)`, `(fade out)`, `(echo)`.
+- Vocalizations inside hook/chorus — `Oooooh whoa-ah-ah`, `na-na-na`, `la-la-la`, `mmm-hmm`.
+- Call-and-response with parenthetical backup answers — `Lead line (backup answer)`.
+- Punctuation as pacing — `...` slows, `!` accents.
+- Rhythm notation for solo/instrumental sections — `. . . ! . .` (dots = soft tick, `!` = accent).
+- Prefer `[Instrumental Bridge]` or `[Solo]` over bare `[Bridge]` — Suno often mis-renders the latter.
+
+Enumerated section-marker palette (composer picks only what fits the genre): `[Intro] [Verse] [Pre-Chorus] [Chorus] [Hook] [Post-Chorus] [Bridge] [Instrumental Bridge] [Interlude] [Break] [Build] [Drop] [Solo] [Instrumental] [Spoken Word] [Whisper] [Ad-lib] [Harmony] [Outro]`.
 
 #### Cover Audio mode resolution
 The `/api/v1/generate/upload-cover` endpoint takes a `customMode` flag + a `prompt` field whose meaning depends on mode — `customMode: true` sings `prompt` verbatim as lyrics (≤5000 chars on V5); `customMode: false` treats `prompt` as a "core idea" theme and Suno auto-generates fresh lyrics from it (≤500 chars). Suno does NOT preserve the original mp3's lyrics in either mode. The tool exposes two explicit args: `lyrics` (verbatim user-provided text → custom mode) and `topic` (short Russian theme phrase → auto mode).

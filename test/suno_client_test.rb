@@ -54,6 +54,31 @@ class SunoClientTest < Minitest::Test
     assert_equal 'https://example.com/noop', req[:body]['callBackUrl']
   end
 
+  # submit() accepts `negative_tags` for the structured Suno `negativeTags`
+  # field. Negatives must flow only through this channel — TAGS_PROMPT
+  # explicitly forbids inlining "no X / without Y" inside the positive
+  # `tags`/`style` string, which Suno would parse as positive descriptors.
+  def test_submit_includes_negative_tags_when_provided
+    captured = []
+    with_stubbed_post(captured: captured) do
+      SunoClient.new.submit(title: 'Test', lyrics: '[Verse]\nfoo',
+                            tags: 'rock, anthemic',
+                            negative_tags: 'female vocals, acoustic guitar')
+    end
+    req = captured.last
+    assert_match %r{/api/v1/generate\z}, req[:url]
+    assert_equal 'female vocals, acoustic guitar', req[:body]['negativeTags']
+  end
+
+  def test_submit_omits_negative_tags_when_empty
+    captured = []
+    with_stubbed_post(captured: captured) do
+      SunoClient.new.submit(title: 'Test', lyrics: '[Verse]\nfoo', tags: 'rock')
+    end
+    refute_includes captured.last[:body].keys, 'negativeTags',
+                    'negativeTags must be dropped from the POST body when empty'
+  end
+
   # Custom mode (literal-lyrics path): user gave verbatim text → Suno sings
   # it as-is. Caller is responsible for choosing custom_mode=true; SunoClient
   # is a thin pass-through.
@@ -134,6 +159,31 @@ class SunoClientTest < Minitest::Test
     assert_match %r{/api/v1/suno/cover/generate\z}, req[:url]
     assert_equal 'sun-task-XYZ', req[:body]['taskId']
     assert_equal 'https://example.com/noop', req[:body]['callBackUrl']
+  end
+
+  def test_add_vocals_omits_negative_tags_when_empty
+    captured = []
+    with_stubbed_post(captured: captured) do
+      SunoClient.new.add_vocals(
+        upload_url: 'https://example.com/in.mp3',
+        prompt: 'x', title: 'x', style: 'x'
+      )
+    end
+    refute_includes captured.last[:body].keys, 'negativeTags',
+                    'negativeTags must be dropped from add_vocals POST body when empty'
+  end
+
+  def test_cover_audio_omits_negative_tags_when_empty
+    captured = []
+    with_stubbed_post(captured: captured) do
+      SunoClient.new.cover_audio(
+        upload_url: 'https://example.com/in.mp3',
+        style: 'synthwave', title: 'Retro',
+        prompt: 'theme', custom_mode: false
+      )
+    end
+    refute_includes captured.last[:body].keys, 'negativeTags',
+                    'negativeTags must be dropped from cover_audio POST body when empty'
   end
 
   def test_add_vocals_omits_vocal_gender_when_nil

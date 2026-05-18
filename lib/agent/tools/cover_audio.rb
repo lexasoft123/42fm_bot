@@ -10,7 +10,7 @@ Agent::ToolRegistry.register(
     'topic'         => { type: 'string', description: 'Короткая тема/идея (≤500 символов) для авто-генерации НОВОГО текста песни. Используй когда пользователь сказал "сделай кавер про X" или попросил кавер постороннего трека без явных стихов и без видимого исходного текста. Примеры: "про любовь и фронт", "про усталого программиста", "about a tired developer", "love and friday night". НИКОГДА не описывай здесь стиль/жанр/инструменты (это идёт в `style`). Если оставлен пустым и `lyrics` тоже пуст — будет использован `title`. ' + SUNO_LANGUAGE_RULE_RU },
     'upload_url'    => { type: 'string', description: 'Опциональный URL аудио, если пользователь дал ссылку. Если пустой — берётся URL прикреплённого файла.' },
     'vocal_gender'  => { type: 'string', description: 'Опционально: "m" или "f". Игнорируется если instrumental=true.' },
-    'negative_tags' => { type: 'string', description: 'Опционально: чего НЕ хотим, через запятую на английском.' },
+    'negative_tags' => { type: 'string', description: SUNO_NEGATIVE_TAGS_DESC },
     'instrumental'  => { type: 'boolean', description: 'true если кавер должен быть БЕЗ вокала (минус, инструментал). Ставь true когда пользователь говорит "минус", "инструментал", "без вокала", "без слов", или когда исходный трек инструментальный и пользователь не просит добавить вокал. По умолчанию false (с вокалом). При instrumental=true `lyrics`/`topic` игнорируются.' },
     'with_cover_art' => { type: 'boolean', description: 'true если пользователь хочет ещё и обложку. См. compose_song.' },
   },
