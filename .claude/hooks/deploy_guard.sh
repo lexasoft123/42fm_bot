@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# PreToolUse Bash hook: block deploy/push commands until user explicitly re-confirms.
-# Emits hookSpecificOutput.permissionDecision="deny" on match; silent passthrough otherwise.
+# PreToolUse Bash hook: re-prompt the user for confirmation on every deploy/push
+# command. Emits hookSpecificOutput.permissionDecision="ask" on match, routing
+# the call through Claude Code's permission UI; silent passthrough otherwise.
 command -v jq >/dev/null 2>&1 || exit 0
 cmd=$(jq -r '.tool_input.command // ""' 2>/dev/null || true)
 pattern='(^|[^[:alnum:]_])(make[[:space:]]+deploy|git[[:space:]]+push|docker[[:space:]]+compose[[:space:]]+up|ssh[[:space:]].+docker[[:space:]]+compose)($|[[:space:]])'
@@ -9,8 +10,8 @@ if echo "$cmd" | grep -qE "$pattern" \
   jq -n '{
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason: "Blocked by deploy-guard hook. The user must explicitly authorize deploys/pushes in the current turn before this command can run. Ask the user to re-confirm."
+      permissionDecision: "ask",
+      permissionDecisionReason: "deploy-guard: deploy/push commands always re-prompt — confirm only if the user has explicitly authorized this deploy in the current turn."
     }
   }'
 fi
