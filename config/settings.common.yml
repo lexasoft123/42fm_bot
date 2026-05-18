@@ -46,21 +46,28 @@ chat_gpt:
       provider: deepseek
       model: deepseek-v4-pro
       max_tokens: 16000
-    # Suno song lyrics generation — creative long-form text-out call. Sonnet
-    # > DeepSeek for creative songwriting in our testing (better rhyme
-    # accuracy, meter, adherence to genre-specific conventions: chastushka
-    # AABB, blues AAB, rap internal rhymes).
+    # Suno handler-side LLM calls — Sonnet > DeepSeek on both jobs in our
+    # testing (better rhyme/meter/genre-convention adherence for lyrics;
+    # richer style-vocabulary recall for tags — distinguishing e.g.
+    # Rammstein vs OOMPH style traits beyond shared-genre baseline).
     #
-    # When this fires: only when `params['lyrics']` is empty at task-submit
-    # time (suno_handler.rb's `unless p['lyrics']` branch). In practice
-    # that's the rare path — most agent compose_song calls precompose
-    # lyrics inline via the `agent` setting (DeepSeek). This branch covers
-    # the legacy direct `бот спой` command and any agent calls where the
-    # `lyrics` arg was left empty.
+    # Fires for two purposes per Suno gen:
+    # 1. `suno_lyrics` — composes lyrics from chat context + theme when
+    #    `params['lyrics']` is empty (the COMMON path — compose_song agent
+    #    tool actively instructs the agent to leave `lyrics` empty by
+    #    default so the dedicated composer runs). Skipped when the user
+    #    supplied verbatim text or the agent is editing prior output.
+    # 2. `suno_tags` — composes style tags (always; the agent's
+    #    compose_song tool does NOT take a `tags` arg — handler-side
+    #    enrichment is structural, not heuristic). Uses TAGS_PROMPT in
+    #    suno_handler.rb with the artist-emulation rule + Rammstein
+    #    exemplar.
     #
-    # Cost: typical ~$0.05–0.10 per song (5k input ctx + 3-5k output
-    # lyrics @ $3/$15 per Mtok). Worst case at max_tokens=16000 output is
-    # ~$0.24 — bounded but worth knowing.
+    # Cost: typical ~$0.07–0.12 per song combined (two synchronous calls:
+    # ~$0.05–0.10 lyrics + ~$0.01–0.02 tags, both @ $3/$15 per Mtok).
+    # Worst case at max_tokens=16000 output for lyrics is ~$0.24 + tags.
+    # See project_suno_followups memory for the combined-call refactor
+    # that would collapse these into one Sonnet call.
     lyrics:
       provider: anthropic
       model: claude-sonnet-4-6

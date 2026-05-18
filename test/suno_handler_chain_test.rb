@@ -402,6 +402,52 @@ class SunoHandlerChainTest < BotTest
     SunoClient.singleton_class.send(:remove_method, :__new)      rescue nil
   end
 
+  # Regression for prod task 1360 (2026-05-18): agent submitted a Suno gen
+  # with empty `artist` and 8 generic NDH tags. The old enrichment heuristic
+  # only fired when artist was non-empty / tags were <=3 / tags matched
+  # GENRES.values exactly — none of those applied, so enrichment was skipped
+  # and the agent's generic tags went straight to Suno. New contract: handler
+  # ALWAYS runs the suno_tags LLM call. This test pins that, structurally:
+  # tags is NOT in params (agent no longer supplies it post-architecture-fix),
+  # artist is empty, yet GptMaster.new(purpose: 'suno_tags') still gets called.
+  def test_compose_and_submit_generate_always_runs_tag_enrichment
+    Settings.singleton_class.send(:define_method, :suno) {
+      { 'lyrics_prompt' => 'Compose: {REQUEST} | {GENRE} | {ARTIST} | {CONTEXT} | {KNOWLEDGE}' }
+    } unless Settings.respond_to?(:suno)
+
+    fake_gpt = Object.new
+    fake_gpt.define_singleton_method(:call) { 'industrial metal, theatrical, mid-tempo stomp' }
+    captured_purposes = []
+    GptMaster.singleton_class.send(:alias_method, :__new, :new)
+    GptMaster.singleton_class.send(:define_method, :new) do |_msgs, **opts|
+      captured_purposes << opts[:purpose]
+      fake_gpt
+    end
+
+    suno_stub = Object.new
+    suno_stub.define_singleton_method(:submit) { |**_| 'fake-suno-id' }
+    SunoClient.singleton_class.send(:alias_method, :__new, :new)
+    SunoClient.singleton_class.send(:define_method, :new) { suno_stub }
+
+    # Task 1360 shape: no tags, artist empty. Old heuristic would have skipped
+    # enrichment; new behaviour must call it unconditionally.
+    task = BackgroundTask.create!(
+      task_type: 'suno_generate', chat_id: CHAT, max_attempts: 60,
+      params: { title: 'Weiße Birke', lyrics: nil, topic: 'про березу',
+                genre: 'industrial metal', artist: '', user_uid: 1 }.to_json
+    )
+    api = OpenStruct.new
+    @handler.send(:compose_and_submit_generate, task, api)
+
+    assert_includes captured_purposes, 'suno_tags',
+                    'tag enrichment must always run regardless of artist/tags state'
+  ensure
+    GptMaster.singleton_class.send(:alias_method, :new, :__new)  rescue nil
+    GptMaster.singleton_class.send(:remove_method, :__new)       rescue nil
+    SunoClient.singleton_class.send(:alias_method, :new, :__new) rescue nil
+    SunoClient.singleton_class.send(:remove_method, :__new)      rescue nil
+  end
+
   # Pins the end-to-end thread of `negative_tags` from BackgroundTask.params
   # (written by compose_song agent tool) → SunoClient#submit kwarg → Suno's
   # `negativeTags` POST field. Regression guard for the post-review fix that
@@ -425,7 +471,12 @@ class SunoHandlerChainTest < BotTest
 
     task = BackgroundTask.create!(
       task_type: 'suno_generate', chat_id: CHAT, max_attempts: 60,
-      params: { tags: 'rock, anthemic', negative_tags: 'female vocals, slow tempo',
+      # `tags` deliberately omitted from params — the agent's compose_song
+      # tool no longer supplies it, and the handler always regenerates via
+      # resolve_tags. The fake_gpt stub above returns lyric-shaped text for
+      # both the suno_lyrics AND suno_tags calls; we only assert on
+      # negative_tags reaching submit, so the bogus "tags" value is harmless.
+      params: { negative_tags: 'female vocals, slow tempo',
                 title: 'Test', lyrics: nil, topic: 'про шефа',
                 genre: 'рок', user_uid: 1 }.to_json
     )

@@ -4,9 +4,8 @@ Agent::ToolRegistry.register(
   name: 'compose_song',
   description: 'Генерирует песню через Suno AI. Песня будет отправлена в чат как аудио. ВАЖНО ПРО ТЕКСТ: по умолчанию ОСТАВЬ `lyrics` пустым и заполни `theme` — наш отдельный композитор (Sonnet) сочинит лучше тебя, со знанием контекста чата и фактов о юзерах. Заполняй `lyrics` ТОЛЬКО когда пользователь явно дал текст песни дословно или ты редактируешь ранее сгенерированный текст. Если пользователь просит "с обложкой" / "и обложку" — установи with_cover_art=true, после песни автоматически придёт арт. ' + SUNO_LANGUAGE_RULE_RU,
   parameters: {
-    'theme'  => { type: 'string', description: 'Тема/идея песни — короткое описание того, ПРО ЧТО песня (не путать с `tags`, который про музыкальный стиль). На русском или английском. Примеры: "про усталого программиста и его кота", "love and friday night", "про шефа, который продал всех". Используется отдельным композитором (Sonnet) для генерации текста с учётом контекста чата и знаний о юзерах. Заполняй ВСЕГДА (если только не передаёшь `lyrics` дословно).' },
+    'theme'  => { type: 'string', description: 'Тема/идея песни — короткое описание того, ПРО ЧТО песня (не про музыкальный стиль — стиль определяется через `genre`+`artist`). На русском или английском. Примеры: "про усталого программиста и его кота", "love and friday night", "про шефа, который продал всех". Используется отдельным композитором (Sonnet) для генерации текста с учётом контекста чата и знаний о юзерах. Заполняй ВСЕГДА (если только не передаёшь `lyrics` дословно).' },
     'lyrics' => { type: 'string', description: 'ОПЦИОНАЛЬНО — оставляй пустым по умолчанию. Заполни ТОЛЬКО когда пользователь дал явный текст песни дословно или ты редактируешь ранее сгенерированный текст. Если заполнен — приоритет над `theme` (отдельный композитор не запускается). Тэги [Verse]/[Chorus]/[Outro]. ' + SUNO_LANGUAGE_RULE_RU },
-    'tags'   => { type: 'string', description: 'Стиль музыки на английском для Suno AI. Опиши жанр, настроение, инструменты, вокал. НИКОГДА не включай имена артистов — Suno их блокирует! Вместо имени опиши звучание (e.g. "industrial metal, Neue Deutsche Härte, heavy distorted riffs, deep German male vocals, aggressive, martial drums, stomping rhythm")' },
     'negative_tags' => { type: 'string', description: SUNO_NEGATIVE_TAGS_DESC },
     'title'  => { type: 'string', description: 'Название песни' },
     'artist' => { type: 'string', description: 'Исполнитель/группа, если песня в их стиле (e.g. "Rammstein", "Цой"). Пустая строка если не указан.' },
@@ -37,8 +36,11 @@ Agent::ToolRegistry.register(
       task_type: 'suno_generate',
       chat_id: ctx[:chat_id],
       max_attempts: 60,
-      params: { tags: args['tags'] || 'rock',
-                negative_tags: args['negative_tags'].to_s,
+      # `tags` is intentionally NOT written here — the handler regenerates
+      # tags via TAGS_PROMPT on every gen (single source of truth for style
+      # emulation). The agent's job is intent extraction (artist/genre/theme);
+      # tag enrichment is handler-side. See docs/architecture.md.
+      params: { negative_tags: args['negative_tags'].to_s,
                 title: args['title'] || 'Песня от 42FM',
                 lyrics: inline_lyrics,
                 topic: inline_topic,

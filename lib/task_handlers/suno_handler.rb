@@ -114,9 +114,9 @@ class SunoTaskHandler
     Если упоминается конкретный исполнитель/группа (например "как Цой", "в стиле Коррозии Металла"), укажи его в artist.
     Для Suno tags: напиши через запятую на английском стиль музыки, настроение, инструменты, характер вокала. Минимум 8 тегов.
     ВАЖНО: НИКОГДА не включай имена исполнителей или групп в теги — Suno блокирует имена артистов!
-    Вместо имени опиши характерное звучание исполнителя максимально подробно (жанр, поджанр, инструменты, вокал, настроение, эпоха).
-    Например для Rammstein: "industrial metal, Neue Deutsche Härte, heavy distorted riffs, deep German male vocals, aggressive, martial drums, dark, powerful, stomping rhythm, electronic elements"
-    Например для Цоя: "russian post-punk, new wave, melancholic baritone vocals, jangly guitar, 80s Soviet rock, anthemic, minor key"
+    Когда копируешь стиль конкретного исполнителя — описывай его ОТЛИЧИТЕЛЬНЫЕ черты (вокальную манеру, тембр, фразировку, темп, фишки продакшна), а не общие черты жанра. У Rammstein и OOMPH одинаковый жанр (NDH), но отличаются они вокалом, темпом и продакшном — описывай именно отличия.
+    Например для Rammstein: "industrial metal, Neue Deutsche Härte, theatrical, mid-tempo stomp, palm-muted downtuned guitars, hammering drums, cinematic orchestral synth pads, operatic baritone German vocals, rolled R consonants, declamatory spoken-word verses, dramatic vibrato, glossy production"
+    Например для Цоя: "russian post-punk, 80s Soviet new wave, melancholic deadpan baritone, monotone delivery, jangly clean guitar, minor key, steady simple drums, anthemic refrain, restrained sparse arrangement"
 
     Верни ТОЛЬКО JSON без пояснений:
     {"genre": "жанр на русском", "artist": "исполнитель или пустая строка", "topic": "тема песни", "tags": "english tags for suno (WITHOUT artist names!)"}
@@ -133,9 +133,9 @@ class SunoTaskHandler
     5) описание сведения — необязательно, добавляй если уместно жанру (polished production, lo-fi, wet reverb, dry mix, punchy drums, radio-ready, wide stereo, 80s tape hiss).
     НЕ пиши негативные теги ("no X", "without Y") внутри этой строки — у Suno для них отдельное поле, оно заполняется параметром negative_tags в инструменте, а не здесь.
     ВАЖНО: НИКОГДА не включай имена исполнителей или групп в теги — Suno блокирует имена артистов!
-    Вместо имени опиши характерное звучание максимально подробно.
-    Например для Rammstein: "industrial metal, Neue Deutsche Härte, aggressive, dark, powerful, stomping rhythm, heavy distorted riffs, martial drums, electronic elements, deep German male vocals, polished production"
-    Например для Цоя: "russian post-punk, new wave, melancholic, anthemic, minor key, jangly guitar, 80s Soviet rock, baritone vocals, dry mix"
+    Когда копируешь стиль конкретного исполнителя — описывай его ОТЛИЧИТЕЛЬНЫЕ черты (вокальная манера, тембр, фразировка, темп, фишки продакшна), а не общие черты жанра. У Rammstein и OOMPH одинаковый жанр (NDH), отличает их вокал (оперный баритон с раскатистым R и спокен-вордом в куплетах vs более панково-крикливый), темп и кинематографичные синты — описывай именно отличия.
+    Например для Rammstein: "industrial metal, Neue Deutsche Härte, theatrical, mid-tempo stomp, palm-muted downtuned guitars, hammering drums, cinematic orchestral synth pads, operatic baritone German vocals, rolled R consonants, declamatory spoken-word verses, dramatic vibrato, glossy production"
+    Например для Цоя: "russian post-punk, 80s Soviet new wave, melancholic deadpan baritone, monotone delivery, jangly clean guitar, minor key, steady simple drums, anthemic refrain, restrained sparse arrangement"
     Если даны текст/название песни — определи по ним подходящий стиль.
     Верни ТОЛЬКО теги через запятую, без пояснений. Минимум 8 тегов, целься в 120-180 символов суммарно. Без имён артистов!
 
@@ -192,27 +192,18 @@ class SunoTaskHandler
       end
     end
 
-    # Step 3: Resolve tags for Suno
-    tags = p['tags'].to_s.strip
+    # Step 3: Resolve tags for Suno — always via the dedicated LLM call.
+    # Tag enrichment is single-sourced here (TAGS_PROMPT + Sonnet 4.6) rather
+    # than depending on whatever the agent inlined; the agent's compose_song
+    # tool no longer takes a `tags` param. See docs/architecture.md.
     artist = p['artist'].to_s.strip
-    genre = p['genre'].to_s.strip
-    title = p['title'] || build_title(p)
-
-    # Enrich tags with LLM when they look generic or don't reflect artist/title
-    generic_tags = SunoClient::GENRES.values.include?(tags)
-    needs_enrichment = tags.empty? ||
-      generic_tags ||
-      (artist != '' && !tags.downcase.include?(artist.downcase.split.first)) ||
-      tags.split(',').size <= 3
-
-    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: tags='#{tags}' generic=#{generic_tags} needs_enrichment=#{needs_enrichment}"
-
-    if needs_enrichment
-      tags = resolve_tags(genre, artist, title, chat_id: task.chat_id, user_uid: p['user_uid'])
-      p['tags'] = tags
-    end
-
+    genre  = p['genre'].to_s.strip
+    title  = p['title'] || build_title(p)
+    tags   = resolve_tags(genre, artist, title, chat_id: task.chat_id, user_uid: p['user_uid'])
+    p['tags'] = tags
     tags = SunoClient.resolve_genre(genre) || 'rock' if tags.empty?
+
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: tags='#{tags}'"
 
     begin
       suno_task_id = SunoClient.new.submit(title: title, lyrics: p['lyrics'], tags: tags,
@@ -367,7 +358,7 @@ class SunoTaskHandler
       artist: artist.empty? ? 'не указан' : artist,
       title: title.empty? ? 'не указано' : title
     }
-    response = GptMaster.new([{ role: 'user', content: prompt }], setting: 'agent',
+    response = GptMaster.new([{ role: 'user', content: prompt }], setting: 'lyrics',
                              chat_id: chat_id, user_uid: user_uid, purpose: 'suno_tags').call
     tags = response.to_s.strip.gsub(/^["']|["']$/, '')
     LOGGER.debug "[chat=#{chat_id}] #{self.class.name}: resolved tags → '#{tags}'"
