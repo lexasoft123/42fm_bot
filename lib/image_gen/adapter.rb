@@ -27,5 +27,14 @@ module ImageGen
     def name
       self.class::NAME
     end
+
+    # When true, #submit returns a terminal result Hash ({url:, completed:true})
+    # instead of an external_id String — the handler delivers immediately and
+    # never calls #poll_once. Used by CloseRouterImgAdapter (Nano Banana Pro
+    # responds synchronously to /v1/images/generations). Default false keeps
+    # the existing async contract for Flux / Atlas.
+    def synchronous?
+      false
+    end
   end
 end

@@ -11,6 +11,13 @@ chat_gpt:
     grok:
       api_type: openai
       api_url: 'https://api.x.ai/v1/chat/completions'
+    # CloseRouter (closerouter.dev) — multi-provider aggregator. Wired as
+    # api_type: openai (drop-in for /chat/completions). The Anthropic-shape
+    # /messages endpoint can also be used by adding a parallel provider with
+    # api_type: anthropic + api_url: '.../v1/messages' when needed.
+    closerouter:
+      api_type: openai
+      api_url: 'https://api.closerouter.dev/v1/chat/completions'
   settings:
     # Every consumer must pass setting: '<name>' explicitly. The kwarg default
     # in GptMaster.new/.ask is still 'main' so any forgotten caller gets a clean
@@ -249,7 +256,7 @@ flux:
 # transition; once prod is on `image_gen.providers.flux.api_key`, both the
 # top-level block and the shim get removed (plan step 16).
 image_gen:
-  provider: atlas                # 'atlas' | 'flux'
+  provider: atlas                # 'atlas' | 'flux' | 'closerouter'
   providers:
     atlas:
       api_url: 'https://api.atlascloud.ai'
@@ -260,6 +267,13 @@ image_gen:
     flux:
       api_url: 'https://api.bfl.ai'
       model: 'flux-2-pro'
+    # CloseRouter (closerouter.dev). Synchronous /v1/images/generations —
+    # CloseRouterImgAdapter#synchronous? = true short-circuits the poll cycle.
+    # api_key lives in settings.yml under image_gen.providers.closerouter.api_key.
+    closerouter:
+      api_url: 'https://api.closerouter.dev'
+      text_to_image_model: 'google/nano-banana-pro'
+      image_edit_model:    'google/nano-banana-pro-edit'
 
 radio:
   path: '/home/radio/content/music'

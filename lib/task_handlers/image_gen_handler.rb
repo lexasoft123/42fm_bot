@@ -66,16 +66,49 @@ class ImageGenTaskHandler
     end
 
     begin
-      task_id = adapter.submit(prompt: p['prompt'],
-                               input_image: input_image.to_s.empty? ? nil : input_image,
-                               input_media_type: p['input_media_type'])
+      submit_result = adapter.submit(prompt: p['prompt'],
+                                     input_image: input_image.to_s.empty? ? nil : input_image,
+                                     input_media_type: p['input_media_type'])
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit: #{e.message}", raise_on_retry: e)
     end
     p['provider'] = adapter.name
+
+    # Synchronous adapters (e.g. CloseRouter Nano Banana Pro) return a
+    # terminal result Hash from #submit and skip the poll cycle entirely.
+    # Async adapters (Flux, Atlas) return a String external_id.
+    if adapter.synchronous?
+      LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: synchronous submit complete via #{adapter.name}"
+      # Persist params snapshot (provider, prompt, retry counters) BEFORE
+      # marking the task done. provider snapshot is informational only for
+      # sync tasks (poll never runs, no adapter_for dispatch), but it lets
+      # `бот задачи` + log forensics see which backend served the request.
+      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
+      return deliver_sync_result(task, api, submit_result)
+    end
+
+    task_id = submit_result
     LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted #{task_id} via #{adapter.name}"
     ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: task_id, params: p.to_json) }
     :pending
+  end
+
+  # Synchronous-path delivery. Mirrors the `when Hash` arm of poll_and_deliver
+  # without the retry/agent-event-after-retries plumbing.
+  #
+  # `generation_retries` accounting is intentionally skipped here: it counts
+  # poll-time `:retry` returns (transient backend hiccups during async
+  # generation), which sync adapters can NEVER produce by definition. The
+  # other retry axis — `submit_failures` — runs upstream in `bail_or_retry`
+  # and either ultimately succeeds (we reach this method) or fails the task,
+  # so it never reaches the success branch either. No agent_event needed.
+  def deliver_sync_result(task, api, result)
+    LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result[:url]}"
+    ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
+    p = task.params_hash
+    caption = "🎨 #{p['prompt'].to_s.empty? ? p['request'] : p['prompt']}"
+    send_photo(api, task.chat_id, result[:url], caption)
+    :done
   end
 
   # Increment a step-failure counter; if cap reached, fail+notify; otherwise re-raise so

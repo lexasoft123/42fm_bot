@@ -1,9 +1,10 @@
 require 'httparty'
 
-# Generic HTTP client for Atlas Cloud's API surface (api.atlascloud.ai).
-# Stateless except for config; thin wrapper over HTTParty with shared auth +
-# logging. Reusable by any Atlas-backed service — image gen today, LLMs /
-# embeddings / video tomorrow — by passing a different config dict.
+# Generic Bearer+JSON HTTP client for model-provider APIs. Stateless except
+# for config; thin wrapper over HTTParty with shared auth + logging.
+# In-codebase consumers: AtlasAdapter (image gen), CloseRouterImgAdapter
+# (Nano Banana Pro). Reusable by any future Bearer-token, JSON-body model
+# provider — just pass a different cfg + tag.
 #
 # Asymmetry between #post (raises on non-2xx) and #get (returns [code, body],
 # swallows transient SSL/timeout) is intentional: submit failures should
@@ -13,8 +14,8 @@ require 'httparty'
 # #post does NOT rescue OpenSSL::SSL::SSLError / Net::OpenTimeout /
 # Errno::ECONNRESET — a TLS error during submit raises the raw exception, not
 # the formatted "<tag> POST ..." string. Matches existing FluxClient behavior.
-class AtlasClient
-  def initialize(cfg, tag: 'AtlasClient')
+class ModelProviderClient
+  def initialize(cfg, tag: 'ModelProvider')
     @base_url = cfg.fetch('api_url')
     @api_key  = cfg.fetch('api_key')
     @tag      = tag
@@ -25,7 +26,7 @@ class AtlasClient
     resp = HTTParty.post("#{@base_url}#{path}",
       body: body.to_json, headers: headers, timeout: timeout)
     log("POST #{path}", t0, resp.code)
-    raise "#{@tag} POST #{path}: #{resp.code} #{resp.body}" unless resp.code.between?(200, 299)
+    raise "#{@tag} POST #{path}: #{resp.code} #{redact_body(resp.body)}" unless resp.code.between?(200, 299)
     resp.parsed_response
   end
 
@@ -51,5 +52,18 @@ class AtlasClient
   def log(label, t0, code)
     ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
     LOGGER.debug "#{@tag} #{label} took=#{ms}ms code=#{code}"
+  end
+
+  # Redact + truncate a response body for safe inclusion in a raised exception
+  # message. Upstreams sometimes echo the request body back inside their 4xx
+  # response (especially gateways like CloseRouter). For image-edit requests
+  # that body contains `data:image/...;base64,<userImageBase64>` blobs which
+  # would otherwise propagate to bot.log + the DB + a user-facing chat reply
+  # via TaskRunner's notify_chat. Same defensive pattern as
+  # SunoClient#format_suno_error.
+  def redact_body(body)
+    s = body.to_s
+    s = s.gsub(%r{data:[^,]+;base64,[A-Za-z0-9+/=]+}, '<base64-redacted>')
+    s.length > 400 ? "#{s[0..400]}...(truncated)" : s
   end
 end

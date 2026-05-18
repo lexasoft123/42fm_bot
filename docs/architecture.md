@@ -118,12 +118,13 @@ bin/bot
 │   │   └── image_gen_handler.rb # Image-gen background task: LLM prompt → adapter.submit → poll → deliver photo (provider-agnostic)
 │   ├── task_runner.rb         # Generic DB-backed task poller + handler registry
 │   ├── suno_client.rb         # Suno AI API client (submit, poll, compose)
-│   ├── atlas_client.rb        # Generic Atlas Cloud HTTP client (auth + post/get); reusable across services
+│   ├── model_provider_client.rb # Generic Bearer+JSON HTTP client (formerly AtlasClient); used by Atlas + CloseRouter adapters
 │   ├── image_gen.rb           # Top-level facade: ADAPTERS registry + current_adapter / adapter_for(snapshot)
 │   ├── image_gen/
-│   │   ├── adapter.rb         # Base class: submit / poll_once / prompt_template(:t2i|:edit) / name
+│   │   ├── adapter.rb         # Base class: submit / poll_once / prompt_template(:t2i|:edit) / name / synchronous?
 │   │   ├── flux_adapter.rb    # FLUX 2 via api.bfl.ai (absorbs former FluxClient + FLUX-tuned templates)
-│   │   └── atlas_adapter.rb   # Atlas Cloud (default Wan 2.7) via AtlasClient + Wan-tuned templates
+│   │   ├── atlas_adapter.rb   # Atlas Cloud (default Wan 2.7) via ModelProviderClient + Wan-tuned templates
+│   │   └── closerouter_adapter.rb # CloseRouter Nano Banana Pro (synchronous /v1/images/generations; no polling)
 │   └── robot/
 │       └── robocoder.rb       # Base64+XOR encode/decode util
 ├── models/
@@ -401,14 +402,16 @@ Source resolution mirrors `cover_art` (explicit `suno_task_id` → reply target'
 #### Combined "song + cover art" requests
 All three song-producing tools (`compose_song`, `add_vocals`, `cover_audio`) accept `with_cover_art: true`. After the song's `:done` polling, `SunoTaskHandler#maybe_chain_cover_art` enqueues a chained `suno_cover_art` task pointing at the just-completed song's `external_id`. Dedup via `json_extract(params, '$.source_task_id')` lookup. Charged against the `suno` rate-limit bucket (RateLimiter counts all `suno_*` task types); silently dropped at chain time if the bucket is exhausted.
 
-### Image generation — `lib/image_gen/` + `lib/atlas_client.rb`
+### Image generation — `lib/image_gen/` + `lib/model_provider_client.rb`
 Service-adapter layer. The `ImageGenTaskHandler` is provider-agnostic; concrete backends live as `ImageGen::Adapter` subclasses, picked at runtime from `Settings.image_gen['provider']`.
 
-- **`ImageGen::Adapter`** (`lib/image_gen/adapter.rb`) — base class. Three abstract methods: `submit(prompt:, input_image:, input_media_type:)`, `poll_once(external_id)`, `prompt_template(:text_to_image|:edit)`. Plus `name` (returns `self.class::NAME`) for the provider-snapshot dispatch.
-- **`ImageGen` facade** (`lib/image_gen.rb`) — `ADAPTERS = { 'flux' => FluxAdapter, 'atlas' => AtlasAdapter }.freeze`. Submit-side: `current_adapter` reads `Settings.image_gen['provider']`. Poll-side: `adapter_for(snapshot)` resolves by the value snapshotted into `task.params['provider']` at submit time, so a config flip mid-flight doesn't reroute polling to a different prediction id space (legacy rows fall back to `current_adapter`).
-- **`ImageGen::FluxAdapter`** (`lib/image_gen/flux_adapter.rb`) — FLUX 2 via `api.bfl.ai`. Submit POST to `/v1/{model}`, poll GET `/v1/get_result`. Uses `safety_tolerance: 5` and `output_format: 'jpeg'`. Owns the FLUX-tuned prompt-enrichment templates. Auth header is `x-key`. NOT built on AtlasClient (different host + auth scheme). Has a one-release back-compat shim that reads top-level `Settings.flux` if `image_gen.providers.flux` is absent — removed once prod settings.yml is migrated.
+- **`ImageGen::Adapter`** (`lib/image_gen/adapter.rb`) — base class. Four abstract-or-overridable methods: `submit(prompt:, input_image:, input_media_type:)`, `poll_once(external_id)`, `prompt_template(:text_to_image|:edit)`, plus `name` (returns `self.class::NAME`) and `synchronous?` (defaults `false`).
+- **`ImageGen` facade** (`lib/image_gen.rb`) — `ADAPTERS = { 'flux' => FluxAdapter, 'atlas' => AtlasAdapter, 'closerouter' => CloseRouterImgAdapter }.freeze`. Submit-side: `current_adapter` reads `Settings.image_gen['provider']`. Poll-side: `adapter_for(snapshot)` resolves by the value snapshotted into `task.params['provider']` at submit time, so a config flip mid-flight doesn't reroute polling to a different prediction id space (legacy rows fall back to `current_adapter`).
+- **Synchronous adapters** — when `Adapter#synchronous?` returns `true`, `#submit` returns a terminal result Hash (`{url:, completed:true}`) instead of an external_id String. `ImageGenTaskHandler#deliver_sync_result` short-circuits the poll cycle and marks the task done in one call. `#poll_once` raises `NotImplementedError` if reached. Only `CloseRouterImgAdapter` is sync today; Flux + Atlas stay async with the existing `:pending` / `:retry` / `:failed` / `{url:}` poll return contract.
+- **`ImageGen::FluxAdapter`** (`lib/image_gen/flux_adapter.rb`) — FLUX 2 via `api.bfl.ai`. Submit POST to `/v1/{model}`, poll GET `/v1/get_result`. Uses `safety_tolerance: 5` and `output_format: 'jpeg'`. Owns the FLUX-tuned prompt-enrichment templates. Auth header is `x-key`. NOT built on `ModelProviderClient` (different host + auth scheme). Has a one-release back-compat shim that reads top-level `Settings.flux` if `image_gen.providers.flux` is absent — removed once prod settings.yml is migrated.
 - **`ImageGen::AtlasAdapter`** (`lib/image_gen/atlas_adapter.rb`) — Atlas Cloud (default model: `alibaba/wan-2.7/text-to-image` + `alibaba/wan-2.7/image-edit`, configurable). Submit POST to `/api/v1/model/generateImage`, poll GET `/api/v1/model/prediction/{id}`. **Request body is FLAT**: `{model, prompt, width, height}` for T2I, `{model, prompt, image: 'data:image/<type>;base64,<b64>'}` for edit (the `image:` field also accepts URLs; min resolution 240×240). Atlas's published `input.{...}` example shape silently fails — submit returns 200+id but poll instantly returns masked "Field required" — so we use the flat shape, confirmed via live probe. Status mapping: `processing|queued` → `:pending`, `completed|succeeded` → `{url:}`, `failed` → `:failed`, anything else → log once + `:pending`. Response wraps under `data.{...}`; adapter accepts both wrapped and unwrapped defensively. Submit-response id resolution accepts both `data.id` (canonical) and top-level `id`. Owns Wan-tuned prompt templates.
-- **`AtlasClient`** (`lib/atlas_client.rb`) — generic HTTP wrapper for Atlas Cloud's API surface. Constructor takes a config dict (`api_url`, `api_key`) + `tag:` for greppable logs (`AtlasClient` default; `AtlasLLM`/`AtlasEmbed` for future Atlas-backed services). Asymmetry: `post` raises on non-2xx (so handler `bail_or_retry` engages); `get` returns `[code, body]` and swallows `OpenSSL::SSL::SSLError`/`Net::OpenTimeout`/`Errno::ECONNRESET` (so polling degrades to `:pending` on transient blips). `post` does NOT swallow SSL errors — preserves FluxAdapter's existing behavior; submit-side TLS resilience can be retrofitted with a per-call retry wrapper if needed.
+- **`ImageGen::CloseRouterImgAdapter`** (`lib/image_gen/closerouter_adapter.rb`) — CloseRouter Nano Banana Pro (Google) via `api.closerouter.dev`. Default models: `google/nano-banana-pro` (T2I) and `google/nano-banana-pro-edit` (image edit) — two separate model ids, NOT a flag on the base model. **Synchronous**: single `POST /v1/images/generations` returns `{data: [{url: 'https://cdn/...png', ...}]}` directly; adapter extracts `data[0].url` and returns `{url:, completed:true}`. Edit body uses plural `images: ['data:image/<type>;base64,<b64>']` (array; supports multi-image input though we send one). `synchronous? = true` so `ImageGenTaskHandler` skips the poll cycle. Owns Nano-Banana-tuned prompt-enrichment templates (Russian-aware, names-preserved, FLUX-style structure conventions).
+- **`ModelProviderClient`** (`lib/model_provider_client.rb`) — generic Bearer+JSON HTTP wrapper (formerly `AtlasClient`; renamed because it's no longer Atlas-specific). Constructor takes a config dict (`api_url`, `api_key`) + `tag:` for greppable logs (`'AtlasImg'`, `'CloseRouterImg'`, future `'CloseRouterVideo'`). Asymmetry: `post` raises on non-2xx (so handler `bail_or_retry` engages); `get` returns `[code, body]` and swallows `OpenSSL::SSL::SSLError`/`Net::OpenTimeout`/`Errno::ECONNRESET` (so polling degrades to `:pending` on transient blips). `post` does NOT swallow SSL errors — preserves FluxAdapter's existing behavior; submit-side TLS resilience can be retrofitted with a per-call retry wrapper if needed.
 
 ### TtsService — `lib/tts_service.rb`
 Facade over Polly. `TtsService.speak(text, voice:, speed:, minus:, track_id:)` generates OGG and returns the public URL.
@@ -459,7 +462,8 @@ Inline-keyboard menu in the super-admin's private chat for runtime bot administr
 | lenta.ru | RSS | None |
 | Suno AI (sunoapi.org) | REST/HTTParty | Bearer token |
 | FLUX 2 (api.bfl.ai) | REST/HTTParty | x-key header |
-| Atlas Cloud (api.atlascloud.ai) | REST via AtlasClient | Bearer token |
+| Atlas Cloud (api.atlascloud.ai) | REST via ModelProviderClient | Bearer token |
+| CloseRouter (api.closerouter.dev) | REST via ModelProviderClient (image gen) + GptMaster openai-compat (LLMs) | Bearer token |
 
 ---
 
@@ -658,7 +662,7 @@ All output is unified in a single log file configured via `settings.yml`:
 
 `AppConfigurator#setup_logging` runs first in `configure`, builds the loggers from settings, and passes the main logger to `DatabaseConnector`. The global `LOGGER` and `COMPACT_LOGGER` constants are assigned in `bot.rb` after `configure` returns.
 
-**Chat-id prefix convention.** Every per-message / per-chat / per-task log line is prefixed with `[chat=<id>]` so one grep reconstructs the full timeline for a single chat (e.g. `grep 'chat=-1001273623296' log/bot.log`). Agent turns carry an additional `[AGENT]` tag. Generic / singleton services without chat context (radio socket, FluxAdapter, AtlasClient, SunoClient, Gogolmogol, Polly, etc.) intentionally log without the prefix — their per-call context is already surrounded by chat-tagged lines from the caller.
+**Chat-id prefix convention.** Every per-message / per-chat / per-task log line is prefixed with `[chat=<id>]` so one grep reconstructs the full timeline for a single chat (e.g. `grep 'chat=-1001273623296' log/bot.log`). Agent turns carry an additional `[AGENT]` tag. Generic / singleton services without chat context (radio socket, FluxAdapter, ModelProviderClient, SunoClient, Gogolmogol, Polly, etc.) intentionally log without the prefix — their per-call context is already surrounded by chat-tagged lines from the caller.
 
 Log rotation: size-based — rotates at `max_size_mb`, keeps `keep_files` old files (e.g. `bot.log.0`, `bot.log.1`). The `log/` directory is created automatically at startup.
 

@@ -1,6 +1,7 @@
 require_relative 'image_gen/adapter'
 require_relative 'image_gen/flux_adapter'
 require_relative 'image_gen/atlas_adapter'
+require_relative 'image_gen/closerouter_adapter'
 
 # Image-generation facade. Picks an adapter from Settings.image_gen and
 # returns a fresh instance per call (adapters are cheap to construct, mostly
@@ -12,7 +13,11 @@ require_relative 'image_gen/atlas_adapter'
 # operator changing image_gen.provider during the prod cutover) doesn't route
 # the poll to a different prediction id space.
 module ImageGen
-  ADAPTERS = { 'flux' => FluxAdapter, 'atlas' => AtlasAdapter }.freeze
+  ADAPTERS = {
+    'flux'        => FluxAdapter,
+    'atlas'       => AtlasAdapter,
+    'closerouter' => CloseRouterImgAdapter,
+  }.freeze
 
   def self.current_adapter
     name = Settings.image_gen&.dig('provider') or

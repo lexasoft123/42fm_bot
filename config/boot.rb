@@ -4,7 +4,7 @@ Dir.chdir APP_PATH
 
 require './lib/settings'
 require './lib/log_timing'
-require './lib/atlas_client'
+require './lib/model_provider_client'
 require 'telegram/bot'
 require './lib/radio'
 require './lib/admin_menu'

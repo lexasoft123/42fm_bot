@@ -14,7 +14,7 @@ unless Settings.respond_to?(:flux)
   Settings.singleton_class.send(:define_method, :flux=) { |v| @flux = v }
 end
 
-require_relative '../lib/atlas_client'
+require_relative '../lib/model_provider_client'
 require_relative '../lib/image_gen'
 
 class ImageGenFactoryTest < Minitest::Test
@@ -127,8 +127,8 @@ class FluxAdapterBackCompatTest < Minitest::Test
   end
 end
 
-# AtlasAdapter — stubs AtlasClient at the class level (not HTTParty) so we
-# test adapter logic above the HTTP layer; AtlasClient itself is covered by
+# AtlasAdapter — stubs ModelProviderClient at the class level (not HTTParty) so we
+# test adapter logic above the HTTP layer; ModelProviderClient itself is covered by
 # atlas_client_test.rb.
 class AtlasAdapterTest < Minitest::Test
   ATLAS_CFG = {
@@ -144,7 +144,7 @@ class AtlasAdapterTest < Minitest::Test
     }
   }.freeze
 
-  class FakeAtlasClient
+  class FakeModelProviderClient
     attr_reader :calls
     def initialize(post_returns: { 'id' => 'pred-1' }, get_returns: [200, { 'status' => 'processing' }])
       @post_returns = post_returns
@@ -182,18 +182,18 @@ class AtlasAdapterTest < Minitest::Test
   end
 
   def with_fake_client(client)
-    real = AtlasClient.method(:new)
-    AtlasClient.singleton_class.send(:define_method, :new) { |_cfg, **_| client }
+    real = ModelProviderClient.method(:new)
+    ModelProviderClient.singleton_class.send(:define_method, :new) { |_cfg, **_| client }
     yield
   ensure
-    AtlasClient.singleton_class.send(:define_method, :new, real)
+    ModelProviderClient.singleton_class.send(:define_method, :new, real)
   end
 
   # submit -----------------------------------------------------------
 
   def test_submit_text_to_image_sends_correct_body_shape
     # Live probe 2026-04-30: flat shape, NOT input.{} wrapper.
-    fake = FakeAtlasClient.new(post_returns: { 'data' => { 'id' => 'abc' } })
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'abc' } })
     id = with_fake_client(fake) do
       ImageGen::AtlasAdapter.new.submit(prompt: 'cat in hat')
     end
@@ -210,7 +210,7 @@ class AtlasAdapterTest < Minitest::Test
   end
 
   def test_submit_image_edit_uses_edit_model_and_data_uri
-    fake = FakeAtlasClient.new(post_returns: { 'data' => { 'id' => 'edit-id' } })
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'edit-id' } })
     id = with_fake_client(fake) do
       ImageGen::AtlasAdapter.new.submit(
         prompt: 'add sunglasses',
@@ -230,13 +230,13 @@ class AtlasAdapterTest < Minitest::Test
 
   def test_submit_handles_unwrapped_id_response_shape
     # Defensive: if Atlas ever returns the id at top level instead of data.id.
-    fake = FakeAtlasClient.new(post_returns: { 'id' => 'top-level' })
+    fake = FakeModelProviderClient.new(post_returns: { 'id' => 'top-level' })
     id = with_fake_client(fake) { ImageGen::AtlasAdapter.new.submit(prompt: 'x') }
     assert_equal 'top-level', id
   end
 
   def test_submit_raises_when_no_id_field_found
-    fake = FakeAtlasClient.new(post_returns: { 'something_else' => 'oops' })
+    fake = FakeModelProviderClient.new(post_returns: { 'something_else' => 'oops' })
     err = assert_raises(RuntimeError) do
       with_fake_client(fake) { ImageGen::AtlasAdapter.new.submit(prompt: 'x') }
     end
@@ -250,7 +250,7 @@ class AtlasAdapterTest < Minitest::Test
     cfg['providers']['atlas']['height'] = 768
     Settings.image_gen = cfg
 
-    fake = FakeAtlasClient.new(post_returns: { 'data' => { 'id' => 'x' } })
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'x' } })
     with_fake_client(fake) { ImageGen::AtlasAdapter.new.submit(prompt: 'y') }
 
     _, _, body = fake.calls.first
@@ -265,7 +265,7 @@ class AtlasAdapterTest < Minitest::Test
 
   def test_poll_completed_returns_url
     body = { 'code' => 200, 'data' => { 'status' => 'completed', 'outputs' => ['https://x.png'] } }
-    fake = FakeAtlasClient.new(get_returns: [200, body])
+    fake = FakeModelProviderClient.new(get_returns: [200, body])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('pred-1') }
     assert_equal({ url: 'https://x.png' }, out)
     assert_equal '/api/v1/model/prediction/pred-1', fake.calls.first[1]
@@ -273,39 +273,39 @@ class AtlasAdapterTest < Minitest::Test
 
   def test_poll_succeeded_returns_url
     body = { 'data' => { 'status' => 'succeeded', 'outputs' => ['https://y.png'] } }
-    fake = FakeAtlasClient.new(get_returns: [200, body])
+    fake = FakeModelProviderClient.new(get_returns: [200, body])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('pred-1') }
     assert_equal({ url: 'https://y.png' }, out)
   end
 
   def test_poll_processing_returns_pending
-    fake = FakeAtlasClient.new(get_returns: [200, { 'data' => { 'status' => 'processing' } }])
+    fake = FakeModelProviderClient.new(get_returns: [200, { 'data' => { 'status' => 'processing' } }])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
     assert_equal :pending, out
   end
 
   def test_poll_queued_returns_pending
-    fake = FakeAtlasClient.new(get_returns: [200, { 'data' => { 'status' => 'queued' } }])
+    fake = FakeModelProviderClient.new(get_returns: [200, { 'data' => { 'status' => 'queued' } }])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
     assert_equal :pending, out
   end
 
   def test_poll_failed_returns_failed
     body = { 'code' => 400, 'data' => { 'status' => 'failed', 'error' => 'oops' } }
-    fake = FakeAtlasClient.new(get_returns: [200, body])
+    fake = FakeModelProviderClient.new(get_returns: [200, body])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
     assert_equal :failed, out
   end
 
   def test_poll_unknown_status_logs_once_returns_pending
-    fake = FakeAtlasClient.new(get_returns: [200, { 'data' => { 'status' => 'mystery_state' } }])
+    fake = FakeModelProviderClient.new(get_returns: [200, { 'data' => { 'status' => 'mystery_state' } }])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('uniq-id-mystery') }
     assert_equal :pending, out
   end
 
   def test_poll_transient_ssl_returns_pending
-    # AtlasClient#get returns [nil, nil] on SSL/timeout. Adapter treats as :pending.
-    fake = FakeAtlasClient.new(get_returns: [nil, nil])
+    # ModelProviderClient#get returns [nil, nil] on SSL/timeout. Adapter treats as :pending.
+    fake = FakeModelProviderClient.new(get_returns: [nil, nil])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
     assert_equal :pending, out
   end
@@ -314,7 +314,7 @@ class AtlasAdapterTest < Minitest::Test
     # Defensive: status says done but no URL means we can't deliver. Mark
     # failed rather than crash later trying to download nothing.
     body = { 'data' => { 'status' => 'completed', 'outputs' => [] } }
-    fake = FakeAtlasClient.new(get_returns: [200, body])
+    fake = FakeModelProviderClient.new(get_returns: [200, body])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
     assert_equal :failed, out
   end
@@ -322,7 +322,7 @@ class AtlasAdapterTest < Minitest::Test
   def test_poll_tolerates_unwrapped_response_shape
     # If Atlas ever returns the prediction at top level (instead of data.{}),
     # adapter still handles it.
-    fake = FakeAtlasClient.new(get_returns: [200, { 'status' => 'completed', 'outputs' => ['https://z.png'] }])
+    fake = FakeModelProviderClient.new(get_returns: [200, { 'status' => 'completed', 'outputs' => ['https://z.png'] }])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
     assert_equal({ url: 'https://z.png' }, out)
   end
@@ -330,7 +330,7 @@ class AtlasAdapterTest < Minitest::Test
   # prompt_template --------------------------------------------------
 
   def test_prompt_template_text_to_image_mentions_wan_and_has_placeholders
-    fake = FakeAtlasClient.new
+    fake = FakeModelProviderClient.new
     template = with_fake_client(fake) { ImageGen::AtlasAdapter.new.prompt_template(:text_to_image) }
     assert_match(/Wan 2\.7/, template)
     assert_match(/%\{request\}/, template)
@@ -340,10 +340,127 @@ class AtlasAdapterTest < Minitest::Test
   end
 
   def test_prompt_template_edit_mode_is_imperative
-    fake = FakeAtlasClient.new
+    fake = FakeModelProviderClient.new
     template = with_fake_client(fake) { ImageGen::AtlasAdapter.new.prompt_template(:edit) }
     assert_match(/image-edit/, template)
     assert_match(/Wan/, template)
+    assert_match(/%\{request\}/, template)
+  end
+end
+
+# CloseRouterImgAdapter unit tests — same FakeModelProviderClient stubbing
+# pattern as AtlasAdapter. Verifies request body shape (singular T2I vs plural
+# `images` for edit), URL extraction from data[0].url, synchronous? predicate,
+# and poll_once defensive raise.
+class CloseRouterImgAdapterTest < Minitest::Test
+  CR_CFG = {
+    'provider'  => 'closerouter',
+    'providers' => {
+      'closerouter' => {
+        'api_url' => 'https://api.closerouter.dev',
+        'api_key' => 'sk-test-cr',
+        'text_to_image_model' => 'google/nano-banana-pro',
+        'image_edit_model'    => 'google/nano-banana-pro-edit',
+      }
+    }
+  }.freeze
+
+  class FakeModelProviderClient
+    attr_reader :calls
+    def initialize(post_returns: { 'data' => [{ 'url' => 'https://cdn/x.png' }] })
+      @post_returns = post_returns
+      @calls = []
+    end
+    def post(path, body, **_); @calls << [:post, path, body]; @post_returns; end
+  end
+
+  def setup
+    Settings.image_gen = CR_CFG
+  end
+
+  def teardown
+    Settings.image_gen = nil
+  end
+
+  def with_fake_client(client)
+    real = ModelProviderClient.method(:new)
+    ModelProviderClient.singleton_class.send(:define_method, :new) { |_cfg, **_| client }
+    yield
+  ensure
+    ModelProviderClient.singleton_class.send(:define_method, :new, real)
+  end
+
+  def test_synchronous_predicate_is_true
+    fake = FakeModelProviderClient.new
+    adapter = with_fake_client(fake) { ImageGen::CloseRouterImgAdapter.new }
+    assert adapter.synchronous?, 'CloseRouter image generations return synchronously'
+  end
+
+  def test_submit_text_to_image_sends_prompt_and_t2i_model
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => [{ 'url' => 'https://cdn/t2i.png' }] })
+    result = with_fake_client(fake) do
+      ImageGen::CloseRouterImgAdapter.new.submit(prompt: 'cat in hat')
+    end
+    method, path, body = fake.calls.first
+    assert_equal :post, method
+    assert_equal '/v1/images/generations', path
+    assert_equal 'google/nano-banana-pro', body[:model]
+    assert_equal 'cat in hat', body[:prompt]
+    refute body.key?(:images), 'T2I body must not include images param'
+    assert_equal({ url: 'https://cdn/t2i.png' }, result)
+  end
+
+  def test_submit_edit_sends_plural_images_and_edit_model
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => [{ 'url' => 'https://cdn/edit.png' }] })
+    result = with_fake_client(fake) do
+      ImageGen::CloseRouterImgAdapter.new.submit(
+        prompt: 'add a hat',
+        input_image: 'ZmFrZWJ5dGVz', # base64 'fakebytes'
+        input_media_type: 'image/png',
+      )
+    end
+    _method, _path, body = fake.calls.first
+    assert_equal 'google/nano-banana-pro-edit', body[:model]
+    assert_equal 'add a hat', body[:prompt]
+    assert_kind_of Array, body[:images], 'edit body must use plural `images` array'
+    assert_equal 1, body[:images].length
+    assert_equal 'data:image/png;base64,ZmFrZWJ5dGVz', body[:images].first
+    assert_equal({ url: 'https://cdn/edit.png' }, result)
+  end
+
+  def test_submit_raises_when_response_missing_data_url
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => [] })
+    err = assert_raises(RuntimeError) do
+      with_fake_client(fake) { ImageGen::CloseRouterImgAdapter.new.submit(prompt: 'x') }
+    end
+    assert_match(/no data\[0\]\.url/, err.message)
+  end
+
+  def test_initialize_raises_when_closerouter_block_missing
+    Settings.image_gen = { 'provider' => 'closerouter', 'providers' => {} }
+    err = assert_raises(RuntimeError) { ImageGen::CloseRouterImgAdapter.new }
+    assert_match(/closerouter image config missing/, err.message)
+  end
+
+  def test_initialize_raises_when_api_key_missing
+    cfg = Marshal.load(Marshal.dump(CR_CFG))
+    cfg['providers']['closerouter'].delete('api_key')
+    Settings.image_gen = cfg
+    err = assert_raises(RuntimeError) { ImageGen::CloseRouterImgAdapter.new }
+    assert_match(/api_key/, err.message)
+  end
+
+  def test_poll_once_raises_for_synchronous_adapter
+    fake = FakeModelProviderClient.new
+    adapter = with_fake_client(fake) { ImageGen::CloseRouterImgAdapter.new }
+    err = assert_raises(NotImplementedError) { adapter.poll_once('whatever') }
+    assert_match(/synchronous/, err.message)
+  end
+
+  def test_prompt_template_mentions_nano_banana
+    fake = FakeModelProviderClient.new
+    template = with_fake_client(fake) { ImageGen::CloseRouterImgAdapter.new.prompt_template(:text_to_image) }
+    assert_match(/Nano Banana/, template)
     assert_match(/%\{request\}/, template)
   end
 end
@@ -352,13 +469,14 @@ end
 # real ImageGenTaskHandler without hitting any backend.
 class FakeAdapter < ImageGen::Adapter
   NAME = 'fake'
-  attr_accessor :submit_calls, :poll_calls, :submit_returns, :poll_returns
+  attr_accessor :submit_calls, :poll_calls, :submit_returns, :poll_returns, :sync
 
-  def initialize(submit_returns: 'fake-extid', poll_returns: { url: 'http://x/img.jpg' })
+  def initialize(submit_returns: 'fake-extid', poll_returns: { url: 'http://x/img.jpg' }, sync: false)
     @submit_calls   = []
     @poll_calls     = []
     @submit_returns = submit_returns
     @poll_returns   = poll_returns
+    @sync           = sync
   end
 
   def submit(prompt:, input_image: nil, input_media_type: nil)
@@ -373,6 +491,10 @@ class FakeAdapter < ImageGen::Adapter
 
   def prompt_template(mode)
     "[#{mode}] %{request} | %{context} | %{knowledge}"
+  end
+
+  def synchronous?
+    @sync
   end
 end
 
@@ -523,6 +645,25 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal 'done', task.status
 
     assert_equal [task.external_id], @fake_adapter.poll_calls
+    assert_equal :sendPhoto, @bot.calls.last[0]
+  end
+
+  # Synchronous adapter path: submit returns {url:, completed:true}, handler
+  # short-circuits to delivery and marks the task done in ONE call (no
+  # external_id written, poll_once never invoked).
+  def test_synchronous_adapter_short_circuits_to_done
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/sync.png' }
+
+    task = fresh_task
+    result = ImageGenTaskHandler.new.call(task, @bot)
+
+    assert_equal :done, result
+    task.reload
+    assert_equal 'done', task.status
+    assert_nil task.external_id, 'synchronous adapter writes no external_id'
+    assert_equal 'fake', task.params_hash['provider']
+    assert_empty @fake_adapter.poll_calls, 'poll_once must not be called for synchronous adapter'
     assert_equal :sendPhoto, @bot.calls.last[0]
   end
 

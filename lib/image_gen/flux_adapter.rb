@@ -5,8 +5,8 @@ module ImageGen
   # FLUX 2 image generation via api.bfl.ai. Absorbed from the former top-level
   # FluxClient class. Owns the FLUX-specific LLM prompt-enrichment templates.
   #
-  # Does NOT use AtlasClient — FLUX runs on a different host with a different
-  # auth header (`x-key` instead of `Authorization: Bearer`).
+  # Does NOT use ModelProviderClient — FLUX runs on a different host with a
+  # different auth header (`x-key` instead of `Authorization: Bearer`).
   #
   # Config read order (back-compat shim — removed in step 16 once prod is
   # migrated): image_gen.providers.flux → top-level Settings.flux.
