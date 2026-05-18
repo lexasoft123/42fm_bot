@@ -46,28 +46,29 @@ chat_gpt:
       provider: deepseek
       model: deepseek-v4-pro
       max_tokens: 16000
-    # Suno handler-side LLM calls — Sonnet > DeepSeek on both jobs in our
-    # testing (better rhyme/meter/genre-convention adherence for lyrics;
-    # richer style-vocabulary recall for tags — distinguishing e.g.
-    # Rammstein vs OOMPH style traits beyond shared-genre baseline).
+    # Suno handler-side LLM calls — Sonnet > DeepSeek for both lyrics and
+    # tags in our testing (better rhyme/meter/genre-convention adherence
+    # for lyrics; richer style-vocabulary recall for tags — distinguishing
+    # e.g. Rammstein vs OOMPH style traits beyond shared-genre baseline).
     #
-    # Fires for two purposes per Suno gen:
-    # 1. `suno_lyrics` — composes lyrics from chat context + theme when
-    #    `params['lyrics']` is empty (the COMMON path — compose_song agent
-    #    tool actively instructs the agent to leave `lyrics` empty by
-    #    default so the dedicated composer runs). Skipped when the user
-    #    supplied verbatim text or the agent is editing prior output.
-    # 2. `suno_tags` — composes style tags (always; the agent's
-    #    compose_song tool does NOT take a `tags` arg — handler-side
-    #    enrichment is structural, not heuristic). Uses TAGS_PROMPT in
-    #    suno_handler.rb with the artist-emulation rule + Rammstein
-    #    exemplar.
+    # Fires for two purposes per Suno gen depending on path:
+    # 1. `suno_compose` — common path. ONE combined call producing both
+    #    lyrics and tags in <lyrics>...</lyrics><tags>...</tags> XML
+    #    blocks. Triggered when `params['lyrics']` is empty (compose_song
+    #    agent tool instructs the agent to leave `lyrics` empty by default
+    #    so the dedicated composer runs). Coherence win: same model holds
+    #    the actual lyrical mood/pacing in context when picking tags.
+    #    See suno_handler.rb#compose_lyrics_and_tags.
+    # 2. `suno_tags` — fallback path. Tags-only call when the user
+    #    supplied verbatim lyrics (no composition needed). Uses
+    #    TAGS_PROMPT with the artist-emulation rule + Rammstein exemplar.
+    #    See suno_handler.rb#resolve_tags.
     #
-    # Cost: typical ~$0.07–0.12 per song combined (two synchronous calls:
-    # ~$0.05–0.10 lyrics + ~$0.01–0.02 tags, both @ $3/$15 per Mtok).
-    # Worst case at max_tokens=16000 output for lyrics is ~$0.24 + tags.
-    # See project_suno_followups memory for the combined-call refactor
-    # that would collapse these into one Sonnet call.
+    # Cost: typical ~$0.05-0.08 per song on the common (suno_compose)
+    # path — one synchronous call @ $3/$15 per Mtok, ~5k input ctx + 3-5k
+    # output (lyrics + tags). Worst case at max_tokens=16000 output is
+    # ~$0.24. Verbatim-lyrics path is just the tiny suno_tags call
+    # (~$0.01-0.02).
     lyrics:
       provider: anthropic
       model: claude-sonnet-4-6
@@ -233,7 +234,7 @@ suno:
     - Punctuation влияет на pacing сильнее заглавных букв: многоточие "..." замедляет, восклицательный знак "!" даёт ударный акцент.
     - Для электронных/solo секций допустима ритм-нотация: ". . . ! . ." — точки = тихий тик, "!" = ударный акцент.
     - Bare [Bridge] часто плохо озвучивается Suno — для инструментальной перебивки предпочитай [Instrumental Bridge] или [Solo].
-    Верни ТОЛЬКО текст с тегами секций. Доступные маркеры — используй только нужные жанру: [Intro], [Verse], [Pre-Chorus], [Chorus], [Hook], [Post-Chorus], [Bridge], [Instrumental Bridge], [Interlude], [Break], [Build], [Drop], [Solo], [Instrumental], [Spoken Word], [Whisper], [Ad-lib], [Harmony], [Outro]. Без пояснений.
+    Используй только маркеры секций, нужные для выбранного жанра. Доступные маркеры: [Intro], [Verse], [Pre-Chorus], [Chorus], [Hook], [Post-Chorus], [Bridge], [Instrumental Bridge], [Interlude], [Break], [Build], [Drop], [Solo], [Instrumental], [Spoken Word], [Whisper], [Ad-lib], [Harmony], [Outro].
 
 flux:
   api_url: 'https://api.bfl.ai'

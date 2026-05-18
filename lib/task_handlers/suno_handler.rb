@@ -120,7 +120,7 @@ class SunoTaskHandler
     Например для Rammstein: "industrial metal, Tanz-Metall, slow heavy doom-paced stomp, mid-tempo grinding rhythm, heavy distorted thick palm-muted downtuned riffs, prominent driving bass, thunderous hammering drums, cinematic orchestral synth pads, deep low clean baritone German vocals, operatic delivery, rolled R consonants, declamatory spoken-word verses, dramatic vibrato, glossy polished production"
     Например для Цоя: "russian post-punk, 80s Soviet new wave, melancholic deadpan baritone, monotone delivery, jangly clean guitar, minor key, steady simple drums, anthemic refrain, restrained sparse arrangement"
     Если даны текст/название песни — определи по ним подходящий стиль.
-    Верни ТОЛЬКО теги через запятую, без пояснений. Минимум 8 тегов, целься в 180-280 символов суммарно (для эмуляции конкретного артиста лучше ближе к верхней границе — Suno нужно больше distinctive descriptors, чтобы не скатиться к жанровому среднему). Без имён артистов!
+    Когда используется автономно — верни ТОЛЬКО теги через запятую, без пояснений. Когда используется внутри combined-call (compose_lyrics_and_tags) — оборачивай содержимое в XML по инструкциям в формате ответа ниже. В любом случае: минимум 8 тегов, целься в 180-280 символов суммарно (для эмуляции конкретного артиста лучше ближе к верхней границе — Suno нужно больше distinctive descriptors, чтобы не скатиться к жанровому среднему). Без имён артистов!
 
     Жанр: %{genre}
     Исполнитель (для определения стиля, НЕ включать имя в теги): %{artist}
@@ -130,48 +130,30 @@ class SunoTaskHandler
   def compose_and_submit_generate(task, api)
     p = task.params_hash
 
-    # Step 1: Compose lyrics with GPT (Sonnet 4.6) when not user-supplied.
-    unless p['lyrics']
-      topic = p['topic'].to_s
-      genre = p['genre'].to_s
-      artist = p['artist'].to_s
-      subject = topic.empty? ? genre : topic
-
-      context = get_chat_context(task.chat_id)
-      knowledge = get_relevant_knowledge(subject, task.chat_id)
-
-      artist_line = artist.empty? ? '' : "Стиль исполнения: как #{artist}. Подражай манере, лексике и темам этого исполнителя."
-
-      prompt = lyrics_prompt
-        .gsub('{REQUEST}', subject)
-        .gsub('{GENRE}', genre)
-        .gsub('{ARTIST}', artist_line)
-        .gsub('{CONTEXT}', context)
-        .gsub('{KNOWLEDGE}', knowledge)
-
-      LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: composing lyrics for '#{subject}' (#{genre}#{artist.empty? ? '' : ", artist: #{artist}"})"
-
-      begin
-        lyrics = GptMaster.new([{ role: 'user', content: prompt }],
-                               setting: 'lyrics',
-                               chat_id: task.chat_id, user_uid: p['user_uid'],
-                               purpose: 'suno_lyrics').call
-        raise "GPT lyrics failed" unless lyrics && lyrics != 'жпт не жпт'
-        p['lyrics'] = lyrics
-      rescue => e
-        return bail_or_retry(task, api, p, 'prompt_failures', MAX_PROMPT_FAILURES, "lyrics: #{e.message}", raise_on_retry: e)
-      end
-    end
-
-    # Step 2: Resolve tags for Suno — always via the dedicated LLM call.
-    # Tag enrichment is single-sourced here (TAGS_PROMPT + Sonnet 4.6) rather
-    # than depending on whatever the agent inlined; the agent's compose_song
-    # tool no longer takes a `tags` param. See docs/architecture.md.
     artist = p['artist'].to_s.strip
     genre  = p['genre'].to_s.strip
     title  = p['title'] || build_title(p)
-    tags   = resolve_tags(genre, artist, title, chat_id: task.chat_id, user_uid: p['user_uid'])
-    p['tags'] = tags
+
+    # Branch on whether the user supplied verbatim lyrics:
+    # - Lyrics empty (common path): ONE Sonnet call produces both lyrics + tags
+    #   (compose_lyrics_and_tags). Same model holds the lyrical mood/pacing in
+    #   mind when picking style tags, which improves coherence over two
+    #   separate calls. ~50% Sonnet cost and ~5s latency saved.
+    # - Lyrics supplied verbatim: tags-only call (resolve_tags) since
+    #   composition is skipped.
+    if p['lyrics'].nil? || p['lyrics'].to_s.strip.empty?
+      begin
+        lyrics, tags = compose_lyrics_and_tags(p, task, genre: genre, artist: artist, title: title)
+      rescue => e
+        return bail_or_retry(task, api, p, 'prompt_failures', MAX_PROMPT_FAILURES, "compose: #{e.message}", raise_on_retry: e)
+      end
+      p['lyrics'] = lyrics
+      p['tags']   = tags
+    else
+      tags = resolve_tags(genre, artist, title, chat_id: task.chat_id, user_uid: p['user_uid'])
+      p['tags'] = tags
+    end
+
     tags = SunoClient.resolve_genre(genre) || 'rock' if tags.empty?
 
     LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: tags='#{tags}'"
@@ -337,6 +319,87 @@ class SunoTaskHandler
   rescue => e
     LOGGER.warn "[chat=#{chat_id}] #{self.class.name} resolve_tags failed: #{e.message}"
     known || 'rock'
+  end
+
+  # Combined Sonnet 4.6 call producing BOTH lyrics and tags in one round-trip.
+  # Returns [lyrics_text, tags_string]. Raises on malformed response so the
+  # caller can bail_or_retry through the same prompt_failures counter that
+  # previously gated the lyrics-only call.
+  #
+  # Response format pinned to XML: Sonnet 4.6 follows `<lyrics>...</lyrics>
+  # <tags>...</tags>` reliably and the parser is a trivial regex. Coherence
+  # win: same model holds the actual lyrical mood/pacing in context when
+  # picking style tags, instead of the previous tags-only call seeing only
+  # `genre + artist + title`.
+  def compose_lyrics_and_tags(p, task, genre:, artist:, title:)
+    topic   = p['topic'].to_s
+    subject = topic.empty? ? genre : topic
+    context = get_chat_context(task.chat_id)
+    knowledge = get_relevant_knowledge(subject, task.chat_id)
+    artist_line = artist.empty? ? '' : "Стиль исполнения: как #{artist}. Подражай манере, лексике и темам этого исполнителя."
+
+    lyrics_part = lyrics_prompt
+      .gsub('{REQUEST}', subject)
+      .gsub('{GENRE}', genre)
+      .gsub('{ARTIST}', artist_line)
+      .gsub('{CONTEXT}', context)
+      .gsub('{KNOWLEDGE}', knowledge)
+
+    tags_part = TAGS_PROMPT % {
+      genre:  genre.empty? ? 'рок' : genre,
+      artist: artist.empty? ? 'не указан' : artist,
+      title:  title.empty? ? 'не указано' : title
+    }
+
+    prompt = <<~PROMPT
+      Тебе нужно сочинить песню И описать её стиль для Suno AI — в ОДНОМ ответе.
+
+      ## Часть 1 — Сочинение текста
+      #{lyrics_part}
+
+      ## Часть 2 — Стиль (теги для Suno)
+      #{tags_part}
+
+      ## Формат ответа
+      Верни ДВА XML-блока, ничего больше:
+
+      <lyrics>
+      [Intro]
+      ...текст песни с маркерами секций и parenthetical stage directions...
+      [Outro]
+      </lyrics>
+
+      <tags>
+      industrial metal, Tanz-Metall, ...
+      </tags>
+
+      ВАЖНО: когда формируешь <tags>, опирайся на ФАКТИЧЕСКОЕ настроение/темп/энергию написанного выше <lyrics> — не только на запрошенные жанр и артиста. Если текст получился медленным и мрачным, теги должны это отражать.
+    PROMPT
+
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: composing lyrics+tags for '#{subject}' (#{genre}#{artist.empty? ? '' : ", artist: #{artist}"})"
+
+    response = GptMaster.new([{ role: 'user', content: prompt }],
+                             setting: 'lyrics',
+                             chat_id: task.chat_id, user_uid: p['user_uid'],
+                             purpose: 'suno_compose').call
+    raise "GPT compose returned empty" if response.nil? || response.strip.empty? || response.strip == 'жпт не жпт'
+
+    # Take the LAST matching block to be safe against the model echoing the
+    # XML exemplar from the prompt's "## Формат ответа" section before
+    # emitting the real answer (Sonnet rarely does this, but `scan.last`
+    # costs nothing and pins the invariant).
+    lyrics_blocks = response.scan(%r{<lyrics>(.+?)</lyrics>}m)
+    tags_blocks   = response.scan(%r{<tags>(.+?)</tags>}m)
+    raise "GPT compose missing <lyrics> block" if lyrics_blocks.empty?
+    raise "GPT compose missing <tags> block"   if tags_blocks.empty?
+
+    lyrics = lyrics_blocks.last.first.strip
+    tags   = tags_blocks.last.first.strip.gsub(/^["']|["']$/, '')
+    raise "GPT compose produced empty lyrics" if lyrics.empty?
+    raise "GPT compose produced empty tags"   if tags.empty?
+
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: composed lyrics #{lyrics.length} chars, tags='#{tags}'"
+    [lyrics, tags]
   end
 
   def build_title(p)

@@ -216,7 +216,7 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 | `songs` | `title`, `artist`, `album`, `genre`, `year` (int), `filepath` (unique, relative to music root), `duration` (int, seconds), `category` (top-level dir) |
 | `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — content table mode (`content='songs'`, `content_rowid='id'`), `unicode61 remove_diacritics 1` tokenizer, auto-synced via INSERT/UPDATE/DELETE triggers |
-| `api_usage` | `chat_id` (nullable), `user_uid` (nullable — null for knowledge extraction/compaction), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_compact`/`suno_lyrics`/`suno_tags`/`image_prompt`), `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per API response; `ApiUsage.record` is fire-and-forget (rescues errors so telemetry never breaks replies) |
+| `api_usage` | `chat_id` (nullable), `user_uid` (nullable — null for knowledge extraction/compaction), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_compact`/`suno_compose`/`suno_tags`/`image_prompt`), `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per API response; `ApiUsage.record` is fire-and-forget (rescues errors so telemetry never breaks replies) |
 | `chat_states` | `chat_id` (PK, bigint), `scratchpad` (JSON: `intentions`/`notes`/`expectations` arrays of `{id, content, created_at}`), `updated_at`. Per-chat agent working memory; written via the `remember`/`forget` agent tools, read into `{SCRATCHPAD}` on every agent turn. Hard cap 6000 chars with FIFO eviction. See ADR-003. |
 
 **Relationships:**
@@ -345,6 +345,25 @@ HTTP client for the Suno AI song generation API (`sunoapi.org`), using V5 model.
 - `compose(...)` — blocking convenience (submit + poll loop)
 - `SunoClient.resolve_genre(text)` — maps Russian genre names to English style tags (~50 genres)
 - **Important:** Suno blocks artist names in tags — describe sound characteristics instead
+
+#### Combined compose call
+On the common path (user did NOT supply verbatim lyrics), `SunoTaskHandler#compose_lyrics_and_tags` makes ONE Sonnet 4.6 call (`setting: 'lyrics'`, `purpose: 'suno_compose'`) producing both lyrics and style tags in a single response. Format pinned to two XML blocks:
+
+```
+<lyrics>
+[Intro]
+...full lyrics with section markers and stage directions...
+[Outro]
+</lyrics>
+
+<tags>
+industrial metal, Tanz-Metall, mid-tempo grinding stomp, ...
+</tags>
+```
+
+Parser is a trivial regex on each block. **Coherence win**: the same model holds the actual lyrical mood/pacing/emotional arc in context when picking style tags — the previous tags-only call only saw `genre + artist + title` as input and had to guess. **Cost/latency**: ~50% Sonnet-portion savings (one round-trip vs two), ~5s latency saved. Malformed response (missing block) → raise → handler's `bail_or_retry` path retries via `prompt_failures` counter. The prompt is assembled at runtime by concatenating `Settings.suno['lyrics_prompt']` (with `{REQUEST}`/`{GENRE}`/etc. substituted) + `TAGS_PROMPT` (with `%{genre}`/`%{artist}`/`%{title}` substituted) + an XML response-format instruction.
+
+When the user DID supply verbatim lyrics, the handler skips composition and runs only `resolve_tags` (`purpose: 'suno_tags'`) — the tags-only fallback path remains unchanged.
 
 #### Tag-ordering convention (TAGS_PROMPT)
 `SunoTaskHandler::TAGS_PROMPT` instructs the enrichment LLM (Anthropic Sonnet 4.6 via `setting: 'lyrics'`) to emit tags in *genre → mood → instruments → vocals → mix* order, ~120–180 chars total. Mix descriptors (`polished production`, `lo-fi`, `wet reverb`, `dry mix`, `punchy drums`, `radio-ready`) are optional seasoning — composer skips when generic. **Negatives are NOT emitted into the tag string** — they flow exclusively through the structured `negative_tags` agent-tool param → `SunoClient#submit(negative_tags:)` → Suno's `negativeTags` POST field (omitted from the body when empty). Inlining `"no X / without Y"` inside `tags` would let Suno parse them as positive descriptors.
