@@ -47,7 +47,12 @@ module ImageGen
         { model: @t2i_model, prompt: prompt }
       end
       LOGGER.debug "#{self.class.name}: submitting #{input_image ? 'edit' : 't2i'} (prompt #{prompt.length} chars) to #{body[:model]}"
-      resp = @client.post('/v1/images/generations', body)
+      # Synchronous: server holds the connection open for the entire generation
+      # (typically 30-120s for Nano Banana Pro on real prompts), so the POST
+      # timeout has to cover end-to-end generation, not just the request RTT.
+      # `ModelProviderClient`'s default 60s is fine for async-submit adapters
+      # like Atlas/Flux that return a task_id immediately; sync needs more.
+      resp = @client.post('/v1/images/generations', body, timeout: 180)
       url = resp.dig('data', 0, 'url')
       raise "CloseRouter image submit: no data[0].url in response: #{resp.inspect[0..400]}" unless url
       { url: url }
