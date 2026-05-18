@@ -7,6 +7,7 @@ Full docs: `docs/architecture.md` | Agent guide: `docs/agents.md`
 ## Rules
 
 - **Never commit automatically.** Always ask the user before creating a git commit.
+- **Never deploy or push without explicit user permission in the current turn.** Includes `make deploy`, `git push`, and `ssh ... docker compose up`. Authorization does not carry over from a prior turn — re-confirm every time. `.claude/hooks/deploy_guard.sh` (PreToolUse Bash hook) denies these commands unconditionally; the user must approve each invocation through Claude Code's permission prompt.
 - **Always run `make test` before committing.** All tests must pass before creating a commit.
 - **Never run `ruby lib/bot.rb` directly.** Use Docker in production; use `./bin/bot start/stop/restart` only for local non-Docker development.
 - **Back up `db/bot.db` on prod only when the deploy includes a new migration.** Run `make backup` — code-only deploys don't need it. See `Backing up the prod DB` below for details.
