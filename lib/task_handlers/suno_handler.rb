@@ -107,23 +107,6 @@ class SunoTaskHandler
     [false, title_fallback]
   end
 
-  PARSE_PROMPT = <<~PROMPT.freeze
-    Разбери запрос на генерацию песни. Извлеки жанр, исполнителя (если упоминается) и тему.
-    Известные жанры (используй если подходит): %{genres}
-    Если жанр не указан, используй "рок".
-    Если упоминается конкретный исполнитель/группа (например "как Цой", "в стиле Коррозии Металла"), укажи его в artist.
-    Для Suno tags: напиши через запятую на английском стиль музыки, настроение, инструменты, характер вокала. Минимум 8 тегов.
-    ВАЖНО: НИКОГДА не включай имена исполнителей или групп в теги — Suno блокирует имена артистов!
-    Когда копируешь стиль конкретного исполнителя — описывай его ОТЛИЧИТЕЛЬНЫЕ черты (вокальную манеру, тембр, фразировку, темп, фишки продакшна), а не общие черты жанра. У Rammstein и OOMPH одинаковый жанр (NDH), но отличаются они вокалом, темпом и продакшном — описывай именно отличия.
-    Например для Rammstein: "industrial metal, Neue Deutsche Härte, theatrical, mid-tempo stomp, palm-muted downtuned guitars, hammering drums, cinematic orchestral synth pads, operatic baritone German vocals, rolled R consonants, declamatory spoken-word verses, dramatic vibrato, glossy production"
-    Например для Цоя: "russian post-punk, 80s Soviet new wave, melancholic deadpan baritone, monotone delivery, jangly clean guitar, minor key, steady simple drums, anthemic refrain, restrained sparse arrangement"
-
-    Верни ТОЛЬКО JSON без пояснений:
-    {"genre": "жанр на русском", "artist": "исполнитель или пустая строка", "topic": "тема песни", "tags": "english tags for suno (WITHOUT artist names!)"}
-
-    Запрос: "%{request}"
-  PROMPT
-
   TAGS_PROMPT = <<~PROMPT.freeze
     Опиши музыкальный стиль для Suno AI — через запятую на английском В ПОРЯДКЕ:
     1) жанр и поджанр (например "industrial metal, Neue Deutsche Härte"),
@@ -137,7 +120,7 @@ class SunoTaskHandler
     Например для Rammstein: "industrial metal, Tanz-Metall, slow heavy doom-paced stomp, mid-tempo grinding rhythm, heavy distorted thick palm-muted downtuned riffs, prominent driving bass, thunderous hammering drums, cinematic orchestral synth pads, deep low clean baritone German vocals, operatic delivery, rolled R consonants, declamatory spoken-word verses, dramatic vibrato, glossy polished production"
     Например для Цоя: "russian post-punk, 80s Soviet new wave, melancholic deadpan baritone, monotone delivery, jangly clean guitar, minor key, steady simple drums, anthemic refrain, restrained sparse arrangement"
     Если даны текст/название песни — определи по ним подходящий стиль.
-    Верни ТОЛЬКО теги через запятую, без пояснений. Минимум 8 тегов, целься в 120-180 символов суммарно. Без имён артистов!
+    Верни ТОЛЬКО теги через запятую, без пояснений. Минимум 8 тегов, целься в 180-280 символов суммарно (для эмуляции конкретного артиста лучше ближе к верхней границе — Suno нужно больше distinctive descriptors, чтобы не скатиться к жанровому среднему). Без имён артистов!
 
     Жанр: %{genre}
     Исполнитель (для определения стиля, НЕ включать имя в теги): %{artist}
@@ -147,19 +130,7 @@ class SunoTaskHandler
   def compose_and_submit_generate(task, api)
     p = task.params_hash
 
-    # Step 1: Parse freeform request with LLM (only for chat command path)
-    if !p['parsed'] && p.key?('request') && !p['request'].to_s.empty?
-      LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: parsing request '#{p['request']}'"
-
-      parsed = parse_request(p['request'], chat_id: task.chat_id, user_uid: p['user_uid'])
-      p.merge!(parsed)
-      p['parsed'] = true
-      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
-
-      LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: parsed → genre=#{p['genre']}, artist=#{p['artist']}, topic=#{p['topic']}, tags=#{p['tags']}"
-    end
-
-    # Step 2: Compose lyrics with GPT
+    # Step 1: Compose lyrics with GPT (Sonnet 4.6) when not user-supplied.
     unless p['lyrics']
       topic = p['topic'].to_s
       genre = p['genre'].to_s
@@ -192,7 +163,7 @@ class SunoTaskHandler
       end
     end
 
-    # Step 3: Resolve tags for Suno — always via the dedicated LLM call.
+    # Step 2: Resolve tags for Suno — always via the dedicated LLM call.
     # Tag enrichment is single-sourced here (TAGS_PROMPT + Sonnet 4.6) rather
     # than depending on whatever the agent inlined; the agent's compose_song
     # tool no longer takes a `tags` param. See docs/architecture.md.
@@ -366,28 +337,6 @@ class SunoTaskHandler
   rescue => e
     LOGGER.warn "[chat=#{chat_id}] #{self.class.name} resolve_tags failed: #{e.message}"
     known || 'rock'
-  end
-
-  def parse_request(request, chat_id: nil, user_uid: nil)
-    return { 'genre' => 'рок', 'artist' => '', 'topic' => '', 'tags' => 'rock, energetic' } if request.empty?
-
-    genres_list = SunoClient::GENRES.keys.join(', ')
-    prompt = PARSE_PROMPT % { genres: genres_list, request: request }
-
-    response = GptMaster.new([{ role: 'user', content: prompt }], setting: 'agent',
-                             chat_id: chat_id, user_uid: user_uid, purpose: 'suno_parse').call
-    json = response[/\{.*\}/m]
-    parsed = JSON.parse(json)
-
-    {
-      'genre'  => parsed['genre'].to_s.strip.downcase.presence || 'рок',
-      'artist' => parsed['artist'].to_s.strip,
-      'topic'  => parsed['topic'].to_s.strip,
-      'tags'   => parsed['tags'].to_s.strip
-    }
-  rescue => e
-    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} parse_request failed: #{e.message}, falling back to raw request"
-    { 'genre' => 'рок', 'artist' => '', 'topic' => request, 'tags' => '' }
   end
 
   def build_title(p)

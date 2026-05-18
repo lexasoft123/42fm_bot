@@ -161,7 +161,7 @@ Commands live in `lib/commands/`. Each is a class inheriting `Commands::Base` wi
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 | `songs` | `title`, `artist`, `album`, `genre`, `year`, `filepath` (unique, relative to music root), `duration`, `category` |
 | `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — `content='songs'`, `content_rowid='id'`, `unicode61 remove_diacritics 1` tokenizer; auto-synced via triggers |
-| `api_usage` | `chat_id`, `user_uid` (nullable — null for background extractions), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_compact`/`suno_lyrics`/`suno_tags`/`suno_parse`/`image_prompt`), `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per LLM API response; feeds `бот затраты` |
+| `api_usage` | `chat_id`, `user_uid` (nullable — null for background extractions), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_compact`/`suno_lyrics`/`suno_tags`/`image_prompt`), `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per LLM API response; feeds `бот затраты` |
 | `chat_states` | `chat_id` (PK), `scratchpad` (JSON), `updated_at` — agent's per-chat working memory (intentions/notes/expectations); read at every agent turn; written via `remember`/`forget` tools. See ADR-003. |
 
 ## Gotchas
