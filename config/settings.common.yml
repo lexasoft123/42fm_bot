@@ -260,7 +260,7 @@ image_gen:
   providers:
     atlas:
       api_url: 'https://api.atlascloud.ai'
-      text_to_image_model: 'alibaba/wan-2.7/text-to-image'
+      text_to_image_model: 'alibaba/wan-2.7-pro/text-to-image'
       image_edit_model:    'alibaba/wan-2.7/image-edit'
       width:  1024
       height: 1024
