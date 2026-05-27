@@ -14,7 +14,7 @@ module Agent::Tools::GoogleSearch
   def self.send_media(downloads, kind:, ctx:)
     return 'Не удалось скачать ни одной картинки' if downloads.empty?
 
-    api = ctx[:bot].api
+    api = ctx[:api]
     if kind == :gif
       downloads.each { |d| api.sendAnimation(chat_id: ctx[:chat_id], animation: Faraday::UploadIO.new(d[:tmp].path, d[:mime])) }
       "Отправил #{downloads.size} гифок в чат"

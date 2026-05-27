@@ -20,7 +20,7 @@ class AgentEventHandler
       radio:     nil, # tools that need a Radio socket will fail-soft
       chat_id:   task.chat_id,
       user:      user,
-      bot:       nil
+      api:       api
     )
 
     text = runner.run

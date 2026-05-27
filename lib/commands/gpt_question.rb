@@ -13,7 +13,7 @@ module Commands
       reply = Agent::Runner.new(
         text: text, context: get_chat_context,
         knowledge: get_relevant_knowledge(text),
-        radio: radio, chat_id: chat_id, user: user, bot: bot,
+        radio: radio, chat_id: chat_id, user: user, api: bot&.api,
         message_id: message.message_id
       ).run
       CommandResult.text("@#{user.name} #{reply}", persist_as_bot_reply: true)

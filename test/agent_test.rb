@@ -109,7 +109,7 @@ module AgentTestHelpers
   def build_runner(text:, user:, **opts)
     defaults = {
       context: '[]', knowledge: '', radio: nil,
-      chat_id: 100, bot: nil, image: nil, phrase: nil
+      chat_id: 100, api: nil, image: nil, phrase: nil
     }
     Agent::Runner.new(**defaults.merge(opts).merge(text: text, user: user))
   end

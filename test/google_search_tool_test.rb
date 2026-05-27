@@ -37,20 +37,14 @@ class GoogleSearchToolTest < BotTest
     end
   end
 
-  class FakeBot
-    attr_reader :api
-    def initialize(api); @api = api; end
-  end
-
   def setup
     super
     @tool = Agent::ToolRegistry.find('google_search')
     @api  = FakeApi.new
-    @bot  = FakeBot.new(@api)
   end
 
   def make_ctx
-    { chat_id: CHAT, bot: @bot }
+    { chat_id: CHAT, api: @api }
   end
 
   def make_tmp(content: 'X', suffix: '.jpg')
@@ -128,7 +122,6 @@ class GoogleSearchToolTest < BotTest
 
   def test_send_failure_falls_back_to_link_list
     @api = FakeApi.new(raise_on_send: RuntimeError.new('Bad Request: IMAGE_PROCESS_FAILED'))
-    @bot = FakeBot.new(@api)
     downloads = [{ tmp: make_tmp, mime: 'image/jpeg', link: 'http://example.com/a.jpg' },
                  { tmp: make_tmp, mime: 'image/jpeg', link: 'http://example.com/b.jpg' }]
     out = stub_gogolmogol(download: downloads) do

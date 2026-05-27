@@ -13,7 +13,7 @@ module Agent
     # backs up `bot.listen`'s single-threaded queue.
     SLOW_ITERATION_MS = 5_000
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, bot: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil)
       @text       = text
       @context    = context
       @knowledge  = knowledge
@@ -32,7 +32,8 @@ module Agent
       # that haven't defined an `agent_vision` setting.
       @setting   = pick_setting
       @api_type  = GptMaster.resolve_setting(@setting)[:api_type]
-      @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, bot: bot,
+      LOGGER.warn "[chat=#{chat_id}] Agent::Runner initialized without Telegram api — tools that send media will fail" unless api
+      @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, api: api,
                      image: image, audio: audio,
                      reply_to_message_id: reply_to_message_id }
     end

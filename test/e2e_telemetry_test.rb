@@ -65,7 +65,7 @@ class E2EAgentCachingTest < BotTest
   def run_agent(knowledge: '', context: '')
     Agent::Runner.new(
       text: 'hi', context: context, knowledge: knowledge,
-      radio: nil, chat_id: -555, user: @user, bot: nil,
+      radio: nil, chat_id: -555, user: @user, api: nil,
       image: nil, phrase: nil
     ).run
   end

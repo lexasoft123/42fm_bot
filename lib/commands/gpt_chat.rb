@@ -24,7 +24,7 @@ module Commands
       reply = Agent::Runner.new(
         text: text, context: get_chat_context,
         knowledge: get_relevant_knowledge(text),
-        radio: radio, chat_id: chat_id, user: user, bot: bot,
+        radio: radio, chat_id: chat_id, user: user, api: bot&.api,
         image: replied_image, phrase: phrase, audio: audio,
         reply_to_message_id: message.reply_to_message&.message_id,
         message_id: message.message_id
@@ -72,7 +72,7 @@ module Commands
     # extract_replied_image.
     #
     # The Telegram file URL is resolved lazily inside Suno tool handlers via
-    # `TelegramFile.public_url(ctx[:bot].api, ctx[:audio][:file_id])` — only
+    # `TelegramFile.public_url(ctx[:api], ctx[:audio][:file_id])` — only
     # when a tool actually needs it. Calling getFile here unconditionally
     # would burn a Telegram round-trip for every audio-bearing message
     # regardless of whether the agent decides to use the audio.

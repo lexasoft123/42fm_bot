@@ -313,6 +313,8 @@ When image_gen / suno tasks hit interesting outcomes (failure after retries, suc
 
 Per-chat rate limit: 10 emits per rolling hour. Loop protection: only image_gen/suno emit; agent_event itself doesn't (single-hop). See ADR-003 PR-2.
 
+`AgentEventHandler#call` receives `(task, api)` from `TaskRunner` (no full `bot` object — `TaskRunner` only ever has `bot.api`), and forwards `api:` to `Agent::Runner.new`. The Runner stores it as `@tool_ctx[:api]` so tools that need to call Telegram (e.g. `google_search` sending image media groups) work in this code path. Runner logs a warning at initialization if `api:` is nil — a future caller who forgets will see a greppable `Agent::Runner initialized without Telegram api` in logs instead of a masked `NoMethodError` deep in a tool's `rescue`. All callers (`GptChat`, `GptQuestion`, `AgentEventHandler`) pass `api:` directly; `bot:` is no longer accepted.
+
 ### Background Task Queue — `lib/task_runner.rb` + `lib/task_handlers/`
 Generic DB-backed persistent task system for long-running operations. A poller thread runs inside the bot process (started in `Telegram::Bot::Client.run`, reusing `bot.api`).
 
