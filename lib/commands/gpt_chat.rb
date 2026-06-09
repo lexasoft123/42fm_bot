@@ -29,7 +29,7 @@ module Commands
         reply_to_message_id: message.reply_to_message&.message_id,
         message_id: message.message_id
       ).run
-      CommandResult.text(reply, reply_to_message_id: message.message_id, persist_as_bot_reply: true)
+      CommandResult.text(reply, reply_to_message_id: message.message_id)
     end
 
     private

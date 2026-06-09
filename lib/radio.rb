@@ -6,17 +6,44 @@ require 'rest-client'
 class Radio
   CONNECT_TIMEOUT = 5
   READ_TIMEOUT    = 10
+  # Keep the lazy persistent socket warm. Liquidsoap closes idle telnet
+  # connections, and the next reuse of a stale socket loses its first
+  # response — which is why `!track` returned "(нет данных)" while a track
+  # was actually playing. A periodic lightweight ping pays that
+  # reconnect-on-idle penalty here instead of on a user's command, so real
+  # commands always hit a warm socket. Interval must stay well under
+  # Liquidsoap's idle-close timeout.
+  KEEPALIVE_INTERVAL = 20
+  KEEPALIVE_CMD      = "request.queue" # harmless, source-independent status ping
 
   def initialize
-    @sock  = nil
-    @mutex = Mutex.new
+    @sock      = nil
+    @mutex     = Mutex.new
+    @keepalive = nil
+  end
+
+  # Start the background keepalive pinger. Idempotent — safe to call on every
+  # bot (re)start. Returns the keepalive Thread.
+  def start_keepalive(interval: KEEPALIVE_INTERVAL)
+    @keepalive ||= Thread.new do
+      loop do
+        sleep interval
+        begin
+          command(KEEPALIVE_CMD)
+        rescue => e
+          LOGGER.warn "#{self.class.name} keepalive: #{e.class}: #{e.message}" if defined?(LOGGER)
+        end
+      end
+    end
   end
 
   def track
-    res    = command("#{Settings.radio['source']}.metadata", raw: true)
-    tracks = parse_metadata(res)
-    remain = remaining
-    "#{format_track_name(tracks.last)}, осталось #{remain}"
+    res     = command("#{Settings.radio['source']}.metadata", raw: true)
+    current = parse_metadata(res).last
+    # Liquidsoap occasionally returns no metadata for the playing source —
+    # don't surface a bare "(нет данных), осталось …" placeholder.
+    return "сейчас ничего не играет" unless current
+    "#{format_track_name(current)}, осталось #{remaining}"
   end
 
   def request(track)
@@ -38,7 +65,14 @@ class Radio
   def queue
     queue_tracks = command("request.queue").split(/\s/)
     return nil if queue_tracks.empty?
-    queue_tracks.map { |tr| format_track_name(get_track_metadata(tr), request_id: tr) }.join("\n")
+    # Skip slots whose metadata Liquidsoap can't resolve rather than
+    # rendering a column of "(нет данных)" lines. All blank → nil → the
+    # command renders "нихуя нет".
+    names = queue_tracks.filter_map do |tr|
+      meta = get_track_metadata(tr)
+      format_track_name(meta, request_id: tr) if meta
+    end
+    names.empty? ? nil : names.join("\n")
   end
 
   def top(track)
@@ -101,7 +135,10 @@ class Radio
         result = raw ? res : res.gsub(/[\r\n]+/, "").gsub("END", "").gsub(/\\"/, '"')
         LOGGER.debug "#{self.class.name}#command(#{cmd.split.first}) took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms" if defined?(LOGGER)
         result
-      rescue Errno::EPIPE, Errno::ECONNRESET, IOError => e
+      # Timeout::Error included so a *hung* (half-open) socket also resets
+      # @sock and reconnects — otherwise a hang would reuse the dead socket
+      # and time out on every subsequent command indefinitely.
+      rescue Errno::EPIPE, Errno::ECONNRESET, IOError, Timeout::Error => e
         unless retried
           LOGGER.warn "#{self.class.name}: #{e.class}: #{e.message} — reconnecting" if defined?(LOGGER)
           @sock&.close rescue nil

@@ -155,7 +155,7 @@ Receives every inbound message. Builds a `CommandContext`, runs `dispatch`, then
 
 - `respond` — entry point: saves message, skips stale ones, processes voice, calls `dispatch`
 - `dispatch(ctx)` — iterates `Commands::REGISTRY`; returns result from first matching command
-- `deliver(result)` — sends the `CommandResult` payload via the appropriate Telegram API call
+- `deliver(result)` — sends the `CommandResult` payload via the appropriate Telegram API call, then persists a `role: 'bot'` `messages` row for every successfully-sent type (see *Bot-reply persistence* below)
 
 ### `CommandContext` — `lib/command_context.rb`
 
@@ -232,6 +232,8 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 ### Radio — `lib/radio.rb`
 Communicates with Liquidsoap server over a raw TCP socket on `localhost:1234`. Connection is **lazy** — socket opens on first use, not at startup. Sends text commands, parses responses. Key operations: get current track, search, request, manage queue, fetch stats.
 
+**Keepalive.** `Radio#start_keepalive` (called from `lib/bot.rb` at startup) runs a background thread that pings Liquidsoap every 20s with `request.queue`. Liquidsoap closes idle telnet connections, and reusing a stale socket loses the first command's response — this made `!track` return `(нет данных)` while a track was actually playing. The keepalive absorbs that reconnect-on-idle cost on the throwaway ping so user commands always hit a warm socket. Idempotent. `Radio#track`/`#queue` also degrade gracefully (`"сейчас ничего не играет"` / dropping blank queue slots) as a fallback for genuinely-empty metadata.
+
 Search uses `Song.search` (FTS5) with fallback to legacy file-path matching (`music.txt`). `radio.request` picks a random match and pushes the absolute path to Liquidsoap.
 
 ### Song — `models/song.rb`
@@ -262,7 +264,11 @@ Mixed into GPT commands. Delegates to `ChatContext` module (via `include ChatCon
 - `get_chat_context` — delegates to `ChatContext#get_chat_context(chat_id, thread_id: message.message_thread_id)`
 - `get_relevant_knowledge(query)` — delegates to `ChatContext#get_relevant_knowledge(query, chat_id)`
 
-Bot-reply persistence is no longer a command-level concern. Commands signal with `CommandResult.text(..., persist_as_bot_reply: true)`; `MessageResponder#deliver` creates the `messages` row after `MessageSender#send` returns, capturing Telegram's `message_id` and the originating `message_thread_id`.
+**Bot-reply persistence.** `MessageResponder#deliver` persists a `role: 'bot'` `messages` row for **every** successfully-sent output type — not just GPT replies — so the agent's chat context sees the bot's own non-GPT output and any bot message a user replies to can be resolved back to a row. After the Telegram send returns:
+- `:text` → direct `Message.create` using the `message_id` `MessageSender#send` returns (`reply_to_message_id` from the result meta, `message_thread_id` from the inbound message). Blank/whitespace payloads are skipped (avoids the Telegram "message text is empty" 400).
+- `:sticker` / `:image` / `:voice` → `Message.persist_bot_reply(response:)` (extracts `message_id` + `message_thread_id` from the raw Telegram response) with a body marker `[стикер]` / `[картинка]` / `[голос]`. `:image` persists only when `MessageSender#send_image` returns a non-nil response — its rescue path returns `nil` because it sent a fallback text, not an image.
+
+Media sends (sticker/image/voice) thread the originating `message_thread_id` so forum-topic replies land in-thread. The old `persist_as_bot_reply` opt-in flag was retired — persistence is unconditional. Background-task media (image_gen/suno/cover_art/wav handlers) self-persist via their own `persist_bot_media_row(s)` and never route through `deliver`.
 
 ### EmbeddingService — `lib/embedding_service.rb`
 Calls an OpenAI-compatible embeddings API (`embeddings.api_url`) to produce float vectors for text. Returns `nil` on failure. Used by `KnowledgeBase`.

@@ -27,6 +27,9 @@ begin
       CronScheduler.start
       logger.info "CronScheduler started"
 
+      @radio.start_keepalive
+      logger.info "Radio keepalive started"
+
       synced = Chat.sync_from_config! rescue 0
       logger.info "Chat.sync_from_config!: synced #{synced} chats"
 

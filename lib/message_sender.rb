@@ -36,25 +36,36 @@ class MessageSender
 
   def send_sticker
     bot.api.sendChatAction(chat_id: chat.id, action: 'typing')
-    bot.api.sendSticker(chat_id: chat.id, sticker: text)
+    bot.api.sendSticker(**media_params(sticker: text))
   end
 
+  # Returns the raw Telegram response on success, or nil when the send
+  # failed (the rescue path sends a fallback text, not an image — callers
+  # must not persist that as a `[картинка]` row).
   def send_image
-
     if text =~ /[.]gif/
       logger.debug "#{self.class.name}#send_image: document #{text}"
-      @api.sendDocument chat_id: chat.id, document: text
+      @api.sendDocument(**media_params(document: text))
     else
       logger.debug "#{self.class.name}#send_image: photo #{text}"
-      @api.sendPhoto(chat_id: chat.id, photo: text)
+      @api.sendPhoto(**media_params(photo: text))
     end
 
   rescue => e
     logger.error e.message + "\n\t" + e.backtrace.first(10).join("\n\t")
     @api.sendMessage(chat_id: chat.id, text: 'ебучий гугл!!11')
+    nil
   end
 
   private
+
+  # Common chat_id (+ optional forum thread) params for media sends, merged
+  # with the type-specific payload. Splatted as keywords at the call site.
+  def media_params(extra)
+    p = { chat_id: chat.id }
+    p[:message_thread_id] = @message_thread_id if @message_thread_id
+    p.merge(extra)
+  end
 
   def sanitize_markdown(text)
     # Replace **bold** with *bold* (Telegram Markdown uses single *)

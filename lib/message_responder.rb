@@ -127,17 +127,23 @@ class MessageResponder
     nil
   end
 
+  # Every successfully-sent bot output is persisted as a `role: 'bot'`
+  # messages row so (a) it appears in chat history/context and (b) a later
+  # user reply can resolve its message_id back to a known row. Text uses a
+  # direct create (MessageSender#send returns the bare message_id); media
+  # types reuse Message.persist_bot_reply, which extracts id + thread_id
+  # from the raw Telegram response.
   def deliver(result)
     return unless result
     case result.type
     when :text
-      return unless result.payload
+      return if result.payload.to_s.strip.empty?
       sent_id = MessageSender.new(
         bot: @bot, chat: message.chat, text: result.payload,
         reply_to_message_id: result.meta[:reply_to_message_id],
         message_thread_id: @message.message_thread_id
       ).send
-      if result.meta[:persist_as_bot_reply]
+      if sent_id
         Message.create(
           role: 'bot', chat_id: @chat_id, body: result.payload,
           message_id: sent_id,
@@ -145,15 +151,34 @@ class MessageResponder
           message_thread_id: @message.message_thread_id
         )
       end
-    when :sticker then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_sticker
-    when :image   then MessageSender.new(bot: @bot, chat: message.chat, text: result.payload).send_image
+    when :sticker
+      resp = MessageSender.new(
+        bot: @bot, chat: message.chat, text: result.payload,
+        message_thread_id: @message.message_thread_id
+      ).send_sticker
+      Message.persist_bot_reply(chat_id: @chat_id, body: '[стикер]', response: resp)
+    when :image
+      resp = MessageSender.new(
+        bot: @bot, chat: message.chat, text: result.payload,
+        message_thread_id: @message.message_thread_id
+      ).send_image
+      # send_image returns nil when the send failed and a fallback text was
+      # sent instead — don't mislabel that as an image row.
+      Message.persist_bot_reply(chat_id: @chat_id, body: '[картинка]', response: resp) if resp
     when :voice
       path = result.payload
-      @bot.api.sendVoice(chat_id: @chat_id, voice: Faraday::UploadIO.new(path, 'audio/ogg'))
+      voice_params = { chat_id: @chat_id, voice: Faraday::UploadIO.new(path, 'audio/ogg') }
+      voice_params[:message_thread_id] = @message.message_thread_id if @message.message_thread_id
+      resp = @bot.api.sendVoice(**voice_params)
+      Message.persist_bot_reply(chat_id: @chat_id, body: '[голос]', response: resp)
       FileUtils.rm_f(path)
-    when :audio   then @bot.api.sendAudio(
-      chat_id: @chat_id, audio: result.payload,
-      title: result.meta[:title], performer: result.meta[:performer])
+    when :audio
+      # No command currently produces CommandResult.audio (dead path); a
+      # future :audio producer should add a persist_bot_reply call here for
+      # parity with the other media types.
+      @bot.api.sendAudio(
+        chat_id: @chat_id, audio: result.payload,
+        title: result.meta[:title], performer: result.meta[:performer])
     when :none    then nil
     end
   rescue => e

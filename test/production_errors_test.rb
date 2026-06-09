@@ -22,6 +22,7 @@ require_relative '../lib/commands/knowledge_compact'
 require_relative '../lib/task_runner'
 require_relative '../lib/reply_markup_formatter'
 require_relative '../lib/message_sender'
+require 'telegram/bot' # provides Faraday::UploadIO used by the :voice deliver path
 
 LOGGER       = Logger.new(IO::NULL) unless defined?(LOGGER)
 
@@ -943,7 +944,7 @@ class GptHelpersWrapperTest < BotTest
       from: OpenStruct.new(id: @user.uid, username: @user.name, first_name: 'u', last_name: nil)
     )
     responder = MessageResponder.new(bot: fake_bot, message: msg, radio: nil)
-    result = CommandResult.text('test reply', reply_to_message_id: 7, persist_as_bot_reply: true)
+    result = CommandResult.text('test reply', reply_to_message_id: 7)
     responder.send(:deliver, result)
 
     saved = Message.where(role: 'bot').last
@@ -952,6 +953,145 @@ class GptHelpersWrapperTest < BotTest
     assert_equal 4242, saved.message_id
     assert_equal 7, saved.reply_to_message_id
     assert_equal 7, sent_params[:reply_to_message_id]
+  end
+
+  # ---- deliver persists EVERY output type (#1 fix) ----
+
+  def deliver_responder(api:, thread_id: nil)
+    require_relative '../lib/message_responder'
+    fake_bot = OpenStruct.new(api: api)
+    chat = OpenStruct.new(id: 100, title: 'test')
+    msg = OpenStruct.new(
+      text: 'бот привет', message_id: 7, reply_to_message: nil,
+      message_thread_id: thread_id, chat: chat, date: Time.now.to_i,
+      voice: nil, caption: nil, edit_date: nil, forward_origin: nil,
+      from: OpenStruct.new(id: @user.uid, username: @user.name, first_name: 'u', last_name: nil)
+    )
+    MessageResponder.new(bot: fake_bot, message: msg, radio: nil)
+  end
+
+  # GptChat path persists exactly one row after the persist_as_bot_reply
+  # flag was retired (regression guard).
+  def test_deliver_text_persists_exactly_once
+    api = Class.new do
+      define_method(:sendChatAction) { |**_| }
+      define_method(:sendMessage) { |_params| OpenStruct.new(message_id: 4242) }
+    end.new
+    before = Message.where(role: 'bot').count
+    deliver_responder(api: api).send(:deliver, CommandResult.text('hi there'))
+    assert_equal before + 1, Message.where(role: 'bot').count
+    assert_equal 'hi there', Message.where(role: 'bot').last.body
+  end
+
+  # Text replies thread the originating message_thread_id into both the
+  # Telegram send and the persisted row (forum-topic correctness).
+  def test_deliver_text_propagates_thread_id
+    sent_params = nil
+    api = Class.new do
+      define_method(:sendChatAction) { |**_| }
+      define_method(:sendMessage) do |params|
+        sent_params = params
+        OpenStruct.new(message_id: 4343)
+      end
+    end.new
+    deliver_responder(api: api, thread_id: 99).send(:deliver, CommandResult.text('hi'))
+    assert_equal 99, sent_params[:message_thread_id]
+    assert_equal 99, Message.where(role: 'bot').last.message_thread_id
+  end
+
+  # Blank/whitespace text neither sends nor persists (prevents the Telegram
+  # "message text is empty" 400 from blank agent responses).
+  def test_deliver_blank_text_sends_and_persists_nothing
+    calls = []
+    api = Class.new do
+      define_method(:sendChatAction) { |**_| calls << :action }
+      define_method(:sendMessage) { |_params| calls << :msg; OpenStruct.new(message_id: 1) }
+    end.new
+    before = Message.where(role: 'bot').count
+    deliver_responder(api: api).send(:deliver, CommandResult.text("   \n  "))
+    assert_empty calls
+    assert_equal before, Message.where(role: 'bot').count
+  end
+
+  def test_deliver_sticker_persists_with_thread_id
+    captured = nil
+    api = Class.new do
+      define_method(:sendChatAction) { |**_| }
+      define_method(:sendSticker) do |**params|
+        captured = params
+        OpenStruct.new(message_id: 11, message_thread_id: params[:message_thread_id])
+      end
+    end.new
+    deliver_responder(api: api, thread_id: 77).send(:deliver, CommandResult.sticker('STICKER_ID'))
+    saved = Message.where(role: 'bot').last
+    assert_equal '[стикер]', saved.body
+    assert_equal 11, saved.message_id
+    assert_equal 77, saved.message_thread_id
+    assert_equal 77, captured[:message_thread_id]
+    assert_equal 'STICKER_ID', captured[:sticker]
+  end
+
+  def test_deliver_image_persists
+    api = Class.new do
+      define_method(:sendPhoto) do |**params|
+        OpenStruct.new(message_id: 22, message_thread_id: params[:message_thread_id])
+      end
+    end.new
+    deliver_responder(api: api, thread_id: 55).send(:deliver, CommandResult.image('http://x/pic.png'))
+    saved = Message.where(role: 'bot').last
+    assert_equal '[картинка]', saved.body
+    assert_equal 22, saved.message_id
+    assert_equal 55, saved.message_thread_id
+  end
+
+  # When the image send fails, send_image returns nil and posts a fallback
+  # text — must NOT persist a mislabeled [картинка] row.
+  def test_deliver_image_failure_persists_nothing
+    api = Class.new do
+      define_method(:sendPhoto) { |**_params| raise 'boom' }
+      define_method(:sendMessage) { |_params| OpenStruct.new(message_id: 999) }
+    end.new
+    before = Message.where(role: 'bot').count
+    deliver_responder(api: api).send(:deliver, CommandResult.image('http://x/pic.png'))
+    assert_equal before, Message.where(role: 'bot').count
+  end
+
+  def test_deliver_voice_persists_and_removes_scratch_file
+    require 'tempfile'
+    file = Tempfile.new(['voice', '.ogg'])
+    file.write('x'); file.close
+    path = file.path
+    api = Class.new do
+      define_method(:sendVoice) do |**params|
+        OpenStruct.new(message_id: 33, message_thread_id: params[:message_thread_id])
+      end
+    end.new
+    deliver_responder(api: api, thread_id: 88).send(:deliver, CommandResult.voice(path))
+    saved = Message.where(role: 'bot').last
+    assert_equal '[голос]', saved.body
+    assert_equal 33, saved.message_id
+    assert_equal 88, saved.message_thread_id
+    refute File.exist?(path), 'voice scratch file should be removed after send'
+  end
+
+  # #2: a reply to a bot message that was evicted from the recent window
+  # still resolves, because the bot row exists and ChatContext backfills it.
+  def test_reply_to_persisted_bot_message_resolves_via_backfill
+    base = Time.now - 1000
+    bot_message(chat_id: 100, body: '[стикер]', attrs: { message_id: 500, created_at: base })
+    15.times do |i|
+      user_message(chat_id: 100, body: "msg#{i}", user: @user,
+                   attrs: { message_id: 600 + i, created_at: base + (i + 1) * 10 })
+    end
+    user_message(chat_id: 100, body: 'отвечаю боту', user: @user,
+                 attrs: { message_id: 700, reply_to_message_id: 500, created_at: base + 1000 })
+
+    ctx = Class.new { include ChatContext }.new
+    parsed = JSON.parse(ctx.get_chat_context(100))
+    bodies = parsed.map { |m| m['msg'] }
+    assert_includes bodies, '[стикер]', 'evicted bot reply target should be backfilled'
+    reply_row = parsed.find { |m| m['id'] == 700 }
+    assert_equal 500, reply_row['reply_to']
   end
 
   # save_message updates existing row in place on edit_date; no duplicate
