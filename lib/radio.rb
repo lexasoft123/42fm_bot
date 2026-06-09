@@ -14,7 +14,14 @@ class Radio
   # commands always hit a warm socket. Interval must stay well under
   # Liquidsoap's idle-close timeout.
   KEEPALIVE_INTERVAL = 20
-  KEEPALIVE_CMD      = "request.queue" # harmless, source-independent status ping
+  KEEPALIVE_CMD      = "request.alive" # harmless, source-independent status ping
+  # annotate: tag attached to every user request on push so #queue can
+  # identify user requests within request.alive. Liquidsoap's request.queue
+  # operator prefetches the next request out of its visible queue, so
+  # `request.queue` reads empty within seconds of a push — we enumerate
+  # request.alive and filter by this tag instead. Verified on Liquidsoap
+  # 2.2.5: annotate metadata round-trips through request.metadata.
+  REQUEST_TAG = "bot_req"
 
   def initialize
     @sock      = nil
@@ -51,7 +58,13 @@ class Radio
     return nil if songs.empty?
 
     song   = songs.sample
-    req_id = command("request.push #{song.absolute_path}")
+    # Tag the push with annotate: so #queue can pick this request out of
+    # request.alive (see REQUEST_TAG). The metadata list (bot_req="1") is a
+    # fixed prefix; Liquidsoap's annotate grammar consumes everything after
+    # the final ':' as the terminal URI to end-of-line, so path characters
+    # (spaces/quotes/colons) stay in URI position and can't re-enter
+    # key/value parsing. %() is just to embed the inner double-quotes.
+    req_id = command(%(request.push annotate:#{REQUEST_TAG}="1":#{song.absolute_path}))
     meta   = get_track_metadata(req_id)
     name   = meta ? format_track_name(meta, request_id: req_id)
                   : "#{song.display_name} [#{req_id.to_i}]"
@@ -63,14 +76,19 @@ class Radio
   end
 
   def queue
-    queue_tracks = command("request.queue").split(/\s/)
-    return nil if queue_tracks.empty?
-    # Skip slots whose metadata Liquidsoap can't resolve rather than
-    # rendering a column of "(нет данных)" lines. All blank → nil → the
-    # command renders "нихуя нет".
-    names = queue_tracks.filter_map do |tr|
-      meta = get_track_metadata(tr)
-      format_track_name(meta, request_id: tr) if meta
+    # Enumerate ALL alive requests and keep only user requests (tagged with
+    # REQUEST_TAG via annotate: on push). request.queue alone is unreliable —
+    # the request.queue operator prefetches the next request out of its
+    # visible queue, so it reads empty seconds after a push. request.alive
+    # covers both queued and now-playing requests; finished ones drop out of
+    # request.alive automatically, so this self-prunes. All blank → nil →
+    # the command renders "нихуя нет".
+    ids = command("request.alive").split # no-arg split drops blank tokens
+    return nil if ids.empty?
+    names = ids.filter_map do |id|
+      meta = get_track_metadata(id)
+      next unless meta && meta[REQUEST_TAG.to_sym] == "1"
+      format_track_name(meta, request_id: id)
     end
     names.empty? ? nil : names.join("\n")
   end

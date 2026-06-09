@@ -4,6 +4,8 @@ require_relative '../lib/radio'
 # Radio#track / #queue must degrade gracefully when Liquidsoap returns
 # blank metadata instead of surfacing "(нет данных)" placeholder lines.
 class RadioDegradationTest < BotTest
+  include Fixtures::Songs
+
   # Build a Radio whose private #command is replaced by a router over the
   # given case-block, so no real TCP socket is opened.
   def radio_with(&router)
@@ -29,24 +31,50 @@ class RadioDegradationTest < BotTest
     assert_includes result, 'осталось'
   end
 
-  def test_queue_all_blank_slots_returns_nil
-    radio = radio_with do |cmd, raw: false|
-      cmd =~ /request\.queue/ ? '5 6' : ''
-    end
+  def test_queue_empty_when_no_alive_requests
+    radio = radio_with { |cmd, raw: false| '' }
     assert_nil radio.queue
   end
 
-  def test_queue_drops_blank_slots
+  # request.alive lists rotation tracks too; only user requests carry the
+  # annotate bot_req="1" tag and should appear in the queue.
+  def test_queue_shows_only_tagged_user_requests
     radio = radio_with do |cmd, raw: false|
       case cmd
-      when /request\.queue/         then '5 6'
-      when /request\.metadata 5/    then %(artist="Nirvana"\ntitle="Lithium"\n)
+      when /request\.alive/         then '5 6 7'
+      when /request\.metadata 5/    then %(artist="Nirvana"\ntitle="Lithium"\nbot_req="1"\n)
+      when /request\.metadata 6/    then %(artist="Rotation"\ntitle="Filler"\nsource="music_txt"\n)
+      when /request\.metadata 7/    then %(artist="Metallica"\ntitle="One"\nbot_req="1"\n)
       else ''
       end
     end
     result = radio.queue
     assert_includes result, 'Nirvana — Lithium'
-    refute_includes result, '(нет данных)'
+    assert_includes result, 'Metallica — One'
+    refute_includes result, 'Rotation — Filler' # untagged rotation track excluded
+  end
+
+  def test_queue_nil_when_alive_has_no_user_requests
+    radio = radio_with do |cmd, raw: false|
+      case cmd
+      when /request\.alive/      then '6'
+      when /request\.metadata 6/ then %(artist="Rotation"\ntitle="Filler"\nsource="music_txt"\n)
+      else ''
+      end
+    end
+    assert_nil radio.queue
+  end
+
+  # request push carries the annotate tag so #queue can find it later.
+  def test_request_pushes_with_annotate_tag
+    metallica(filepath: 'metallica/one.mp3')
+    pushed = nil
+    radio = radio_with do |cmd, raw: false|
+      pushed = cmd if cmd.start_with?('request.push')
+      cmd.start_with?('request.push') ? '42' : ''
+    end
+    radio.request('Metallica')
+    assert_includes pushed, 'annotate:bot_req="1":'
   end
 
   # Keepalive periodically pings with the status command so the persistent
