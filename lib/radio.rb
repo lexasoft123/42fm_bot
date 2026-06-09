@@ -151,7 +151,9 @@ class Radio
         raise IOError, "connection closed" unless res
         res.force_encoding('UTF-8')
         result = raw ? res : res.gsub(/[\r\n]+/, "").gsub("END", "").gsub(/\\"/, '"')
-        LOGGER.debug "#{self.class.name}#command(#{cmd.split.first}) took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms" if defined?(LOGGER)
+        # Keepalive pings fire every KEEPALIVE_INTERVAL — logging each one
+        # floods bot.log with noise, so only real commands get timed.
+        LOGGER.debug "#{self.class.name}#command(#{cmd.split.first}) took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms" if defined?(LOGGER) && cmd != KEEPALIVE_CMD
         result
       # Timeout::Error included so a *hung* (half-open) socket also resets
       # @sock and reconnects — otherwise a hang would reuse the dead socket
