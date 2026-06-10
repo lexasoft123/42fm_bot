@@ -32,16 +32,36 @@ module Agent
       # that haven't defined an `agent_vision` setting.
       @setting   = pick_setting
       @api_type  = GptMaster.resolve_setting(@setting)[:api_type]
+      # Images fetched mid-loop by tools (view_image) — queued here by
+      # materialize_result, injected into `messages` after the iteration's
+      # tool results, then the setting upgrades to agent_vision.
+      @pending_images = []
       LOGGER.warn "[chat=#{chat_id}] Agent::Runner initialized without Telegram api — tools that send media will fail" unless api
       @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, api: api,
                      image: image, audio: audio,
-                     reply_to_message_id: reply_to_message_id }
+                     reply_to_message_id: reply_to_message_id,
+                     can_view_image: can_view_image? }
     end
 
     def pick_setting
       return 'agent' unless @image
       has_vision = Settings.chat_gpt&.dig('settings')&.key?('agent_vision')
       has_vision ? 'agent_vision' : 'agent'
+    end
+
+    # Whether the view_image tool can actually get an image in front of the
+    # model this turn. True when we're already on agent_vision, or when
+    # agent_vision exists AND shares api_type with the active setting — the
+    # mid-loop switch replays accumulated assistant/tool messages, which are
+    # provider-shaped; switching across api_types (anthropic ↔ openai)
+    # would corrupt the request, so the tool degrades gracefully instead.
+    def can_view_image?
+      return true if @setting == 'agent_vision'
+      return false unless Settings.chat_gpt&.dig('settings')&.key?('agent_vision')
+      GptMaster.resolve_setting('agent_vision')[:api_type] == @api_type
+    rescue => e
+      LOGGER.warn "[chat=#{@chat_id}] [AGENT] can_view_image?: #{e.class}: #{e.message}" if defined?(LOGGER)
+      false
     end
 
     def run
@@ -95,6 +115,11 @@ module Agent
           alog :info, "  #{tc[:name]} took=#{tool_ms}ms → #{result[0..TOOL_RESULT_PREVIEW_CHARS]}#{result.length > TOOL_RESULT_PREVIEW_CHARS ? '...' : ''}"
           messages << build_tool_result_message(tc[:id], result)
         end
+
+        # MUST stay strictly after the tool_calls.each block: openai requires
+        # every tool_call answered by a `tool` message before any other role
+        # appears, and the anthropic merge targets the last tool_result turn.
+        inject_pending_images(messages) unless @pending_images.empty?
       end
 
       # Safety: MAX_ITERATIONS hit without the agent producing a final text response.
@@ -239,11 +264,63 @@ module Agent
       "идите нахуй"
     end
 
-    # Tools may return Agent::ToolResult for structured outcomes. For deferred
-    # results, persist the intent to scratchpad here and surface a structured
-    # prefix to the LLM. Plain String returns pass through unchanged.
+    # Inject tool-fetched images (view_image) into the conversation so the
+    # model can actually see them, then upgrade to the vision setting.
+    # Image blocks use the Anthropic shape everywhere; GptMaster rewrites
+    # them to OpenAI `image_url` at the wire for openai-compat providers.
+    def inject_pending_images(messages)
+      blocks = @pending_images.map do |img|
+        { type: 'image', source: { type: 'base64', media_type: img[:media_type], data: img[:data] } }
+      end
+      if anthropic?
+        # Anthropic forbids two consecutive user turns — merge the image
+        # blocks into the last tool_result user message instead (a user turn
+        # may carry tool_result + image blocks together). Array() guards the
+        # implicit invariant that messages.last is the array-content
+        # tool_result turn the each-loop just appended — a string-content
+        # message would otherwise raise on `+`.
+        last = messages.last
+        last[:content] = Array(last[:content]) + blocks
+      else
+        # openai: a fresh user turn after all tool messages is valid.
+        messages << { role: 'user', content: blocks + [
+          { type: 'text', text: 'Выше — картинк(и), загруженные через view_image. Рассмотри их и используй для ответа.' }
+        ] }
+      end
+      upgrade_to_vision!(messages)
+      @pending_images = []
+    end
+
+    # Switch the remaining iterations of this turn to the vision setting.
+    # Only reachable when can_view_image? was true, which guarantees
+    # agent_vision exists and shares api_type with the current setting —
+    # so the accumulated messages stay wire-compatible and `tools` need no
+    # rebuild. Provider-specific extension fields still differ within one
+    # api_type: DeepSeek assistant messages carry `reasoning_content`,
+    # which another openai-compat endpoint (grok) may reject on replay —
+    # strip it.
+    def upgrade_to_vision!(messages)
+      return if @setting == 'agent_vision'
+      messages.each { |m| m.delete('reasoning_content') if m.is_a?(Hash) }
+      alog :info, "view_image: upgrading setting #{@setting} → agent_vision for the rest of the turn"
+      @setting  = 'agent_vision'
+      # No-op under can_view_image?'s same-api_type invariant, but keeps
+      # @setting/@api_type from ever drifting if that invariant changes.
+      @api_type = GptMaster.resolve_setting(@setting)[:api_type]
+    end
+
+    # Tools may return Agent::ToolResult for structured outcomes. Image
+    # results queue their payload for inject_pending_images (checked FIRST —
+    # an image result is never deferred, and falling through to the deferred
+    # guard would silently drop the image). For deferred results, persist
+    # the intent to scratchpad here and surface a structured prefix to the
+    # LLM. Plain String returns pass through unchanged.
     def materialize_result(result)
       return result.to_s unless result.is_a?(Agent::ToolResult)
+      if result.image?
+        @pending_images << result.image
+        return result.user_text
+      end
       return result.user_text unless result.deferred?
 
       due_at = result.retry_in_min ? (Time.now + result.retry_in_min * 60) : nil

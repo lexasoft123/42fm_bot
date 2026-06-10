@@ -217,32 +217,12 @@ class ImageGenTaskHandler
   end
 
   # Save the sent photo as a bot Message row so user replies pointing at the
-  # photo's Telegram message_id can resolve to a known row (fixes "reply_to
-  # points at an id we never indexed" context gaps).
+  # photo's Telegram message_id can resolve to a known row, and so the agent
+  # can re-view its own generated image via the view_image tool (the photo
+  # file_id is captured by Message.persist_bot_reply — the centralized
+  # bot-side persistence path).
   def persist_bot_media_row(chat_id, response, caption)
-    msg_id = extract_message_id(response)
-    return unless msg_id
-    thread_id = extract_message_thread_id(response)
-    ActiveRecord::Base.connection_pool.with_connection do
-      Message.create(
-        role: 'bot', chat_id: chat_id, body: caption,
-        message_id: msg_id, message_thread_id: thread_id
-      )
-    end
-  rescue => e
-    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} persist_bot_media_row failed: #{e.class}: #{e.message}"
-  end
-
-  def extract_message_id(resp)
-    return resp.message_id if resp.respond_to?(:message_id)
-    return nil unless resp.is_a?(Hash)
-    resp.dig('result', 'message_id') || resp['message_id']
-  end
-
-  def extract_message_thread_id(resp)
-    return resp.message_thread_id if resp.respond_to?(:message_thread_id)
-    return nil unless resp.is_a?(Hash)
-    resp.dig('result', 'message_thread_id') || resp['message_thread_id']
+    Message.persist_bot_reply(chat_id: chat_id, body: caption, response: response)
   end
 
   def download_to_tempfile(url)

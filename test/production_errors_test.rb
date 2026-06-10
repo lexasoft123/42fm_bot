@@ -504,6 +504,21 @@ class SunoFilenameTest < BotTest
     assert_equal before + 1, Message.count
     assert_equal 2001, Message.order(:id).last.message_id
   end
+
+  # Regression: suno AUDIO media-group rows must never be flagged as photos.
+  # persist_bot_reply (the centralized write path) extracts photo file_ids
+  # from photo sends — an audio message has photo nil (or, defensively, an
+  # empty array if Telegram's shape ever changes), so attachment_photo_file_id
+  # must stay nil and the row must not serialize with `photo: true`.
+  def test_persist_bot_media_rows_audio_rows_have_no_photo_file_id
+    handler = SunoTaskHandler.new
+    messages = [OpenStruct.new(message_id: 3001, message_thread_id: nil, photo: nil),
+                OpenStruct.new(message_id: 3002, message_thread_id: nil, photo: [])]
+    handler.send(:persist_bot_media_rows, -100, messages, 'Track', {})
+    rows = Message.where(chat_id: -100, message_id: [3001, 3002]).order(:message_id)
+    assert_equal 2, rows.size
+    rows.each { |r| assert_nil r.attachment_photo_file_id }
+  end
 end
 
 # ==========================================================================

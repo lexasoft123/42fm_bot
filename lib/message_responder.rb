@@ -189,13 +189,14 @@ class MessageResponder
     body = message.text || message.caption
     audio_src = message.audio || message.voice ||
                 (message.document if message.document&.mime_type&.start_with?('audio/'))
-    # Persist audio-only messages too (no caption) so `Commands::GptChat`
-    # can walk back through recent rows to find an earlier upload when the
-    # user later asks for a cover without using Telegram's reply feature.
-    # Body for an audio-only row uses a stable marker so the agent's chat
-    # context shows "[аудио]" rather than empty.
-    return unless body || audio_src
-    body ||= '[аудио]'
+    photo_file_id = photo_attachment_file_id
+    # Persist media-only messages too (no caption) so `Commands::GptChat`
+    # can walk back through recent rows to find an earlier audio upload, and
+    # the agent's `view_image` tool can fetch an earlier photo. Body for a
+    # media-only row uses a stable marker so the agent's chat context shows
+    # "[аудио]" / "[фото]" rather than empty.
+    return unless body || audio_src || photo_file_id
+    body ||= audio_src ? '[аудио]' : '[фото]'
 
     if message.edit_date
       existing = Message.find_by(chat_id: @chat_id, message_id: message.message_id)
@@ -205,7 +206,7 @@ class MessageResponder
       end
     end
 
-    audio_only = !message.text && !message.caption  # nothing to extract from
+    media_only = !message.text && !message.caption  # nothing to extract from
     Message.create(
       user_uid: @user.uid, chat_id: @chat_id, body: body,
       message_id: message.message_id,
@@ -217,12 +218,21 @@ class MessageResponder
       attachment_mime_type: (audio_src.respond_to?(:mime_type) ? audio_src.mime_type : nil),
       attachment_title:     attachment_title_from(audio_src),
       attachment_performer: (audio_src.respond_to?(:performer) ? audio_src.performer : nil),
-      attachment_duration:  (audio_src.respond_to?(:duration)  ? audio_src.duration  : nil)
+      attachment_duration:  (audio_src.respond_to?(:duration)  ? audio_src.duration  : nil),
+      attachment_photo_file_id: photo_file_id
     )
-    # Audio-only rows have body=`[аудио]` placeholder — feeding them to the
-    # knowledge extractor adds noise AND bumps `count % extract_every`
-    # cadence so real-text extraction fires on the wrong message. Skip.
-    maybe_extract_knowledge unless message.edit_date || audio_only
+    # Media-only rows have a `[аудио]`/`[фото]` placeholder body — feeding
+    # them to the knowledge extractor adds noise AND bumps
+    # `count % extract_every` cadence so real-text extraction fires on the
+    # wrong message. Skip.
+    maybe_extract_knowledge unless message.edit_date || media_only
+  end
+
+  # Pick the photo size whose file_id we persist for later `view_image`
+  # fetches — see Message.pick_photo_file_id (shared with the bot-side
+  # sendPhoto/sendMediaGroup persistence paths).
+  def photo_attachment_file_id
+    Message.pick_photo_file_id(message.photo)
   end
 
   def maybe_extract_knowledge

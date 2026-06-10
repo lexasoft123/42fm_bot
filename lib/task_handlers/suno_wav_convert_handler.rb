@@ -169,18 +169,11 @@ class SunoWavConvertHandler
     "#{name}.wav"
   end
 
+  # Delegates to Message.persist_bot_reply (the centralized bot-side
+  # persistence path), which handles the 'result' envelope itself.
   def persist_bot_media_row(chat_id, response, title, bg_task_external_id: nil)
-    msg = response.is_a?(Hash) ? response['result'] : response
-    mid = msg.respond_to?(:message_id) ? msg.message_id : msg&.dig('message_id')
-    tid = msg.respond_to?(:message_thread_id) ? msg.message_thread_id : msg&.dig('message_thread_id')
-    return unless mid
-    body = "[wav: #{title}]"
-    ActiveRecord::Base.connection_pool.with_connection do
-      Message.create(role: 'bot', chat_id: chat_id, body: body, message_id: mid,
-                     message_thread_id: tid, bg_task_external_id: bg_task_external_id)
-    end
-  rescue => e
-    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} persist_bot_media_row failed: #{e.class}: #{e.message}"
+    Message.persist_bot_reply(chat_id: chat_id, body: "[wav: #{title}]", response: response,
+                              bg_task_external_id: bg_task_external_id)
   end
 
   # See SunoTaskHandler#mark_failed_and_notify for `error_detail` rationale.

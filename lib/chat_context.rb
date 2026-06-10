@@ -4,6 +4,7 @@ module ChatContext
                 'messages.role, messages.body, messages.attachment_file_id, ' \
                 'messages.attachment_mime_type, messages.attachment_title, ' \
                 'messages.attachment_performer, messages.attachment_duration, ' \
+                'messages.attachment_photo_file_id, ' \
                 'users.uid, users.name, users.first_name, users.last_name'.freeze
 
   def get_chat_context(chat_id, thread_id: nil)
@@ -93,6 +94,11 @@ module ChatContext
       meta[:mime]      = r.attachment_mime_type if r.try(:attachment_mime_type)
       h[:audio_meta] = meta unless meta.empty?
     end
+    # `photo: true` tells the agent an image is attached to this message and
+    # can be fetched on demand via the view_image tool (by message `id`).
+    # The file_id itself stays DB-internal — it's an opaque handle and would
+    # only bloat the context.
+    h[:photo] = true if r.try(:attachment_photo_file_id)
     h[:who] = (r.role == 'bot') ? { name: 'Жзяцля' } : identity_for_row(r)
     h[:msg] = r.body
     h

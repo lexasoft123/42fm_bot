@@ -150,20 +150,17 @@ class SunoCoverArtHandler
     false
   end
 
+  # One bot row per media-group image via Message.persist_bot_reply (the
+  # centralized bot-side persistence path) — which also captures each
+  # photo's file_id so the agent can re-view the generated cover art via
+  # the view_image tool.
   def persist_bot_media_rows(chat_id, result, caption, bg_task_external_id: nil)
     messages = result.is_a?(Hash) ? result['result'] : result
     return unless messages.is_a?(Array)
     messages.each do |msg|
-      mid = msg.respond_to?(:message_id) ? msg.message_id : msg['message_id']
-      tid = msg.respond_to?(:message_thread_id) ? msg.message_thread_id : msg['message_thread_id']
-      next unless mid
-      ActiveRecord::Base.connection_pool.with_connection do
-        Message.create(role: 'bot', chat_id: chat_id, body: "[#{caption}]", message_id: mid,
-                       message_thread_id: tid, bg_task_external_id: bg_task_external_id)
-      end
+      Message.persist_bot_reply(chat_id: chat_id, body: "[#{caption}]", response: msg,
+                                bg_task_external_id: bg_task_external_id)
     end
-  rescue => e
-    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} persist_bot_media_rows failed: #{e.class}: #{e.message}"
   end
 
   # See SunoTaskHandler#mark_failed_and_notify for `error_detail` rationale —

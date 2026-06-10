@@ -274,13 +274,44 @@ class GptMaster
       usage:   usage,
       request: {
         system:   body[:system],
-        messages: body[:messages],
+        messages: redact_image_blocks(body[:messages]),
         tools:    body[:tools]&.map { |t| t.is_a?(Hash) ? (t[:name] || t['name']) : t }
       },
       response: response
     )
   rescue => e
     LOGGER.warn "#{tag} gpt dump failed: #{e.class}: #{e.message}"
+  end
+
+  # Replace base64 image payloads with a size stub before dumping to
+  # gpt.log — a single photo is megabytes of base64 PER CALL (the image
+  # rides every iteration of the agent loop), which would blow through the
+  # log rotation budget while carrying zero debugging value. Covers both
+  # the Anthropic shape (sent to anthropic providers) and the OpenAI
+  # data-URI shape (post-conversion, openai-compat providers).
+  def redact_image_blocks(messages)
+    return messages unless messages.is_a?(Array)
+    messages.map do |m|
+      content = m.is_a?(Hash) ? (m[:content] || m['content']) : nil
+      next m unless content.is_a?(Array)
+      redacted = content.map do |b|
+        next b unless b.is_a?(Hash)
+        case b[:type] || b['type']
+        when 'image'
+          src  = b[:source] || b['source'] || {}
+          data = (src[:data] || src['data']).to_s
+          { type: 'image', source: { type: 'base64',
+                                     media_type: src[:media_type] || src['media_type'],
+                                     data: "<#{data.bytesize} bytes redacted>" } }
+        when 'image_url'
+          url = (b.dig(:image_url, :url) || b.dig('image_url', 'url')).to_s
+          { type: 'image_url', image_url: { url: "<data-uri #{url.bytesize} bytes redacted>" } }
+        else
+          b
+        end
+      end
+      m.key?(:content) ? m.merge(content: redacted) : m.merge('content' => redacted)
+    end
   end
 
   def extract_usage(response)

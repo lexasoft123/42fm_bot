@@ -1,4 +1,5 @@
 require 'base64'
+require_relative '../telegram_file'
 
 module Commands
   class GptChat < Base
@@ -130,21 +131,11 @@ module Commands
       }
     end
 
+    # Thin wrapper around the shared helper so extract_image /
+    # extract_replied_image stay unchanged. The view_image agent tool calls
+    # TelegramFile.download_image directly for historical photos.
     def download_photo(file_id)
-      file = bot.api.getFile(file_id: file_id)
-      file_path = file.file_path
-      return nil unless file_path
-
-      token = Settings.telegram['token']
-      url = "https://api.telegram.org/file/bot#{token}/#{file_path}"
-      response = HTTParty.get(url, timeout: 30)
-      return nil unless response.code == 200
-
-      LOGGER.debug "[chat=#{chat_id}] #{self.class.name}#download_photo: downloaded #{response.body.bytesize} bytes"
-      { data: Base64.strict_encode64(response.body), media_type: 'image/jpeg' }
-    rescue => e
-      LOGGER.warn "[chat=#{chat_id}] #{self.class.name}#download_photo failed: #{e.class}: #{e.message}"
-      nil
+      TelegramFile.download_image(bot.api, file_id, chat_id: chat_id)
     end
   end
 end
