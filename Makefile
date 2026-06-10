@@ -43,7 +43,8 @@ TEST_FILES := \
 	test/rules_tool_test.rb \
 	test/award_tool_test.rb \
 	test/quote_command_test.rb \
-	test/chat_wrapped_test.rb
+	test/chat_wrapped_test.rb \
+	test/access_request_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \

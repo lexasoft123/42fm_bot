@@ -1,4 +1,5 @@
 require_relative 'test_helper'
+require 'ostruct'
 require_relative '../lib/agent/scratchpad'
 
 class ChatTest < BotTest
@@ -67,6 +68,49 @@ class ChatTest < BotTest
       Chat.sync_from_config!
       assert_equal first, Chat.find(-100).first_seen_at
     end
+  end
+
+  def test_label_from_telegram_prefers_title
+    tg = OpenStruct.new(title: 'Группа', first_name: 'X', username: 'y')
+    assert_equal 'Группа', Chat.label_from_telegram(tg)
+  end
+
+  def test_label_from_telegram_private_chat_uses_names
+    tg = OpenStruct.new(title: nil, first_name: 'Алексей', last_name: 'Т', username: 'lexa')
+    assert_equal 'Алексей Т', Chat.label_from_telegram(tg)
+  end
+
+  def test_label_from_telegram_falls_back_to_username
+    tg = OpenStruct.new(title: nil, first_name: '', last_name: nil, username: 'lexa')
+    assert_equal '@lexa', Chat.label_from_telegram(tg)
+  end
+
+  def test_label_from_telegram_nil_when_nothing_known
+    assert_nil Chat.label_from_telegram(OpenStruct.new(title: '', username: ''))
+  end
+
+  def test_touch_seen_keeps_existing_title_when_label_nil
+    Chat.create!(chat_id: 9, title: 'Имя', chat_type: 'private', authorized: true, audio: false)
+    Chat.touch_seen(9, title: nil, type: 'private')
+    assert_equal 'Имя', Chat.find(9).title
+  end
+
+  def test_label_from_telegram_handles_raw_hash_and_result_envelope
+    assert_equal 'Группа', Chat.label_from_telegram({ 'result' => { 'title' => 'Группа' } })
+    assert_equal 'Вася', Chat.label_from_telegram({ 'first_name' => 'Вася' })
+  end
+
+  def test_sync_from_config_unknown_name_does_not_clobber_backfilled_title
+    Chat.create!(chat_id: -100, title: 'Реальное имя', chat_type: 'group', authorized: true, audio: false)
+    fake_settings_auth({ 'chats' => [{ 'id' => -100, 'name' => 'unknown' }] }) do
+      Chat.sync_from_config!
+    end
+    assert_equal 'Реальное имя', Chat.find(-100).title,
+                 "config 'name: unknown' must not re-clobber a backfilled title on restart"
+    fake_settings_auth({ 'chats' => [{ 'id' => -100, 'name' => 'Alpha' }] }) do
+      Chat.sync_from_config!
+    end
+    assert_equal 'Alpha', Chat.find(-100).title, 'a REAL config name still overwrites'
   end
 
   private

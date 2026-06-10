@@ -43,6 +43,10 @@ module AdminMenu
         Action.new(kind: :mutate, view: :user_toggle, params: { uid: args[0].to_i })
       when 'status'
         Action.new(kind: :render, view: :status, params: {})
+      when 'req_accept'
+        Action.new(kind: :mutate, view: :req_accept, params: { chat_id: args[0].to_i })
+      when 'req_decline'
+        Action.new(kind: :mutate, view: :req_decline, params: { chat_id: args[0].to_i })
       else
         Action.new(kind: :unknown, answer: '🚫 unknown')
       end

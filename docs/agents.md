@@ -251,6 +251,7 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 | Agent scratchpad (working memory) | `lib/agent/scratchpad.rb` + `models/chat_state.rb` + `lib/agent/tools/scratchpad.rb` (`remember`/`forget`); rendered as `{SCRATCHPAD}` in `chat_gpt.agent_prompt`. See ADR-003. |
 | Agent reacts to task outcomes | `lib/task_handlers/agent_event_handler.rb` + `lib/task_handlers/agent_event_emitter.rb` mixin (used by image_gen + suno handlers). 10/hour/chat cap. See ADR-003 PR-2. |
 | Telegram reactions capture | `lib/bot.rb` (`ALLOWED_UPDATES`) + `lib/bot_dispatcher.rb` (reaction branches) + `Message.top_reacted(scope:)` |
+| /start access requests | `lib/access_request.rb` + `adm:req_*` actions in `lib/admin_menu/{router,callback_handler}.rb` |
 | Rules-war game | `lib/agent/scratchpad.rb` (rules API) + `lib/agent/tools/rules.rb` + `lib/commands/rules.rb` + `lib/task_handlers/rule_obituary_handler.rb` + `lib/cron_scheduler.rb` |
 | Auto-awards | `lib/agent/tools/award.rb` + `ImageGenTaskHandler#caption_for` |
 | Quote / Wrapped | `lib/commands/quote.rb` / `lib/chat_wrapped.rb` + `lib/task_handlers/wrapped_digest_handler.rb` + `lib/commands/wrapped.rb` + `digests:` settings block |

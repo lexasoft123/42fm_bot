@@ -14,17 +14,21 @@ module AdminMenu
       { text: "Админ-меню\n\nВыбери раздел:", reply_markup: kb }
     end
 
-    def chats(page: 0)
+    def chats(page: 0, api: nil)
       total = Chat.count
       pages = [(total + PAGE_SIZE - 1) / PAGE_SIZE, 1].max
       page  = page.clamp(0, pages - 1)
-      rows  = Chat.order(:chat_id).offset(page * PAGE_SIZE).limit(PAGE_SIZE).to_a
+      # Live chats first: authorized DESC, then most recently seen (SQLite
+      # sorts NULL last_seen_at last under DESC) — dead legacy rows sink to
+      # the tail pages instead of burying the real chats.
+      rows = Chat.order(Arel.sql('authorized DESC, last_seen_at DESC, chat_id'))
+                 .offset(page * PAGE_SIZE).limit(PAGE_SIZE).to_a
+      refresh_titles!(rows, api) if api
 
       buttons = rows.map { |c|
         flag  = c.authorized ? '✓' : '✗'
         audio = c.audio      ? ' 🎵' : ''
-        title = (c.title.to_s.empty? ? c.chat_id.to_s : c.title.to_s)
-        [btn("#{flag} #{title}#{audio}", "adm:chat:#{c.chat_id}")]
+        [btn("#{flag} #{display_title(c)}#{audio}", "adm:chat:#{c.chat_id}")]
       }
 
       nav = []
@@ -52,7 +56,7 @@ module AdminMenu
       ]
 
       lines = [
-        chat.title.to_s.empty? ? "id: #{chat.chat_id}" : "#{chat.title} (id: #{chat.chat_id})",
+        unknown_title?(chat.title) ? "id: #{chat.chat_id}" : "#{chat.title} (id: #{chat.chat_id})",
         "type: #{chat.chat_type}",
         "authorized: #{chat.authorized ? '✓' : '✗'}",
         "audio: #{chat.audio ? '✓' : '✗'}",
@@ -75,7 +79,7 @@ module AdminMenu
       }
       rows << [btn('⬅️ Назад', "adm:chat:#{chat_id}")]
 
-      text = "Лимиты для «#{chat.title || chat_id}»\n\nНажми бакет, чтобы изменить."
+      text = "Лимиты для «#{display_title(chat)}»\n\nНажми бакет, чтобы изменить."
       { text: text, reply_markup: inline(rows) }
     end
 
@@ -146,12 +150,57 @@ module AdminMenu
       { text: lines.join("\n"), reply_markup: kb }
     end
 
+    # Replaces a /start access-request notification after the admin acted.
+    def request_resolved(chat_id:, accepted:)
+      chat = Chat.find_by(chat_id: chat_id)
+      label = chat ? display_title(chat) : chat_id.to_s
+      verdict = accepted ? "✅ Принят: #{label}" : "❌ Отклонён: #{label}"
+      { text: "#{verdict} (id: #{chat_id})",
+        reply_markup: inline([[btn('⚙️ Детали чата', "adm:chat:#{chat_id}")]]) }
+    end
+
     def confirm_last_authorized_off(chat_id:)
       kb = inline([
         [btn('✅ Да, отключить', "adm:chat_toggle_auth_confirm:#{chat_id}")],
         [btn('❌ Отмена',         "adm:chat:#{chat_id}")],
       ])
       { text: "Останется 0 авторизованных чатов. Точно?", reply_markup: kb }
+    end
+
+    # Legacy config-seeded rows carry the literal title "unknown" — as
+    # useless as an empty one. Fall back to the chat_id so every button is
+    # at least identifiable. (Single source of truth lives on the model.)
+    def unknown_title?(title)
+      Chat.unknown_title?(title)
+    end
+
+    def display_title(chat)
+      unknown_title?(chat.title) ? chat.chat_id.to_s : chat.title.to_s
+    end
+
+    # Self-heal unknown titles while browsing: ask Telegram for the chat's
+    # current title/name and persist it. AUTHORIZED rows only — these calls
+    # run synchronously in bot.listen's single-threaded loop, and the dead
+    # legacy rows (exactly the ones likely to hang getChat) are all
+    # unauthorized; they keep showing their chat_id and sink to the tail
+    # pages. Dead/erroring chats are skipped silently. At most PAGE_SIZE
+    # getChat calls per page render, in practice ~0 once titles are healed.
+    def refresh_titles!(rows, api)
+      rows.each do |c|
+        next unless c.authorized && unknown_title?(c.title)
+        begin
+          info = api.getChat(chat_id: c.chat_id)
+          t = chat_label_from(info)
+          c.update!(title: t) if t && !t.empty?
+        rescue => e
+          LOGGER.debug "[admin_menu] getChat(#{c.chat_id}) failed: #{e.class}: #{e.message}" if defined?(LOGGER)
+        end
+      end
+    end
+
+    # Groups have .title; private chats have first/last name + username.
+    def chat_label_from(info)
+      Chat.label_from_telegram(info)
     end
 
     def btn(text, callback_data)

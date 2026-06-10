@@ -7,6 +7,36 @@ class Chat < ActiveRecord::Base
   has_many :api_usages,       foreign_key: :chat_id
   has_many :knowledge_facts,  class_name: 'Knowledge', foreign_key: :chat_id
 
+  # Legacy config/seed data uses the literal title "unknown" — treat it
+  # like no title at all. Shared by the admin menu views and
+  # sync_from_config! (which must not clobber a backfilled real title
+  # with a config 'name: unknown' on every restart).
+  def self.unknown_title?(title)
+    t = title.to_s.strip
+    t.empty? || t.casecmp('unknown').zero?
+  end
+
+  # Human label for a Telegram chat object (Types::Chat / ChatFullInfo /
+  # raw Hash): groups have a title; private chats only have first/last
+  # name + username. Returns nil when nothing is known — callers keep the
+  # existing stored title in that case. Used by BotDispatcher (at message
+  # time) and the admin menu's getChat title backfill.
+  def self.label_from_telegram(chat)
+    get = ->(key) {
+      if chat.respond_to?(key)
+        chat.public_send(key)
+      elsif chat.is_a?(Hash)
+        chat.dig('result', key.to_s) || chat[key.to_s]
+      end
+    }
+    title = get.(:title).to_s.strip
+    return title unless title.empty?
+    name = [get.(:first_name), get.(:last_name)].map { |s| s.to_s.strip }.reject(&:empty?).join(' ')
+    return name unless name.empty?
+    u = get.(:username).to_s.strip
+    u.empty? ? nil : "@#{u}"
+  end
+
   # Upsert chat metadata on every incoming Telegram message. Idempotent.
   # First-time-seen chats land with authorized=false; promotion to true happens
   # via Chat.sync_from_config! (config-driven) or by manual UPDATE.
@@ -37,7 +67,7 @@ class Chat < ActiveRecord::Base
       chats.each do |c|
         chat = find_or_initialize_by(chat_id: c['id'])
         chat.authorized  = true if chat.new_record?
-        chat.title       = c['name']            if c['name']
+        chat.title       = c['name'] if c['name'] && !unknown_title?(c['name'])
         chat.audio       = !!c['audio']
         chat.rate_limits = c['rate_limits'].to_json if c['rate_limits']
         chat.first_seen_at ||= Time.now

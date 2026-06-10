@@ -119,6 +119,16 @@ class AdminMenuRouterTest < BotTest
     assert_equal :user_toggle, a.view
     assert_equal({ uid: 777 }, a.params)
   end
+
+  def test_access_request_actions
+    a = AdminMenu::Router.parse('adm:req_accept:555')
+    assert a.mutating?
+    assert_equal :req_accept, a.view
+    assert_equal({ chat_id: 555 }, a.params)
+    d = AdminMenu::Router.parse('adm:req_decline:555')
+    assert d.mutating?
+    assert_equal :req_decline, d.view
+  end
 end
 
 class AdminMenuViewsTest < BotTest
@@ -161,6 +171,80 @@ class AdminMenuViewsTest < BotTest
   def test_chat_detail_missing_chat
     v = AdminMenu::Views.chat_detail(chat_id: -999)
     assert_match(/не найден/, v[:text])
+  end
+
+  # --- "unknown" titles (legacy config-seeded rows) ---
+
+  class FakeGetChatApi
+    attr_reader :calls
+    def initialize(title: nil, fail_for: [])
+      @title = title
+      @fail_for = fail_for
+      @calls = []
+    end
+
+    def getChat(chat_id:)
+      @calls << chat_id
+      raise Telegram::Bot::Exceptions::Base, 'kicked' if @fail_for.include?(chat_id)
+      OpenStruct.new(title: @title)
+    end
+  end
+
+  def test_unknown_title_falls_back_to_chat_id_on_buttons
+    Chat.create!(chat_id: -555, title: 'unknown', chat_type: '', authorized: true, audio: false)
+    v = AdminMenu::Views.chats(page: 0)
+    labels = v[:reply_markup].inline_keyboard.flatten.map(&:text)
+    assert(labels.any? { |l| l.include?('-555') }, "expected chat_id in labels: #{labels}")
+    refute(labels.any? { |l| l.include?('unknown') }, 'literal "unknown" must not be shown')
+  end
+
+  def test_chats_ordered_authorized_and_recent_first
+    Chat.create!(chat_id: -1, title: 'dead',  chat_type: '', authorized: false, audio: false)
+    Chat.create!(chat_id: -2, title: 'live',  chat_type: 'supergroup', authorized: true, audio: false, last_seen_at: Time.now)
+    Chat.create!(chat_id: -3, title: 'stale', chat_type: 'supergroup', authorized: true, audio: false)
+    v = AdminMenu::Views.chats(page: 0)
+    labels = v[:reply_markup].inline_keyboard.flatten.map(&:text)
+    live_idx  = labels.index { |l| l.include?('live') }
+    stale_idx = labels.index { |l| l.include?('stale') }
+    dead_idx  = labels.index { |l| l.include?('dead') }
+    assert live_idx < stale_idx, 'recently-seen authorized chat first'
+    assert stale_idx < dead_idx, 'unauthorized chats sink below authorized'
+  end
+
+  def test_refresh_titles_backfills_via_get_chat
+    Chat.create!(chat_id: -777, title: 'unknown', chat_type: '', authorized: true, audio: false)
+    Chat.create!(chat_id: -778, title: 'Котики', chat_type: 'group', authorized: true, audio: false)
+    api = FakeGetChatApi.new(title: 'Старый чат')
+    v = AdminMenu::Views.chats(page: 0, api: api)
+    assert_equal [-777], api.calls, 'getChat only for unknown-titled rows'
+    assert_equal 'Старый чат', Chat.find_by(chat_id: -777).title
+    labels = v[:reply_markup].inline_keyboard.flatten.map(&:text)
+    assert(labels.any? { |l| l.include?('Старый чат') })
+  end
+
+  def test_refresh_titles_skips_dead_chats
+    Chat.create!(chat_id: -888, title: 'unknown', chat_type: '', authorized: true, audio: false)
+    api = FakeGetChatApi.new(title: 'x', fail_for: [-888])
+    v = AdminMenu::Views.chats(page: 0, api: api)
+    assert_equal 'unknown', Chat.find_by(chat_id: -888).title, 'failed getChat leaves row untouched'
+    labels = v[:reply_markup].inline_keyboard.flatten.map(&:text)
+    assert(labels.any? { |l| l.include?('-888') }, 'dead chat keeps showing its id')
+  end
+
+  def test_refresh_titles_never_fetches_unauthorized_rows
+    # Unauthorized legacy rows are the ones most likely to hang getChat —
+    # and these calls run in bot.listen's single-threaded loop.
+    Chat.create!(chat_id: -889, title: 'unknown', chat_type: '', authorized: false, audio: false)
+    api = FakeGetChatApi.new(title: 'x')
+    AdminMenu::Views.chats(page: 0, api: api)
+    assert_empty api.calls, 'unauthorized rows must not trigger getChat'
+  end
+
+  def test_chat_detail_unknown_title_shows_id_line
+    Chat.create!(chat_id: -556, title: 'unknown', chat_type: '', authorized: false, audio: false)
+    v = AdminMenu::Views.chat_detail(chat_id: -556)
+    assert_match(/^id: -556$/, v[:text])
+    refute_match(/unknown \(id/, v[:text])
   end
 end
 
@@ -207,6 +291,29 @@ class AdminMenuCallbackHandlerTest < BotTest
     bot = FakeBot.new
     AdminMenu::CallbackHandler.handle(bot, make_query(uid: ME, data: "adm:chat_toggle_auth_confirm:#{CHAT}"))
     refute Chat.find_by(chat_id: CHAT).authorized, 'confirm path must flip even when it was last'
+  end
+
+  def test_req_accept_authorizes_and_notifies_requester
+    Chat.create!(chat_id: 555, title: 'Вася', chat_type: 'private', authorized: false, audio: false)
+    bot = FakeBot.new
+    AdminMenu::CallbackHandler.handle(bot, make_query(uid: ME, data: 'adm:req_accept:555'))
+    assert Chat.find_by(chat_id: 555).authorized
+    sent = bot.api.calls.select { |n, kw| n == :sendMessage && kw[:chat_id] == 555 }
+    assert_equal 1, sent.size
+    assert_match(/Доступ открыт/, sent.first[1][:text])
+    edit = bot.api.calls.find { |n, _| n == :editMessageText }
+    assert_match(/✅ Принят: Вася/, edit[1][:text])
+  end
+
+  def test_req_decline_keeps_unauthorized_and_notifies
+    Chat.create!(chat_id: 556, title: 'Спамер', chat_type: 'private', authorized: false, audio: false)
+    bot = FakeBot.new
+    AdminMenu::CallbackHandler.handle(bot, make_query(uid: ME, data: 'adm:req_decline:556'))
+    refute Chat.find_by(chat_id: 556).authorized
+    sent = bot.api.calls.select { |n, kw| n == :sendMessage && kw[:chat_id] == 556 }
+    assert_match(/отказано/, sent.first[1][:text])
+    edit = bot.api.calls.find { |n, _| n == :editMessageText }
+    assert_match(/❌ Отклонён: Спамер/, edit[1][:text])
   end
 
   def test_refuse_to_deauthorize_super_admin_private_chat

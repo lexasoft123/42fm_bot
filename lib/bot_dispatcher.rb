@@ -61,9 +61,18 @@ module BotDispatcher
     LOGGER.debug "[chat=#{chat_id}] @#{message.from.username}: #{msg_text}"
     LOGGER.debug "[chat=#{chat_id}] chat_seen: title=#{message.chat.title.inspect} type=#{message.chat.type}"
 
-    return unless authorized?(message)
+    unless authorized?(message)
+      # Not a blanket silent drop anymore: a /start in an unauthorized
+      # PRIVATE chat files an access request (super-admins get ✅/❌
+      # buttons). Everything else keeps the historical silence.
+      AccessRequest.maybe_handle(bot, message)
+      return
+    end
 
-    Chat.touch_seen(chat_id, title: message.chat.title, type: message.chat.type) rescue nil
+    # label_from_telegram instead of bare .title: private chats have no
+    # title, only first/last name + username — without this their rows
+    # never get a usable label in the admin menu.
+    Chat.touch_seen(chat_id, title: Chat.label_from_telegram(message.chat), type: message.chat.type) rescue nil
     MessageResponder.new({ bot: bot, message: message, radio: radio }).respond
   rescue => e
     # Localise per-message faults so one bad update doesn't bounce the entire

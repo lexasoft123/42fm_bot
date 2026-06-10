@@ -38,7 +38,7 @@ module AdminMenu
         handle_mutation(bot, query, action, chat_id, message_id)
       else  # :render
         Session.set(uid, message_id: message_id) if message_id
-        view_response = render(action.view, action.params)
+        view_response = render(action.view, action.params, api: bot.api)
         edit_message(bot, chat_id, message_id, uid, view_response)
         safe_answer(bot, query, '')
       end
@@ -59,17 +59,17 @@ module AdminMenu
         end
       end
 
-      msg = perform_mutation(action)
+      msg = perform_mutation(action, bot)
       view_response = post_mutation_view(action)
       uid = query.from&.id
       edit_message(bot, chat_id, message_id, uid, view_response)
       safe_answer(bot, query, msg || '✓')
     end
 
-    def render(view, params)
+    def render(view, params, api: nil)
       case view
       when :root        then Views.root
-      when :chats       then Views.chats(**params)
+      when :chats       then Views.chats(**params, api: api) # api → title self-heal
       when :chat_detail then Views.chat_detail(**params)
       when :chat_limits then Views.chat_limits(**params)
       when :admins      then Views.admins(**params)
@@ -85,13 +85,30 @@ module AdminMenu
         Views.chat_detail(chat_id: action.params[:chat_id])
       when :user_toggle
         Views.user_detail(uid: action.params[:uid])
+      when :req_accept, :req_decline
+        Views.request_resolved(chat_id: action.params[:chat_id], accepted: action.view == :req_accept)
       else
         Views.root
       end
     end
 
-    def perform_mutation(action)
+    def perform_mutation(action, bot)
       case action.view
+      # /start access requests (AccessRequest). Accept flips the allowlist
+      # bit and tells the requester; decline leaves the row unauthorized
+      # (the existing-row guard in AccessRequest stops re-notification).
+      when :req_accept
+        chat = Chat.find_by(chat_id: action.params[:chat_id])
+        return '❌ чат не найден' unless chat
+        chat.update!(authorized: true)
+        notify_requester(bot, chat.chat_id, 'Доступ открыт ✅ Добро пожаловать.')
+        '✓ принят'
+      when :req_decline
+        chat = Chat.find_by(chat_id: action.params[:chat_id])
+        return '❌ чат не найден' unless chat
+        chat.update!(authorized: false)
+        notify_requester(bot, chat.chat_id, 'В доступе отказано ❌')
+        '✓ отклонён'
       when :toggle_auth, :toggle_auth_confirm
         chat_id = action.params[:chat_id]
         return '❌ нельзя отключить собственный чат супер-админа' if super_admin_uids.include?(chat_id)
@@ -117,6 +134,12 @@ module AdminMenu
       else
         '✓'
       end
+    end
+
+    def notify_requester(bot, chat_id, text)
+      bot&.api&.sendMessage(chat_id: chat_id, text: text)
+    rescue => e
+      LOGGER.warn "[admin_menu] notify_requester(#{chat_id}) failed: #{e.class}: #{e.message}"
     end
 
     def await_input_prompt(view)
