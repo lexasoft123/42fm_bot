@@ -132,6 +132,11 @@ class AdminMenuRouterTest < BotTest
 end
 
 class AdminMenuViewsTest < BotTest
+  def setup
+    super
+    AdminMenu::Views.reset_getchat_cache_for_test!
+  end
+
   def test_root_has_four_buttons
     v = AdminMenu::Views.root
     assert_match(/Админ-меню/, v[:text])
@@ -177,15 +182,16 @@ class AdminMenuViewsTest < BotTest
 
   class FakeGetChatApi
     attr_reader :calls
-    def initialize(title: nil, fail_for: [])
+    def initialize(title: nil, fail_for: [], fail_message: 'kicked')
       @title = title
       @fail_for = fail_for
+      @fail_message = fail_message
       @calls = []
     end
 
     def getChat(chat_id:)
       @calls << chat_id
-      raise Telegram::Bot::Exceptions::Base, 'kicked' if @fail_for.include?(chat_id)
+      raise Telegram::Bot::Exceptions::Base, @fail_message if @fail_for.include?(chat_id)
       OpenStruct.new(title: @title)
     end
   end
@@ -222,13 +228,27 @@ class AdminMenuViewsTest < BotTest
     assert(labels.any? { |l| l.include?('Старый чат') })
   end
 
-  def test_refresh_titles_skips_dead_chats
+  def test_transient_getchat_failure_cached_in_process
     Chat.create!(chat_id: -888, title: 'unknown', chat_type: '', authorized: true, audio: false)
-    api = FakeGetChatApi.new(title: 'x', fail_for: [-888])
+    api = FakeGetChatApi.new(title: 'x', fail_for: [-888]) # message 'kicked' — not definitive
     v = AdminMenu::Views.chats(page: 0, api: api)
-    assert_equal 'unknown', Chat.find_by(chat_id: -888).title, 'failed getChat leaves row untouched'
+    assert_equal 'unknown', Chat.find_by(chat_id: -888).title, 'transient failure leaves row untouched'
     labels = v[:reply_markup].inline_keyboard.flatten.map(&:text)
-    assert(labels.any? { |l| l.include?('-888') }, 'dead chat keeps showing its id')
+    assert(labels.any? { |l| l.include?('-888') }, 'failed chat keeps showing its id')
+    AdminMenu::Views.chats(page: 0, api: api)
+    assert_equal 1, api.calls.size, 'transient failure must NOT retry within the same process'
+  end
+
+  def test_chat_not_found_persists_dead_marker_and_never_retries
+    Chat.create!(chat_id: -890, title: 'unknown', chat_type: '', authorized: true, audio: false)
+    api = FakeGetChatApi.new(fail_for: [-890],
+                             fail_message: 'Bad Request: chat not found')
+    AdminMenu::Views.chats(page: 0, api: api)
+    assert_equal '💀 -890', Chat.find_by(chat_id: -890).title,
+                 'definitive not-found gets a persistent dead marker'
+    AdminMenu::Views.reset_getchat_cache_for_test! # even a fresh process...
+    AdminMenu::Views.chats(page: 0, api: api)
+    assert_equal 1, api.calls.size, '...must not re-fetch a 💀-marked row'
   end
 
   def test_refresh_titles_never_fetches_unauthorized_rows

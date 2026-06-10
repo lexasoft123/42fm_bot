@@ -1,3 +1,5 @@
+require 'set'
+
 module AdminMenu
   module Views
     PAGE_SIZE = 5
@@ -180,22 +182,35 @@ module AdminMenu
 
     # Self-heal unknown titles while browsing: ask Telegram for the chat's
     # current title/name and persist it. AUTHORIZED rows only — these calls
-    # run synchronously in bot.listen's single-threaded loop, and the dead
-    # legacy rows (exactly the ones likely to hang getChat) are all
-    # unauthorized; they keep showing their chat_id and sink to the tail
-    # pages. Dead/erroring chats are skipped silently. At most PAGE_SIZE
-    # getChat calls per page render, in practice ~0 once titles are healed.
+    # run synchronously in bot.listen's single-threaded loop. Failures must
+    # NOT retry on every page render (each 400 costs ~1s of whole-bot
+    # stall, verified on prod): a definitive "chat not found" persists a
+    # 💀-marker title (never retried, visibly flags the dead row — a later
+    # real message overwrites it via touch_seen IF the chat returns with a
+    # derivable name; groups always have one); any other error goes
+    # into an in-process negative cache (retried only after a restart).
     def refresh_titles!(rows, api)
+      @getchat_failed ||= Set.new
       rows.each do |c|
         next unless c.authorized && unknown_title?(c.title)
+        next if @getchat_failed.include?(c.chat_id)
         begin
           info = api.getChat(chat_id: c.chat_id)
           t = chat_label_from(info)
           c.update!(title: t) if t && !t.empty?
         rescue => e
+          if e.message.include?('chat not found')
+            c.update!(title: "💀 #{c.chat_id}")
+          else
+            @getchat_failed << c.chat_id
+          end
           LOGGER.debug "[admin_menu] getChat(#{c.chat_id}) failed: #{e.class}: #{e.message}" if defined?(LOGGER)
         end
       end
+    end
+
+    def reset_getchat_cache_for_test!
+      @getchat_failed = Set.new
     end
 
     # Groups have .title; private chats have first/last name + username.
