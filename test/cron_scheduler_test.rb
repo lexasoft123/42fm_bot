@@ -60,4 +60,88 @@ class CronSchedulerTest < BotTest
     after = BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').count
     assert_equal before, after # cap blocked the dispatch
   end
+
+  # ── Digest scheduling (S2 — wrapped branch only this round) ──────────
+
+  def with_digests(cfg)
+    Settings.singleton_class.send(:define_method, :digests) { cfg }
+    yield
+  ensure
+    Settings.singleton_class.send(:remove_method, :digests)
+  end
+
+  def due_now_cfg(chat_id: CHAT)
+    now = Time.now.utc
+    { 'enabled' => true, 'chat_id' => chat_id, 'utc_offset' => 0,
+      'news'    => { 'hour' => 0, 'minute' => 0 },
+      'wrapped' => { 'wday' => now.wday, 'hour' => 0, 'minute' => 0 } }
+  end
+
+  def test_wrapped_fires_once_per_day
+    with_digests(due_now_cfg) do
+      CronScheduler.tick
+      CronScheduler.tick
+    end
+    assert_equal 1, BackgroundTask.where(chat_id: CHAT, task_type: 'weekly_wrapped').count
+  end
+
+  def test_wrapped_skips_on_wrong_weekday
+    cfg = due_now_cfg
+    cfg['wrapped']['wday'] = (Time.now.utc.wday + 1) % 7
+    with_digests(cfg) { CronScheduler.tick }
+    assert_equal 0, BackgroundTask.where(task_type: 'weekly_wrapped').count
+  end
+
+  def test_digests_noop_without_chat_id
+    with_digests(due_now_cfg(chat_id: nil)) { CronScheduler.tick }
+    assert_equal 0, BackgroundTask.where(task_type: 'weekly_wrapped').count
+  end
+
+  def test_news_branch_never_fires_in_round_one
+    with_digests(due_now_cfg) { CronScheduler.tick }
+    assert_equal 0, BackgroundTask.where(task_type: 'daily_news').count,
+                 'daily_news has no handler yet — S2 must not enqueue it'
+  end
+
+  # ── Rule obituaries (F4) ─────────────────────────────────────────────
+
+  def expired_rule(content, set_by: 100)
+    Agent::Scratchpad.add_rule(CHAT, content: content, set_by: set_by,
+                               set_by_name: '@u', hours: -1)
+  end
+
+  def test_expired_rule_yields_one_obituary_task_then_silence
+    expired_rule('мертвец')
+    CronScheduler.tick
+    tasks = BackgroundTask.where(chat_id: CHAT, task_type: 'rule_obituary').to_a
+    assert_equal 1, tasks.size
+    assert_equal ['мертвец'], tasks.first.params_hash['rules'].map { |r| r['content'] }
+    CronScheduler.tick # already popped — nothing new
+    assert_equal 1, BackgroundTask.where(chat_id: CHAT, task_type: 'rule_obituary').count
+  end
+
+  def test_mass_expiry_in_one_tick_batches_into_single_task
+    expired_rule('первое', set_by: 100)
+    expired_rule('второе', set_by: 200)
+    CronScheduler.tick
+    tasks = BackgroundTask.where(chat_id: CHAT, task_type: 'rule_obituary').to_a
+    assert_equal 1, tasks.size, 'cron owns combining — one task per tick'
+    assert_equal %w[первое второе].sort,
+                 tasks.first.params_hash['rules'].map { |r| r['content'] }.sort
+  end
+
+  def test_obituary_day_cap_pops_silently
+    CronScheduler::OBITUARY_DAY_CAP.times do
+      BackgroundTask.create!(task_type: 'rule_obituary', chat_id: CHAT,
+                             attempts: 0, max_attempts: 3, params: '{}')
+    end
+    expired_rule('тихая смерть')
+    CronScheduler.tick
+    assert_equal CronScheduler::OBITUARY_DAY_CAP,
+                 BackgroundTask.where(chat_id: CHAT, task_type: 'rule_obituary').count,
+                 'past the cap no new task'
+    assert_empty Agent::Scratchpad.rules(CHAT)
+    raw = JSON.parse(ChatState.find(CHAT).scratchpad)
+    assert_empty raw['rules'], 'expired rule must still be popped (deleted)'
+  end
 end

@@ -38,7 +38,12 @@ TEST_FILES := \
 	test/gogolmogol_test.rb \
 	test/google_search_tool_test.rb \
 	test/radio_degradation_test.rb \
-	test/view_image_test.rb
+	test/view_image_test.rb \
+	test/message_test.rb \
+	test/rules_tool_test.rb \
+	test/award_tool_test.rb \
+	test/quote_command_test.rb \
+	test/chat_wrapped_test.rb
 
 test:
 	@for f in $(TEST_FILES); do \

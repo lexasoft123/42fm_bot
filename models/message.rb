@@ -16,6 +16,20 @@ class Message < ActiveRecord::Base
   # When the sent message was a photo (sendPhoto / media-group photo), its
   # file_id is captured too so the agent can re-view the bot's own image
   # output via the view_image tool.
+  # Most-reacted messages in a window. scope: :user → human messages only
+  # (Quote of the day — quoting a person); scope: :all → include bot rows
+  # (Wrapped "funniest" — the dominant reacted content is the bot's own
+  # memes/images). Counts come from Telegram reaction updates (S1).
+  def self.top_reacted(chat_id, since:, limit: 10, scope: :all)
+    rel = where(chat_id: chat_id)
+          .where('created_at >= ?', Time.now - since)
+          .where('reactions_count > 0')
+          .order(reactions_count: :desc, created_at: :desc)
+          .limit(limit)
+    rel = rel.where(role: 'user') if scope == :user
+    rel
+  end
+
   def self.persist_bot_reply(chat_id:, body:, response:, reply_to: nil, bg_task_external_id: nil)
     return unless response
     mid = response.respond_to?(:message_id) ? response.message_id :

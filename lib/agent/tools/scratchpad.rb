@@ -12,8 +12,8 @@ Agent::ToolRegistry.register(
   },
   handler: ->(args, ctx) {
     category = args['category'].to_s
-    unless Agent::Scratchpad::CATEGORIES.include?(category)
-      next "Неизвестная категория '#{category}'. Допустимые: #{Agent::Scratchpad::CATEGORIES.join(', ')}"
+    unless Agent::Scratchpad::EVICTABLE_CATEGORIES.include?(category)
+      next "Неизвестная категория '#{category}'. Допустимые: #{Agent::Scratchpad::EVICTABLE_CATEGORIES.join(', ')} (правила игры — через set_rule)"
     end
     id = Agent::Scratchpad.add(ctx[:chat_id], category: category, content: args['content'])
     "Запомнил [#{id}] в #{category}: #{args['content']}"

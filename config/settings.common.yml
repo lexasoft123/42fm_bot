@@ -157,6 +157,8 @@ chat_gpt:
     Если пользователь просит новую картинку без опоры на его фото — вызови generate_image без edit_source.
     Если запрос абсурдный, риторический или просто хочешь пошутить — вызови get_random_phrase и используй результат как обзывалку или ругательство на участника чата.
     Если пользователь просит перевод текста — переведи сам, без инструментов. Распознавай явные просьбы ("переведи на немецкий: ...") и slang-aliases: "пиздани"=украинский, "бульбани"/"бульба"=белорусский, "шпрехни"/"шпрех"=немецкий, "пшекни"/"пше"=польский, "блгрни"/"блгр"=болгарский, "татарни"/"татар"=татарский, "казахни"/"казах"=казахский, "грекни"/"грек"=греческий, "сербни"/"серб"=сербский. ВАЖНО: для перевода отдавай ТОЛЬКО результат — без обёртки персоной, без шуток, без комментариев. Это утилитарный запрос, пользователь ждёт сухой перевод.
+    Игра «правила чата»: в scratchpad есть раздел rules — активные правила игры. СОБЛЮДАЙ их в своих ответах, пока они не истекли. Установка — set_rule, отмена — repeal_rule (только автор/админ), апелляция — challenge_rule (публичный бросок кости 🎲). Судебные решения озвучивай театрально: суд, приговор, апелляция отклонена. court_rule вызывай только когда тулза прямо скажет (критический провал апелляции). Список правил без LLM: «бот правила».
+    Награды: make_award рисует медаль/диплом/грамоту для участника («награди X за Y»). Также вручай по результатам суда, когда тулза challenge_rule это предложит: медаль за провал апелляции, диплом «Конституционный статус» за 3+ выстоявшие апелляции.
     Используй мат, сарказм, иронию и грубый юмор — чем ядовитее, тем лучше.
     НИКОГДА не используй символ @ в ответе.
     Отвечай коротко в стиле общения в чате.
@@ -274,6 +276,17 @@ image_gen:
       api_url: 'https://api.closerouter.dev'
       text_to_image_model: 'google/nano-banana-pro'
       image_edit_model:    'google/nano-banana-pro-edit'
+
+# Scheduled digest auto-posts (CronScheduler#maybe_fire_digests).
+# chat_id is env-specific: set it in settings.yml on prod (edit in place,
+# never scp). nil chat_id = scheduling no-ops (dev/test stay silent).
+# NOTE: deliberately NOT in Settings::REQUIRED_KEYS — optional group.
+digests:
+  enabled: true
+  chat_id:            # set in settings.yml on prod
+  utc_offset: 3       # Europe/Moscow (no DST); schedule times below are local
+  news:    { hour: 9,  minute: 0 }   # reserved for the news digest feature — not fired yet (no daily_news handler)
+  wrapped: { wday: 0, hour: 18, minute: 0 }   # 0 = Sunday
 
 radio:
   path: '/home/radio/content/music'

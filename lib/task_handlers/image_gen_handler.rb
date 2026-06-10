@@ -105,10 +105,15 @@ class ImageGenTaskHandler
   def deliver_sync_result(task, api, result)
     LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result[:url]}"
     ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
-    p = task.params_hash
-    caption = "🎨 #{p['prompt'].to_s.empty? ? p['request'] : p['prompt']}"
-    send_photo(api, task.chat_id, result[:url], caption)
+    send_photo(api, task.chat_id, result[:url], caption_for(task.params_hash))
     :done
+  end
+
+  # Shared by BOTH delivery paths (sync deliver_sync_result + async
+  # poll_and_deliver) — awards must get 🏆 on every backend.
+  def caption_for(p)
+    prefix = p['award'] ? '🏆' : '🎨'
+    "#{prefix} #{p['prompt'].to_s.empty? ? p['request'] : p['prompt']}"
   end
 
   # Increment a step-failure counter; if cap reached, fail+notify; otherwise re-raise so
@@ -164,8 +169,7 @@ class ImageGenTaskHandler
       LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result[:url]}"
       ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
       p = task.params_hash
-      caption = "🎨 #{p['prompt'].to_s.empty? ? p['request'] : p['prompt']}"
-      send_photo(api, task.chat_id, result[:url], caption)
+      send_photo(api, task.chat_id, result[:url], caption_for(p))
       if (p['generation_retries'] || 0) >= 1
         emit_agent_event(task, 'image_succeeded_after_retries',
           summary: "Запрос: #{p['request'].to_s[0..200]} | Получилось с #{p['generation_retries']}-й попытки.")

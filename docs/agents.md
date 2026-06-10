@@ -227,6 +227,10 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 - **ChatContext module:** `lib/chat_context.rb` provides `get_chat_context` and `get_relevant_knowledge` — shared by task handlers for context-aware generation.
 - **Music search:** `Song.search` uses FTS4 full-text search on metadata (title, artist, album, genre). Populated by `MusicScanner` via `rake music:scan`. Falls back to legacy file-path matching if DB is empty.
 - **wahwah:** Pure Ruby gem for reading audio tags — no native dependencies.
+- **NEVER `sleep` in an agent tool handler:** handlers run synchronously inside `bot.listen`'s single-threaded loop — a sleep freezes the entire bot for every chat; on the TaskRunner path tools additionally run inside `with_connection` with only 2 workers. (This killed the "wait for the dice animation" idea in `challenge_rule` — the verdict returns immediately instead.)
+- **Rules-war store invariants:** the scratchpad `rules` category is exempt from cap-eviction AND from generic `prune_expired`; expired rules are deleted only by `Scratchpad.pop_expired_rules` (cron → obituary). `add_rule` is a separate method — generic `add` must keep returning a bare `"sp-NNN"` string (deferred-intent writer depends on it). `forget`/`Scratchpad.remove` can't delete rules.
+- **Reactions:** `allowed_updates` must be passed to `Client.run` (not `bot.listen`) and must enumerate ALL consumed update types — it replaces Telegram's default set. `message_reaction_count` overwrites `reactions_count` (authoritative); `message_reaction` is a best-effort delta.
+- **«Революция» retry-safety:** `WrappedDigestHandler` persists its 10% roll into task params before any send; retries re-read it. Don't move the roll after a side effect.
 
 ---
 
@@ -246,6 +250,10 @@ Update the relevant model in `models/` and the schema table in `docs/architectur
 | Photo attachment plumbing / view_image | `lib/message_responder.rb#photo_attachment_file_id` (persist, ≤1280px size) + `lib/telegram_file.rb#download_image` (shared download) + `lib/agent/tools/view_image.rb` (fetch) + `Agent::Runner#inject_pending_images` (vision-block injection + `agent_vision` upgrade) |
 | Agent scratchpad (working memory) | `lib/agent/scratchpad.rb` + `models/chat_state.rb` + `lib/agent/tools/scratchpad.rb` (`remember`/`forget`); rendered as `{SCRATCHPAD}` in `chat_gpt.agent_prompt`. See ADR-003. |
 | Agent reacts to task outcomes | `lib/task_handlers/agent_event_handler.rb` + `lib/task_handlers/agent_event_emitter.rb` mixin (used by image_gen + suno handlers). 10/hour/chat cap. See ADR-003 PR-2. |
+| Telegram reactions capture | `lib/bot.rb` (`ALLOWED_UPDATES`) + `lib/bot_dispatcher.rb` (reaction branches) + `Message.top_reacted(scope:)` |
+| Rules-war game | `lib/agent/scratchpad.rb` (rules API) + `lib/agent/tools/rules.rb` + `lib/commands/rules.rb` + `lib/task_handlers/rule_obituary_handler.rb` + `lib/cron_scheduler.rb` |
+| Auto-awards | `lib/agent/tools/award.rb` + `ImageGenTaskHandler#caption_for` |
+| Quote / Wrapped | `lib/commands/quote.rb` / `lib/chat_wrapped.rb` + `lib/task_handlers/wrapped_digest_handler.rb` + `lib/commands/wrapped.rb` + `digests:` settings block |
 | Change reply/response text | `config/replies/*.yml` |
 | Change TTS behavior | `lib/polly.rb` + `lib/tts_service.rb` |
 | Change GPT prompt/model | `config/settings.yml` (`chat_gpt` group) |

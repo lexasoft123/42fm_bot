@@ -66,3 +66,69 @@ class BotDispatcherAuthorizedTest < BotTest
     refute BotDispatcher.authorized?(msg)
   end
 end
+
+# Reaction-count capture (S1). The per-user delta path is best-effort and
+# lossy; message_reaction_count is authoritative and must OVERWRITE (not
+# increment) so it provably reconciles drift.
+class BotDispatcherReactionTest < BotTest
+  GROUP = -1008888
+
+  def setup
+    super
+    Chat.create!(chat_id: GROUP, title: 'g', chat_type: 'supergroup', authorized: true, audio: false)
+    @msg = Message.create!(chat_id: GROUP, message_id: 42, role: 'user', body: 'смешно', user_uid: 7)
+  end
+
+  def reaction(chat_id: GROUP, message_id: 42, old: 0, new: 1, user: OpenStruct.new(id: 7))
+    OpenStruct.new(chat: OpenStruct.new(id: chat_id), message_id: message_id,
+                   old_reaction: Array.new(old) { OpenStruct.new },
+                   new_reaction: Array.new(new) { OpenStruct.new }, user: user)
+  end
+
+  def count_update(chat_id: GROUP, message_id: 42, totals: [2])
+    OpenStruct.new(chat: OpenStruct.new(id: chat_id), message_id: message_id,
+                   reactions: totals.map { |t| OpenStruct.new(total_count: t) })
+  end
+
+  def test_delta_add_increments
+    BotDispatcher.handle_reaction(reaction(old: 0, new: 1))
+    BotDispatcher.handle_reaction(reaction(old: 1, new: 2))
+    assert_equal 2, @msg.reload.reactions_count
+  end
+
+  def test_swap_is_zero_delta
+    @msg.update!(reactions_count: 1)
+    BotDispatcher.handle_reaction(reaction(old: 1, new: 1)) # 👍→❤️
+    assert_equal 1, @msg.reload.reactions_count
+  end
+
+  def test_removal_clamps_at_zero
+    @msg.update!(reactions_count: 1)
+    BotDispatcher.handle_reaction(reaction(old: 2, new: 0))
+    assert_equal 0, @msg.reload.reactions_count
+  end
+
+  def test_nil_user_tolerated
+    BotDispatcher.handle_reaction(reaction(old: 0, new: 1, user: nil))
+    assert_equal 1, @msg.reload.reactions_count
+  end
+
+  def test_count_update_overwrites_not_increments
+    @msg.update!(reactions_count: 5) # deliberately drifted
+    BotDispatcher.handle_reaction_count(count_update(totals: [1, 1]))
+    assert_equal 2, @msg.reload.reactions_count, 'authoritative count must reconcile drift'
+  end
+
+  def test_unauthorized_chat_ignored
+    other = Message.create!(chat_id: -1007777, message_id: 42, role: 'user', body: 'x', user_uid: 7)
+    BotDispatcher.handle_reaction(reaction(chat_id: -1007777))
+    BotDispatcher.handle_reaction_count(count_update(chat_id: -1007777, totals: [9]))
+    assert_equal 0, other.reload.reactions_count
+  end
+
+  def test_unknown_message_is_noop
+    BotDispatcher.handle_reaction(reaction(message_id: 777)) # no row — must not raise
+    BotDispatcher.handle_reaction_count(count_update(message_id: 777))
+    assert_equal 0, @msg.reload.reactions_count
+  end
+end

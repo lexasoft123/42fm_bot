@@ -211,14 +211,14 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 |-------|-------------|
 | `chats` | `chat_id` (PK, bigint = Telegram chat id), `title`, `chat_type` (`group`/`supergroup`/`private`/`channel`), `authorized` (bool), `audio` (bool), `rate_limits` (JSON, mirrors Settings.auth.chats[].rate_limits), `first_seen_at`, `last_seen_at`. Populated at startup via `Chat.sync_from_config!` from `Settings.auth.chats` and per-message via `Chat.touch_seen`. Associations: `has_one :chat_state`, `has_many :messages`/`:background_tasks`/`:api_usages`/`:knowledge_facts`. |
 | `users` | `uid` (Telegram ID), `name`, `first_name`, `last_name`, `role` (`new`/`member`/`admin`), `last_order` |
-| `messages` | `user_uid` (nullable — nil for bot replies), `chat_id`, `body`, `role` (`user`/`bot`), `message_id` (Telegram per-chat id, nullable on legacy rows), `reply_to_message_id`, `message_thread_id` (forum topic), `forwarded` (bool, default false), `edited_at`, `attachment_file_id` + `attachment_mime_type` + `attachment_title` + `attachment_performer` + `attachment_duration` (audio attachments), `attachment_photo_file_id` (photo attachments — fetched on demand by the `view_image` agent tool; photo-only rows get body `[фото]`) |
+| `messages` | `user_uid` (nullable — nil for bot replies), `chat_id`, `body`, `role` (`user`/`bot`), `message_id` (Telegram per-chat id, nullable on legacy rows), `reply_to_message_id`, `message_thread_id` (forum topic), `forwarded` (bool, default false), `edited_at`, `attachment_file_id` + `attachment_mime_type` + `attachment_title` + `attachment_performer` + `attachment_duration` (audio attachments), `attachment_photo_file_id` (photo attachments — fetched on demand by the `view_image` agent tool; photo-only rows get body `[фото]`), `reactions_count` (int, default 0 — aggregate Telegram reaction count; see "Telegram reactions capture") |
 | `phrases` | `user_id`, `content` (unique) — user-submitted catchphrases |
 | `knowledge` | `topic`, `content`, `embedding` (JSON float array), `source` (`manual`/`auto`), `chat_id` (bigint, indexed) |
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 | `songs` | `title`, `artist`, `album`, `genre`, `year` (int), `filepath` (unique, relative to music root), `duration` (int, seconds), `category` (top-level dir) |
 | `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — content table mode (`content='songs'`, `content_rowid='id'`), `unicode61 remove_diacritics 1` tokenizer, auto-synced via INSERT/UPDATE/DELETE triggers |
 | `api_usage` | `chat_id` (nullable), `user_uid` (nullable — null for knowledge extraction/compaction), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_compact`/`suno_compose`/`suno_tags`/`image_prompt`), `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per API response; `ApiUsage.record` is fire-and-forget (rescues errors so telemetry never breaks replies) |
-| `chat_states` | `chat_id` (PK, bigint), `scratchpad` (JSON: `intentions`/`notes`/`expectations` arrays of `{id, content, created_at}`), `updated_at`. Per-chat agent working memory; written via the `remember`/`forget` agent tools, read into `{SCRATCHPAD}` on every agent turn. Hard cap 6000 chars with FIFO eviction. See ADR-003. |
+| `chat_states` | `chat_id` (PK, bigint), `scratchpad` (JSON: `intentions`/`notes`/`expectations` arrays of `{id, content, created_at}` + the rules-war `rules` array `{id: r-NNN, content, set_by, set_by_name, target, expires_at, challenges_survived, court?}` + top-level `challenge_log` timestamps), `updated_at`. Per-chat agent working memory; written via the `remember`/`forget` agent tools and the rules-game tools, read into `{SCRATCHPAD}` on every agent turn. Hard cap 6000 chars with FIFO eviction (rules exempt — see "Rules-war game"). See ADR-003. |
 
 **Relationships:**
 - `User` has_many `messages` (FK: `user_uid` → `users.uid`)
@@ -291,7 +291,7 @@ Per-chat working memory distinct from the knowledge base — knowledge = facts a
 
 **Compaction** (`Agent::Scratchpad.compact(chat_id, max_age_days:)`): pure-Ruby pruning of entries past `expires_at` plus entries older than `max_age_days` (default 30). Runs inline on every `Scratchpad.add` for expiry-based pruning. Manual run: `rake scratchpad:compact [MAX_AGE_DAYS=N] [CHAT_ID=...]`. No LLM calls — at the 6000-char cap, semantic compaction isn't worth the cost. The `бот сожми знания` (admin only) command triggers compaction immediately for the current chat.
 
-**Time-deferred intentions — `CronScheduler` (`lib/cron_scheduler.rb`)**: thread that wakes every 60s, finds chats with scratchpad intentions whose `due_at` has passed, and emits one `agent_event(cron_tick)` per chat carrying the due intent ids. Marks them `acted: true` so the next tick doesn't re-dispatch. Subject to the same per-chat 10/hour `agent_event` rate cap. Lets the agent act on time-deferred intentions (e.g. retry a rate-limited image after the cooldown). Started from `lib/bot.rb` alongside `TaskRunner.start`.
+**Time-deferred intentions — `CronScheduler` (`lib/cron_scheduler.rb`)**: thread that wakes every 60s, finds chats with scratchpad intentions whose `due_at` has passed, and emits one `agent_event(cron_tick)` per chat carrying the due intent ids. Marks them `acted: true` so the next tick doesn't re-dispatch. Subject to the same per-chat 10/hour `agent_event` rate cap. Lets the agent act on time-deferred intentions (e.g. retry a rate-limited image after the cooldown). Started from `lib/bot.rb` alongside `TaskRunner.start`. The tick also runs `maybe_fire_digests` (weekly Wrapped auto-post — own `weekly_wrapped` task type, bypasses the agent_event cap) and `maybe_announce_expired_rules` (rules-war obituaries — see "Rules-war game").
 
 **`Agent::ToolResult`** — structured tool-result protocol. Tool handlers may return either a String (passthrough) or `Agent::ToolResult.deferred(user_text:, intent:, retry_in_min:)` for rate-limited / retry-later outcomes. `Agent::Runner` auto-writes the intent to the chat's scratchpad on `:deferred` (with `due_at = now + retry_in_min`) and forwards a `[deferred retry_in=Nmin, intent saved to scratchpad] <user_text>` prefix to the LLM. New deferred-style tools just call `Agent::ToolResult.deferred(...)` — no per-tool prompt scaffolding required.
 
@@ -330,6 +330,42 @@ Per-chat rate limit: 10 emits per rolling hour. Loop protection: only image_gen/
 
 `AgentEventHandler#call` receives `(task, api)` from `TaskRunner` (no full `bot` object — `TaskRunner` only ever has `bot.api`), and forwards `api:` to `Agent::Runner.new`. The Runner stores it as `@tool_ctx[:api]` so tools that need to call Telegram (e.g. `google_search` sending image media groups) work in this code path. Runner logs a warning at initialization if `api:` is nil — a future caller who forgets will see a greppable `Agent::Runner initialized without Telegram api` in logs instead of a masked `NoMethodError` deep in a tool's `rescue`. All callers (`GptChat`, `GptQuestion`, `AgentEventHandler`) pass `api:` directly; `bot:` is no longer accepted.
 
+### Telegram reactions capture — `lib/bot.rb` + `lib/bot_dispatcher.rb`
+Powers Quote-of-the-day and Wrapped "funniest". `lib/bot.rb` opts into reaction updates via `Client.run(..., allowed_updates: ALLOWED_UPDATES)` — the list **replaces** Telegram's server default (which omits reaction types), so it enumerates every consumed update type; passing it to `bot.listen` would be a no-op (only `Client#initialize`'s options reach `getUpdates`). `BotDispatcher` gains two branches:
+
+- `MessageReactionCountUpdated` → **authoritative**: `reactions_count = Σ total_count` (overwrite, never increment — self-heals any drift).
+- `MessageReactionUpdated` → per-user delta `new_reaction.size − old_reaction.size` (Telegram coalesces a user's reactions into full before/after sets: swap = 0, add = +1), clamped at 0 via `MAX(0, …)`. Best-effort only; needs the bot to be a **group admin** to be delivered at all (confirmed for the main prod chats). `user` can be nil (anonymous `actor_chat`) — irrelevant, only the delta is used.
+
+Reaction updates carry no `from`/chat-type, so a dedicated `reaction_authorized?` gates on the `chats` allowlist only (no super-admin private-chat shortcut). Rows are matched by `(chat_id, message_id)` (existing index); unknown messages are silently skipped. Write traffic: one UPDATE per reaction event + one per count event (~3–5× message write volume on a reaction-heavy chat) — statement-level pool checkouts, no contention with the 2-worker TaskRunner.
+
+`Message.top_reacted(chat_id, since:, limit:, scope:)` is the single query surface: `scope: :user` → human rows only (Quote), `scope: :all` → bot rows included (Wrapped "funniest" — the dominant reacted content is the bot's own memes).
+
+### Rules-war game — `lib/agent/scratchpad.rb` + `lib/agent/tools/rules.rb` + `lib/commands/rules.rb`
+Gamifies the chat's emergent habit of setting "rules" through the bot. The store is the scratchpad's `rules` category — rules render into `{SCRATCHPAD}` on every agent turn, so the agent sees and honours them with zero extra plumbing.
+
+**Store invariants** (all in `Agent::Scratchpad`):
+- Rules are **exempt from `evict_until_under_cap`** (an active rule must never vanish silently) **and from generic `prune_expired`** — expired rules are deleted *only* by `pop_expired_rules` (CronScheduler) so each gets its obituary exactly once. `rules()`/`render` filter expired at read, so a dead rule is never *enforced* during the ≤60s pop window.
+- Spam bounds: **one-rule-per-citizen** (a new rule auto-repeals the author's previous one; `add_rule` returns `{rule:, repealed:, evicted:}` so the agent announces the trade-in publicly), `MAX_RULES = 20` backstop (oldest evicted), content truncated to 200 chars.
+- `add_rule` is a **separate method** — the generic `add` keeps its bare-`"sp-NNN"`-string contract (the Runner's deferred-intent writer depends on it) and rejects `category: 'rules'`; `Scratchpad.remove` (the `forget` tool) cannot delete rules. Rule ids are a separate monotonic `r-NNN` sequence (never reused).
+- Court rules (`set_by: 0`, rendered «суд», `court: true`) bypass one-rule-per-citizen but cap at 1 per chat, 12h expiry.
+
+**Agent tools** (`lib/agent/tools/rules.rb`): `set_rule(content)` (author = `ctx[:user]`), `repeal_rule(id)` (author/admin only; court rules admin-only), `challenge_rule(id)` — the **public dice trial**: `api.send_dice` rolls Telegram's animated 🎲 in the chat (value is in the API response immediately; **no sleep in the handler** — it runs synchronously inside `bot.listen`'s single-threaded loop). Outcome: 4–6 rule repealed; 2–3 survives +6h «за неуважение к суду»; 1 critical fail — survives, +6h, and the tool result instructs the agent to compose a counter-rule via `court_rule(content, target)`. Survival increments `challenges_survived` (surfaced **post-increment**; ≥3 triggers the «Конституционный статус» award suggestion). `sendDice` failure falls back to internal `rand(1..6)` (flagged in the narration). Throttle: 6 trials/chat/hour via the scratchpad top-level `challenge_log` (pruned to the trailing hour on write).
+
+**Lister**: `бот правила` (`Commands::Rules`) renders the constitution («📜 УСТАВ ЧАТА», ст. r-NNN per rule) deterministically — no LLM.
+
+**Obituaries**: each CronScheduler tick pops expired rules per chat and enqueues at most **one** `rule_obituary` task (single obituary, or a combined «братская могила» listing several); cap 3/chat/local-day — past it, rules are popped silently. `RuleObituaryHandler` renders only what task params carry.
+
+### Auto-awards — `lib/agent/tools/award.rb`
+`make_award(recipient, reason)` composes a ceremonial award request and enqueues a normal `image_generate` task with `award: true` — the full enrichment + delivery pipeline is reused. `ImageGenTaskHandler#caption_for` (shared by the sync CloseRouter path AND the async Flux/Atlas path) prefixes `🏆` instead of `🎨`. Rides the `image` rate-limit bucket with the standard deferred pattern. The agent also hands out awards on dice-trial outcomes (challenge_rule's result text suggests them — prompt-level wiring, no extra plumbing).
+
+### Chat Wrapped — `lib/chat_wrapped.rb` + `lib/task_handlers/wrapped_digest_handler.rb` + `lib/commands/wrapped.rb`
+`ChatWrapped.generate(chat_id)` — deterministic 7-day stats (messages, top poster, images + top commissioner, songs, active rules, funniest via `top_reacted(scope: :all)`); plain text, no LLM. Two surfaces: `бот итоги` (on-demand, **read-only**) and the weekly `weekly_wrapped` task auto-posted by `CronScheduler#maybe_fire_digests` per the `digests:` settings block (fire-once-per-day guard keyed on local-midnight-in-UTC; no-ops while `digests.chat_id` is nil, so dev/test stay silent; the `digests.news` key is inert config reserved for the future news-digest feature — enqueueing `daily_news` without a handler would mark-failed + error-notify).
+
+**«Революция»** (10% per weekly post, never on-demand): wipes all rules (`Scratchpad.clear_rules`) and appends a banner line. Retry-safe: the roll happens once and is persisted into task params *before* any send; a handler retry re-reads it (no re-roll, no double-wipe — `clear_rules` is idempotent).
+
+### Quote of the day — `lib/commands/quote.rb`
+`бот цитата` — random pick from the top-10 most-reacted *human* messages of the last 30 days (`top_reacted(scope: :user)`), formatted with a `tg://user?id=` author mention. Graceful fallback while reactions accrue post-deploy.
+
 ### Background Task Queue — `lib/task_runner.rb` + `lib/task_handlers/`
 Generic DB-backed persistent task system for long-running operations. A poller thread runs inside the bot process (started in `Telegram::Bot::Client.run`, reusing `bot.api`).
 
@@ -347,6 +383,8 @@ Generic DB-backed persistent task system for long-running operations. A poller t
 - `SunoTaskHandler` (`suno_generate`) — LLM request parsing → GPT lyrics composition → LLM tag enrichment → Suno V5 API submit → poll → download both clip variants → send as media group with `Performer_-_Song_Name.mp3` filenames → send lyrics as reply. Uses `ChatContext` for context-aware lyrics. Triggered exclusively via the `compose_song` agent tool (no direct command).
 - `ImageGenTaskHandler` (`image_generate`) — LLM English prompt generation (with chat context + knowledge) → FLUX 2 API submit → poll → send photo. Uses `ChatContext` for context-aware prompts. Triggered exclusively via the `generate_image` agent tool (no direct command).
 - `KnowledgeCompactHandler` (`knowledge_compact`) — calls `KnowledgeBase.compact!` for the task's chat; logs to `log/knowledge_compact.log`; enqueued automatically by `maybe_trigger_compact` when entry count crosses the adaptive threshold.
+- `WrappedDigestHandler` (`weekly_wrapped`) — weekly Chat Wrapped auto-post with the retry-safe «Революция» roll (see "Chat Wrapped"). Enqueued by `CronScheduler#maybe_fire_digests`.
+- `RuleObituaryHandler` (`rule_obituary`) — template obituary post for expired rules-war rules (no LLM); batching/caps owned by the cron tick (see "Rules-war game").
 
 ### ChatContext — `lib/chat_context.rb`
 Single source of truth for chat context and knowledge lookup. Included by task handlers (directly) and by `GptHelpers` (which delegates with auto-passed `chat_id` + current `message_thread_id`). Provides:
@@ -534,7 +572,15 @@ No dedicated command, no tool. Users say `бот переведи на неме�
 |---------|-------------|
 | `бот топ` | User phrase leaderboard |
 | `бот чо нового / новости` | Latest news (RSS) |
+| `бот правила` | Rules-war constitution lister («📜 УСТАВ ЧАТА») — deterministic, no LLM |
+| `бот цитата` | Quote of the day — random top-reacted human message of the last 30 days |
+| `бот итоги` | Chat Wrapped on demand (read-only — never triggers «Революция») |
 | `!помощь / !help` | Command list |
+
+Setting/repealing/challenging rules and handing out awards go through the
+agent (`set_rule` / `repeal_rule` / `challenge_rule` / `court_rule` /
+`make_award` tools) — e.g. «бот поставь правило …», «бот оспорь r-003»,
+«бот награди Катю за …».
 
 Horoscopes, Google search, image search, gif search — no direct command.
 The agent (via `бот <anything>` → `GptChat`) handles them through its
@@ -641,6 +687,12 @@ image_gen:
       api_url: https://api.bfl.ai
       api_key: ...
       model: flux-2-pro
+digests:                    # scheduled auto-posts (CronScheduler#maybe_fire_digests)
+  enabled: true             # optional group — deliberately NOT in Settings::REQUIRED_KEYS
+  chat_id:                  # env-specific: set in settings.yml on prod (edit in place, never scp); nil = no-op
+  utc_offset: 3             # Europe/Moscow (no DST); schedule times are local
+  news:    { hour: 9,  minute: 0 }            # reserved — not fired yet (no daily_news handler)
+  wrapped: { wday: 0, hour: 18, minute: 0 }   # weekly Chat Wrapped; 0 = Sunday
 replies:
   admin_denied:            # random denial messages for unauthorized admin commands
     - "а ты кто такой вообще?!"

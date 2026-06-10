@@ -19,8 +19,16 @@ begin
 
   @radio = Radio.new
 
+  # allowed_updates REPLACES Telegram's server default (which excludes
+  # message_reaction/message_reaction_count), so the list must enumerate
+  # every update type we consume. It only takes effect here on Client.run —
+  # the options hash is threaded through Client#initialize into getUpdates;
+  # passing it to bot.listen would be a no-op.
+  ALLOWED_UPDATES = %w[message edited_message channel_post callback_query
+                       message_reaction message_reaction_count].freeze
+
   begin
-    Telegram::Bot::Client.run(token, logger: logger) do |bot|
+    Telegram::Bot::Client.run(token, logger: logger, allowed_updates: ALLOWED_UPDATES) do |bot|
       TaskRunner.start(bot.api)
       logger.info "TaskRunner started"
 

@@ -7,9 +7,51 @@ module BotDispatcher
       handle_message(bot, update, radio: radio)
     when Telegram::Bot::Types::CallbackQuery
       AdminMenu::CallbackHandler.handle(bot, update)
+    when Telegram::Bot::Types::MessageReactionCountUpdated
+      handle_reaction_count(update)
+    when Telegram::Bot::Types::MessageReactionUpdated
+      handle_reaction(update)
     else
       LOGGER.debug "[BotDispatcher] ignored update class #{update.class}"
     end
+  end
+
+  # Authoritative aggregate: Telegram periodically sends the total reaction
+  # count per message. Overwrites (never increments) — self-heals any drift
+  # the best-effort per-user delta path accumulates.
+  def handle_reaction_count(update)
+    return unless reaction_authorized?(update)
+    count = update.reactions.to_a.sum(&:total_count)
+    ActiveRecord::Base.connection_pool.with_connection do
+      Message.where(chat_id: update.chat.id, message_id: update.message_id)
+             .update_all(reactions_count: count)
+    end
+  rescue => e
+    LOGGER.warn "[chat=#{update.chat.id rescue '?'}] handle_reaction_count: #{e.class}: #{e.message}"
+  end
+
+  # Per-user delta (needs the bot to be a group admin to be delivered).
+  # new_reaction/old_reaction are the user's FULL current/previous reaction
+  # sets (Telegram coalesces), so the size diff is the per-user delta:
+  # swap 👍→❤️ = 0, add a 2nd = +1, remove all = -size. `user` can be nil
+  # (anonymous actor_chat) — we only need the delta, not the identity.
+  # Best-effort, never authoritative; reconciled by handle_reaction_count.
+  def handle_reaction(update)
+    return unless reaction_authorized?(update)
+    delta = update.new_reaction.to_a.size - update.old_reaction.to_a.size
+    return if delta.zero?
+    ActiveRecord::Base.connection_pool.with_connection do
+      Message.where(chat_id: update.chat.id, message_id: update.message_id)
+             .update_all(['reactions_count = MAX(0, reactions_count + ?)', delta])
+    end
+  rescue => e
+    LOGGER.warn "[chat=#{update.chat.id rescue '?'}] handle_reaction: #{e.class}: #{e.message}"
+  end
+
+  # Reaction updates carry no `from`/chat-type, so the message-oriented
+  # authorized? (super-admin private-chat shortcut included) doesn't apply.
+  def reaction_authorized?(update)
+    Chat.where(chat_id: update.chat.id, authorized: true).exists?
   end
 
   def handle_message(bot, message, radio: nil)
