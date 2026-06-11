@@ -185,6 +185,13 @@ Base class for all commands. Exposes `ctx` members as delegated accessors (`bot`
 
 Ordered array of command classes. `dispatch` tries each in order; first `match?` wins. **Order matters.**
 
+**Private chats need no prefix.** `GptChat#private_no_prefix?` matches any non-slash text when `message.chat.type == 'private'`, so a bare DM goes straight to the agent (slash commands fall through to `FallbackReply`). Deliberate consequences:
+- `FallbackReply` (ReplyMaster Easter eggs) is shadowed in DMs for plain text.
+- `BoberVoice`/`TtsVoice` still win in DMs — their unprefixed PATTERNs (`боб(е|ё)р` — unanchored, matches mid-sentence; `ублюдки …` — start-anchored) sit above `GptChat` in the registry. Pinned by registry-level tests in `test/gpt_chat_test.rb`.
+- The Phrase egg (`maybe_save_phrase`) stays gated on explicit addressing (prefix or reply-to-bot) — bare DM «ты …»/«вы …» is not harvested.
+- A super-admin with an armed admin-menu `awaiting_input` session has plain DM text consumed by the menu first (escape: `/cancel`, any `/`-command, or a `бот`/`жпт` prefix).
+- Cost: every plain-text DM runs the full agent path (LLM call + knowledge embedding lookup). Bare DM text reaches the agent downcased, same as the reply-to-bot path.
+
 ### `MessageSender` — `lib/message_sender.rb`
 
 Thin wrapper around the Telegram bot client:

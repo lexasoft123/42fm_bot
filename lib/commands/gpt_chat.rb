@@ -8,17 +8,18 @@ module Commands
     PATTERN = /^(?:бот[,]?\s+|[.]\s+|(?:балаболь|жпт)\s+)(?<text>.+)/im
 
     def match?
-      cmd =~ PATTERN || reply_to_bot?
+      cmd =~ PATTERN || private_no_prefix? || reply_to_bot?
     end
 
     def execute
-      text = if (m = cmd&.match(PATTERN))
-        m[:text]
-      else
-        cmd
-      end
+      m = cmd&.match(PATTERN)
+      text = m ? m[:text] : cmd
 
-      phrase = maybe_save_phrase(text)
+      # Phrase harvesting stays gated on explicit addressing (prefix or
+      # reply-to-bot) — bare DM small talk («ты молодец») must not feed
+      # the Phrase collection.
+      explicitly_addressed = !m.nil? || reply_to_bot?
+      phrase = explicitly_addressed ? maybe_save_phrase(text) : nil
       replied_image = extract_image || extract_replied_image
       audio = attached_audio
 
@@ -34,6 +35,13 @@ module Commands
     end
 
     private
+
+    # In a 1-on-1 chat every plain text is addressed to the bot — no prefix
+    # needed. Slash commands are excluded: an unknown /command should fall
+    # through to FallbackReply, not burn an LLM call.
+    def private_no_prefix?
+      message.chat.type == 'private' && !cmd.to_s.start_with?('/')
+    end
 
     def reply_to_bot?
       return false unless cmd && message.reply_to_message

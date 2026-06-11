@@ -115,7 +115,8 @@ module AgentTestHelpers
   end
 
   def build_ctx(cmd:, user:, message: nil, bot: nil)
-    message ||= OpenStruct.new(text: cmd, message_id: 1, reply_to_message: nil, message_thread_id: nil)
+    message ||= OpenStruct.new(text: cmd, message_id: 1, reply_to_message: nil, message_thread_id: nil,
+                               chat: OpenStruct.new(type: 'supergroup'))
     CommandContext.new(
       bot: bot, message: message, user: user,
       chat_id: 100, radio: nil,
@@ -807,7 +808,8 @@ class GptChatTest < BotTest
   def test_match_reply_to_bot
     bot_id = 123456  # matches token '123456:ABCDEF'
     reply_msg = OpenStruct.new(text: 'bot said this', from: OpenStruct.new(id: bot_id), photo: nil)
-    msg = OpenStruct.new(text: 'some reply', message_id: 1, reply_to_message: reply_msg)
+    msg = OpenStruct.new(text: 'some reply', message_id: 1, reply_to_message: reply_msg,
+                         chat: OpenStruct.new(type: 'supergroup'))
     ctx = build_ctx(cmd: "some reply", user: @user, message: msg)
     assert Commands::GptChat.new(ctx).match?
   end
@@ -1006,7 +1008,8 @@ class GptChatExecuteTest < BotTest
   # (message_responder uses caption as text fallback, but GptChat still needs pattern match)
   def test_photo_without_bot_prefix_no_match
     msg = OpenStruct.new(text: nil, caption: "просто фото", message_id: 1,
-                         reply_to_message: nil, photo: [OpenStruct.new(file_id: 'x')])
+                         reply_to_message: nil, photo: [OpenStruct.new(file_id: 'x')],
+                         chat: OpenStruct.new(type: 'supergroup'))
     ctx = CommandContext.new(
       bot: nil, message: msg, user: @user,
       chat_id: 100, radio: nil,

@@ -124,6 +124,8 @@ reply_master  # ReplyMaster instance
 ### Chat commands route through the agent
 `GptChat` / `GptQuestion` always call `Agent::Runner.new(...).run` — there is no non-agent path. See `lib/commands/gpt_chat.rb` for the exact invocation.
 
+Triggers: `бот …` / `. …` / `жпт …` / `балаболь …` prefixes, a Telegram reply to a bot message, or — in **private chats** — any non-slash text (`GptChat#private_no_prefix?`; no prefix needed in DMs). The Phrase-collection egg (`maybe_save_phrase`) only fires on explicitly-addressed messages (prefix/reply), never on bare DM text.
+
 ### Calling GPT for a one-off task (no chat context)
 ```ruby
 PROMPT = 'Do something with: {REQUEST}'
