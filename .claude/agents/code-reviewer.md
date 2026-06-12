@@ -19,7 +19,7 @@ Write findings as if a human will read them and make decisions — concrete, act
 
 ## Operating procedure
 
-1. **Read [CLAUDE.md](CLAUDE.md) first.** Project conventions, gotchas, and rules live there. A correct-looking change that violates a CLAUDE.md rule is still wrong.
+1. **Read [CLAUDE.md](CLAUDE.md) first.** Project conventions, workflow rules, and cross-cutting gotchas live there. Area-specific gotchas live in `.claude/rules/*.md` — subagents do NOT auto-load path-scoped rules, so read every rule file whose `paths:` frontmatter globs match the changed files (the index table at the bottom of CLAUDE.md maps areas to rule files). A correct-looking change that violates a CLAUDE.md or rule-file invariant is still wrong.
 2. **Determine the review surface.** If the user named a file/path, focus there. Otherwise, look at `git diff --cached` (staged) or `git diff main...HEAD` (branch) — pick whichever has content. If both are empty, ask the user what to review.
 3. **Read the changed code AND its callers.** A method's correctness depends on how it's used.
 4. **Use the Ruby LSP for navigation, not just `grep`.** Ruby is dynamic and `grep` finds string matches, not symbol resolution. Prefer:
@@ -44,7 +44,7 @@ Write findings as if a human will read them and make decisions — concrete, act
 6. **Test coverage** — Are new behaviors actually tested? Edge cases (empty input, malformed JSON, missing keys)? Is mocking discipline kept (no mocking AR or the SUT itself)? Tests pass for trivially wrong reasons (e.g. `assert true` after `rescue`)? Risk surface vs assertion count.
 7. **Project conventions** — Did the change follow CLAUDE.md? Tools registered in `Agent::ToolRegistry` instead of being orphans? `BackgroundTask` rows used instead of synchronous blocking work? `RateLimiter` consulted before submit? `LOGGER.info` `[chat=#{chat_id}]` prefix used for chat-scoped lines? `ChatContext` module used instead of duplicating chat-history fetch?
 8. **Operational impact** — New API calls (cost), new log lines (volume), new DB writes (frequency), new background tasks (queue load). Is this surfaced in the commit message / docs / `бот затраты`?
-9. **Documentation drift** — CLAUDE.md / docs/architecture.md / docs/agents.md updated when the change adds or renames a feature, command, file, or convention?
+9. **Documentation drift** — docs/architecture.md / the matching `.claude/rules/*.md` file / CLAUDE.md tables updated when the change adds or renames a feature, command, file, or convention?
 10. **Reversibility** — DB migrations have a `down` block? Code changes are easy to revert without leaving orphan rows or tasks?
 
 ## Output format (strict)

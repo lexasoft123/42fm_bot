@@ -1,0 +1,31 @@
+---
+paths:
+  - "lib/bot.rb"
+  - "lib/bot_dispatcher.rb"
+  - "lib/message_responder.rb"
+  - "lib/message_sender.rb"
+  - "models/message.rb"
+  - "lib/chat_context.rb"
+  - "lib/commands/gpt_helpers.rb"
+  - "lib/agent/tools/load_messages.rb"
+  - "lib/agent/tools/view_image.rb"
+  - "lib/telegram_file.rb"
+---
+
+# Message pipeline / chat context gotchas
+
+Trap knowledge for update dispatch, message persistence, chat context, and reactions. Reference: `docs/architecture.md` § MessageResponder / § GptHelpers (Bot-reply persistence) / § ChatContext / § Telegram reactions capture.
+
+| Task | File |
+|------|------|
+| Telegram reactions capture | `lib/bot.rb` (`ALLOWED_UPDATES`) + `lib/bot_dispatcher.rb` (`handle_reaction` / `handle_reaction_count` / `reaction_authorized?`) + `messages.reactions_count` + `Message.top_reacted(scope:)` |
+
+- **Telegram update dispatch** — `bot.listen` (gem 2.7.0) yields `update.current_message` directly (the inner `Message` / `CallbackQuery` / `EditedMessage` / etc.), NOT the wrapper `Update`. `BotDispatcher.dispatch` (`lib/bot_dispatcher.rb`) does `case update when Message ... when CallbackQuery ... else log` — anything else is silently logged as ignored. Add new `when` branches there to handle additional update types.
+- Messages older than 30s are skipped
+- Voice messages only go to `audio_chat_ids`
+- **All** bot replies are stored in `messages` with `role: 'bot'`, `user_uid: nil` — not just GPT output. `MessageResponder#deliver` persists every successfully-sent output type after the Telegram call returns, capturing the `message_id` (+ originating `message_thread_id`): `:text` via a direct `Message.create` (using the `message_id` `MessageSender#send` returns), and `:sticker`/`:image`/`:voice` via `Message.persist_bot_reply(response:)` with a body marker (`[стикер]` / `[картинка]` / `[голос]`). This keeps the agent's chat context aware of the bot's own non-GPT replies and lets a later user reply resolve any bot message_id back to a row (fixes reply-chain blindness). `:image` persists only when the send actually succeeded — `MessageSender#send_image` returns `nil` from its rescue (a fallback text was sent, not an image). The `persist_as_bot_reply` flag was retired; persistence is now unconditional in `deliver`. Blank/whitespace `:text` payloads are skipped entirely (guards the Telegram "message text is empty" 400 from empty agent responses). Media sends (sticker/image/voice) thread the originating `message_thread_id` so forum-topic replies land in-thread. Background-task media (image_gen/suno/cover_art/wav handlers) self-persist (don't route through `deliver`), but their `persist_bot_media_row(s)` wrappers all delegate to `Message.persist_bot_reply` — the **single centralized write path** for bot-side rows (handles OpenStruct/Hash/`'result'`-enveloped responses, threads `reply_to`/`bg_task_external_id`, and captures `attachment_photo_file_id` from photo sends so the agent can re-view the bot's own generated images via `view_image`).
+- Chat context JSON (`get_chat_context`) carries `id` (Telegram `message_id`), `role: 'bot'|'user'` (structural disambiguator — don't rely on name-string matching against the bot's display name), `who` (object: for users `{uid, username?, first_name?, last_name?}` — only present fields, or `{unknown:true}`; for the bot `{name:'Жзяцля'}`), `msg`, plus optional `reply_to`, `thread`, `fwd`, `edited`, `audio`, `audio_meta`, `photo` (`photo: true` = stored photo attachment, fetchable via the `view_image` tool; the file_id stays DB-internal). Two helpers in `ChatContext`: `identity_for_row` builds the `who` object; `display_name` produces the flat-string label used by `Agent::Runner#trigger_user_display` (shared so trigger line and history rows agree on every edge case). uid lets the agent mention users without a Telegram username via Markdown `[Name](tg://user?id=UID)`. When a reply target falls outside the 50-msg window, the helper fetches that one row from DB and prepends it. The `load_messages` agent tool lets the agent pull a wider window around any anchor `message_id`.
+- Forum topics: if the triggering message has `message_thread_id`, the bot's reply is sent with the same `message_thread_id` (lands in the user's topic, not General), and context is scoped to same-thread messages.
+- Edited messages: Telegram delivers edits via the same `Message` class with `edit_date` set. `save_message` updates the existing row in place (body + `edited_at`) and `respond` short-circuits dispatch — edits don't re-fire commands.
+- **Telegram reactions (S1)** — `lib/bot.rb` passes `allowed_updates: ALLOWED_UPDATES` to `Client.run` (NOT `bot.listen` — only `Client#initialize`'s options reach `getUpdates`; specifying the list REPLACES Telegram's default, so it must enumerate every consumed type). Two dispatcher branches: `MessageReactionCountUpdated` is **authoritative** (overwrites `reactions_count` with summed `total_count` — self-heals drift); `MessageReactionUpdated` is the per-user delta (`new_reaction.size - old_reaction.size` — Telegram coalesces a user's reactions, so swap=0/add=+1), best-effort only, needs bot group-admin to be delivered (confirmed admin in main chats). Reaction updates lack `from`/chat-type → dedicated `reaction_authorized?` gate (no super-admin shortcut).
+- `ChatContext` module (`lib/chat_context.rb`) is the single source of truth for chat context and knowledge lookup — included by task handlers directly and by `GptHelpers` (which delegates via `super` with auto-passed `chat_id`)

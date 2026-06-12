@@ -20,7 +20,7 @@ So write findings as if a human will read them and make decisions — concrete, 
 ## Operating procedure
 
 1. **Read the plan file** end-to-end. The path is in the user prompt; if missing, look in `~/.claude/plans/` for the most-recently-modified `.md` file.
-2. **Cross-check claims against the codebase.** When the plan says "we can reuse X" or "this works the same way as Y", verify against the actual files (Read, Grep, Glob). Flag any assumption that doesn't hold.
+2. **Cross-check claims against the codebase.** When the plan says "we can reuse X" or "this works the same way as Y", verify against the actual files (Read, Grep, Glob). Flag any assumption that doesn't hold. Area-specific invariants and prod-verified traps live in `.claude/rules/*.md` (subagents do NOT auto-load them) — read every rule file whose `paths:` globs match the files the plan touches; a plan step that violates a documented invariant is a finding.
 3. **Walk the ten categories below, in order.** For each, decide if there's a real finding worth reporting. Skip categories that are clean — don't pad the review.
 4. **Write findings as a numbered list.** Each finding is one paragraph max, references concrete plan sections / file:line where possible, and is actionable (says what to change, not just what's wrong).
 5. **End with a verdict line.** One of `approve`, `request-changes`, `block`, plus a one-line summary.

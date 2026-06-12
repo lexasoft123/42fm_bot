@@ -218,9 +218,10 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 |-------|-------------|
 | `chats` | `chat_id` (PK, bigint = Telegram chat id), `title`, `chat_type` (`group`/`supergroup`/`private`/`channel`), `authorized` (bool), `audio` (bool), `rate_limits` (JSON, mirrors Settings.auth.chats[].rate_limits), `first_seen_at`, `last_seen_at`. Populated at startup via `Chat.sync_from_config!` from `Settings.auth.chats` and per-message via `Chat.touch_seen`. Associations: `has_one :chat_state`, `has_many :messages`/`:background_tasks`/`:api_usages`/`:knowledge_facts`. |
 | `users` | `uid` (Telegram ID), `name`, `first_name`, `last_name`, `role` (`new`/`member`/`admin`), `last_order` |
-| `messages` | `user_uid` (nullable — nil for bot replies), `chat_id`, `body`, `role` (`user`/`bot`), `message_id` (Telegram per-chat id, nullable on legacy rows), `reply_to_message_id`, `message_thread_id` (forum topic), `forwarded` (bool, default false), `edited_at`, `attachment_file_id` + `attachment_mime_type` + `attachment_title` + `attachment_performer` + `attachment_duration` (audio attachments), `attachment_photo_file_id` (photo attachments — fetched on demand by the `view_image` agent tool; photo-only rows get body `[фото]`), `reactions_count` (int, default 0 — aggregate Telegram reaction count; see "Telegram reactions capture") |
+| `messages` | `user_uid` (nullable — nil for bot replies), `chat_id`, `body`, `role` (`user`/`bot`), `message_id` (Telegram per-chat id, nullable on legacy rows), `reply_to_message_id`, `message_thread_id` (forum topic), `forwarded` (bool, default false), `edited_at`, `bg_task_external_id` (nullable — populated for bot-delivered media so `cover_art` can resolve a reply-target back to its source song), `attachment_file_id` + `attachment_mime_type` + `attachment_title` + `attachment_performer` + `attachment_duration` (nullable — populated when an incoming user message has audio/voice/audio-MIME document; title falls back to `Document.file_name` minus extension when ID3 title is absent. Used by `Commands::GptChat#attached_audio` lookback and surfaced in `ChatContext.serialize_msg` as `audio: true` + `audio_meta: {title, performer, duration, mime}` so the agent names cover/add-vocals output after the actual track instead of inferring from prior chat context. Audio-only messages (no text caption) are persisted with body=`'[аудио]'` so they appear in chat context), `attachment_photo_file_id` (photo attachments, largest size ≤1280px — fetched on demand by the `view_image` agent tool; photo-only rows get body `[фото]`), `reactions_count` (int, default 0 — aggregate Telegram reaction count maintained by `BotDispatcher#handle_reaction` (per-user delta, best-effort) and `#handle_reaction_count` (authoritative overwrite); feeds `Message.top_reacted` → `бот цитата` + Wrapped "funniest"; see "Telegram reactions capture") |
 | `phrases` | `user_id`, `content` (unique) — user-submitted catchphrases |
 | `knowledge` | `topic`, `content`, `embedding` (JSON float array), `source` (`manual`/`auto`), `chat_id` (bigint, indexed) |
+| `knowledge_compact_log` | `chat_id`, `merged`, `removed`, `kept`, `threshold`, `created_at` — one row per compaction run |
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 | `songs` | `title`, `artist`, `album`, `genre`, `year` (int), `filepath` (unique, relative to music root), `duration` (int, seconds), `category` (top-level dir) |
 | `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — content table mode (`content='songs'`, `content_rowid='id'`), `unicode61 remove_diacritics 1` tokenizer, auto-synced via INSERT/UPDATE/DELETE triggers |
@@ -247,12 +248,15 @@ Search uses `Song.search` (FTS5) with fallback to legacy file-path matching (`mu
 
 ### Song — `models/song.rb`
 ActiveRecord model for the music library. Populated by `MusicScanner` from audio file tags.
-- `Song.search(query, limit:)` — multi-stage search: (1) FTS5 MATCH with prefix matching (`word*`); (2) Cyrillic→Latin transliteration via `translit` gem with k/c, ts/c, kh/h variants; (3) prefix truncation on transliterated variants; (4) LIKE fallback; (5) Levenshtein edit-distance fuzzy match via `editdist` custom SQLite function (registered in `DatabaseConnector.register_editdist`)
+- `Song.search(query, limit:)` — multi-stage search: (1) FTS5 MATCH with prefix matching (`word*`), `unicode61 remove_diacritics 1` tokenizer; (2) Cyrillic→Latin transliteration via `translit` gem with k/c, ts/c, kh/h, and w/v variants (в→w in translit but v in English proper nouns, e.g. "нирвана"→"nirwana"→"nirvana"); (3) prefix truncation on transliterated variants; (4) LIKE fallback; (5) Levenshtein edit-distance fuzzy match via `editdist` custom SQLite function (registered in `DatabaseConnector.register_editdist`) — catches e.g. "раммштайн"→Rammstein (distance 3)
 - `Song#absolute_path` — joins `Settings.radio['path']` + `filepath` for Liquidsoap `request.push`
 - `Song#display_name` — `"Artist — Title (Year)"` from metadata
 
 ### MusicScanner — `lib/music_scanner.rb`
 Reads audio file tags via `wahwah` (pure Ruby, no native deps), populates the `songs` table. Idempotent: updates existing records, creates new ones, removes orphans (by `updated_at` timestamp). Falls back to parsing artist/title from filepath if tags are empty. Run via `bundle exec rake music:scan`.
+
+### RateLimiter — `lib/rate_limiter.rb`
+Per-chat, per-service rate limiting (counts `BackgroundTask` rows in a rolling window). Per-role overrides: `Settings.auth['rate_limits']['admin'][service]` overrides the regular bucket when `RateLimiter.exceeded?(..., role: 'admin')` is called with `role: 'admin'`. Agent tools pass `ctx[:user]&.role`. Counters stay per-chat-shared (no per-user counter), so an admin's higher cap simply lets them keep acting after regular users have hit theirs. Priority: `auth.rate_limits.admin.<svc>` → `chat.rate_limits.<svc>` (per-chat menu edits) → `auth.rate_limits.<svc>` (default) → hard-coded `{max: 1, window: 20}`.
 
 ### GptMaster — `lib/gpt_master.rb`
 HTTP client (HTTParty) supporting both Anthropic and OpenAI-compatible APIs. Provider selected via `settings.yml` `chat_gpt.provider`. One class-method interface:
@@ -498,7 +502,7 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 
 ### Admin menu — `lib/admin_menu/` + `lib/bot_dispatcher.rb`
 Inline-keyboard menu in the super-admin's private chat for runtime bot administration (no SSH or YAML edits required for routine config). Triggered by `/admin` or `бот меню`; gated on `Settings.auth['super_admin_uids']`.
-- **`BotDispatcher`** (`lib/bot_dispatcher.rb`) — entry from `bot.listen`. Dispatches `Message` → `MessageResponder`, `CallbackQuery` → `AdminMenu::CallbackHandler`, anything else → debug-log. Owns the chat-allowlist check including the implicit-auth bypass for super-admins in private chat.
+- **`BotDispatcher`** (`lib/bot_dispatcher.rb`) — entry from `bot.listen`. Note: `bot.listen` (gem 2.7.0) yields `update.current_message` directly (the inner `Message` / `CallbackQuery` / `EditedMessage` / etc.), NOT the wrapper `Update`. `BotDispatcher.dispatch` does `case update when Message ... when CallbackQuery ... else log` — anything else is silently logged as ignored; add new `when` branches there to handle additional update types. Dispatches `Message` → `MessageResponder`, `CallbackQuery` → `AdminMenu::CallbackHandler`. Owns the chat-allowlist check including the implicit-auth bypass for super-admins in private chat.
 - **`AdminMenu::Session`** (`lib/admin_menu/session.rb`) — Mutex-guarded in-memory state per super-admin uid. Lost on restart (acceptable — sessions are short). `awaiting_input?` has a built-in 5-min TTL; stale sessions auto-clear on access.
 - **`AdminMenu::Views`** (`lib/admin_menu/views.rb`) — view builders. Each method returns `{ text:, reply_markup: }`. Plain text + emoji only — no `parse_mode` (chat titles can contain Markdown-active characters that would break renders).
 - **`AdminMenu::Router`** (`lib/admin_menu/router.rb`) — parses `adm:<view>[:<param>...]` callback_data into `Action` structs (`render` / `mutate` / `await_input` / `close` / `unknown`).
@@ -598,6 +602,140 @@ The agent (via `бот <anything>` → `GptChat`) handles them through its
 `horoscope`, `google_search`, and `generate_image` tools and can compose
 multiple tools in a single turn (e.g. "бот найди новости и нарисуй" →
 `google_search` then `generate_image`).
+
+---
+
+## Development Guide
+
+How-to recipes for common changes. Area-specific trap knowledge lives in `.claude/rules/*.md` (auto-loaded by Claude Code when working with matching files).
+
+### How to add a new command
+
+1. **Create the command class** in `lib/commands/my_command.rb`:
+   ```ruby
+   module Commands
+     class MyCommand < Base
+       PATTERN = /^бот мояфича (.+)/i
+
+       def match?
+         cmd =~ PATTERN
+       end
+
+       def execute
+         text = cmd.match(PATTERN)[1]
+         CommandResult.text("result: #{text}")
+       end
+     end
+   end
+   ```
+
+2. **Require it** in `lib/message_responder.rb`:
+   ```ruby
+   require './lib/commands/my_command'
+   ```
+
+3. **Add it to the registry** in `lib/commands/registry.rb` at the correct position (order = priority):
+   ```ruby
+   REGISTRY = [
+     ...,
+     MyCommand,
+     FallbackReply,   # always last
+   ].freeze
+   ```
+
+4. **Add config** to `config/settings.yml` if the feature needs API keys or parameters.
+
+5. **Update `lib/commands/help.rb`** so users can discover the command.
+
+6. **Update docs** — this file's command reference; the matching `.claude/rules/*.md` if the change touches a documented invariant; CLAUDE.md tables if entry points changed.
+
+### Key code patterns
+
+**Building a reply:**
+```ruby
+CommandResult.text("message")
+CommandResult.sticker(STICKER_ID)
+CommandResult.image("https://...")
+CommandResult.voice(file_or_url)
+CommandResult.audio(url, title: "...", performer: "...")  # :audio (MP3 with metadata)
+CommandResult.none   # handled silently, no reply sent
+```
+
+**Accessing context inside a command** (all ctx fields are delegated in `Commands::Base`):
+```ruby
+cmd        # downcased message text (String or nil)
+user       # User ActiveRecord instance
+chat_id    # Telegram chat ID
+radio      # Radio instance (lazy TCP)
+message    # raw Telegram::Bot::Types::Message
+bot        # Telegram bot client
+reply_master  # ReplyMaster instance
+```
+
+**Chat commands route through the agent.** `GptChat` / `GptQuestion` always call `Agent::Runner.new(...).run` — there is no non-agent path. Triggers: `бот …` / `жпт …` / `балаболь …` prefixes, a Telegram reply to a bot message, or — in **private chats** — any non-slash text (`GptChat#private_no_prefix?`). The Phrase-collection egg (`maybe_save_phrase`) only fires on explicitly-addressed messages (prefix/reply), never on bare DM text.
+
+**Calling GPT for a one-off task (no chat context):**
+```ruby
+PROMPT = 'Do something with: {REQUEST}'
+CommandResult.text(GptMaster.ask(text, prompt: PROMPT, setting: 'agent',
+                                  chat_id: chat_id, purpose: 'my_new_purpose'))
+```
+Always pass `setting:` explicitly (see GptMaster) and pick a short snake_case `purpose` label so `бот затраты` can attribute costs.
+
+**Text-to-speech:**
+```ruby
+url = TtsService.speak(text, voice: 'Maxim', speed: nil, minus: false, track_id: nil)
+CommandResult.voice(url)
+```
+
+**Calling the radio server** (TCP connects lazily on first call):
+```ruby
+radio.current_track
+radio.search(query)
+radio.request(track_id, user)
+```
+
+**Current user fields:**
+```ruby
+user.role              # 'new', 'member', 'admin'
+user.uid               # Telegram ID
+user.last_order        # Time of last track request
+```
+
+### Adding new settings
+
+Add a top-level group to `config/settings.yml` (secrets) or `config/settings.common.yml` (non-secret defaults):
+```yaml
+my_feature:
+  api_key: xxx
+  some_param: value
+```
+
+Access in code (`method_missing` in `Settings` handles it automatically):
+```ruby
+Settings.my_feature['api_key']
+```
+
+If the group is **required for the app to boot**, also add the key to `REQUIRED_KEYS` in `lib/settings.rb` — the deep-merge validator rejects unknown required groups otherwise. Optional groups (e.g. `digests`) stay out of `REQUIRED_KEYS` deliberately.
+
+### Database changes
+
+Create a migration file (sequential number prefix). ActiveRecord is 7.2 — use `Migration[7.2]` for new migrations:
+```ruby
+# db/migrate/023_add_something.rb
+class AddSomething < ActiveRecord::Migration[7.2]
+  def change
+    add_column :users, :new_field, :string
+  end
+end
+```
+
+Run with:
+```bash
+bundle exec rake db:migrate
+```
+
+(In Docker, the entrypoint runs migrations automatically on every start.) Update the relevant model in `models/` and the schema table in this file.
 
 ---
 
@@ -738,7 +876,12 @@ All output is unified in a single log file configured via `settings.yml`:
 | App logger (`LOGGER`) | `log/bot.log` |
 | Telegram client | `log/bot.log` |
 | ActiveRecord SQL | `log/bot.log` |
+| LLM request/response dumps | `log/gpt.log` |
 | Knowledge compaction (`COMPACT_LOGGER`) | `log/knowledge_compact.log` |
+
+**`gpt.log`** — NDJSON dump of every LLM request+response (system prompt, messages, tools, raw response, stop_reason, usage). One JSON object per line, rotation 5×50MB. Useful for reconstructing exactly what the model saw and said when debugging odd replies. Query with `jq`, e.g. `jq 'select(.chat==-1001273623296 and .purpose=="agent")' log/gpt.log`. Disable via `Settings.chat_gpt['debug_log'] = false`.
+
+**`knowledge_compact.log`** — per-run knowledge-compaction traces (cluster before/after).
 
 `AppConfigurator#setup_logging` runs first in `configure`, builds the loggers from settings, and passes the main logger to `DatabaseConnector`. The global `LOGGER` and `COMPACT_LOGGER` constants are assigned in `bot.rb` after `configure` returns.
 
@@ -751,10 +894,9 @@ Log rotation: size-based — rotates at `max_size_mb`, keeps `keep_files` old fi
 ## Deployment
 
 - **Ruby:** 4.0
-- **Docker:** `Dockerfile` + `docker-compose.yml`
-- **Process management:** `daemons` gem — PID file in `pids/42fm_bot.pid`. `:monitor => false` — the bot's own `rescue/retry` loop handles restarts.
-- **Starting/stopping:** always use `./bin/bot start|stop|restart|status`
-- **SOCKS proxy:** configured in `settings.yml`, applied globally in `AppConfigurator#setup_proxy` via `socksify` (patches `Net::HTTP`)
+- **Production runs in Docker:** `docker compose up -d --build`; the entrypoint runs `rake db:migrate` then execs the bot as PID 1. `restart: unless-stopped` handles crashes (the bot's own rescue/retry loop also retries within the process). Deploy from local: `make deploy`. See CLAUDE.md for the full run/deploy procedure.
+- **Local non-Docker runs only:** `daemons` gem via `./bin/bot start|stop|restart|status` — PID file in `pids/42fm_bot.pid`. `:monitor => false` — the bot's own `rescue/retry` loop handles restarts (never set `:monitor => true`; it spawns a second bot process causing duplicate responses).
+- **SOCKS proxy:** configured in `settings.yml`, applied globally in `AppConfigurator#setup_proxy` via `socksify` (patches `Net::HTTP` — affects ALL outbound HTTP including Telegram polling and GPT calls)
 
 ---
 
