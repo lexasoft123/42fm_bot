@@ -200,7 +200,7 @@ class ImageGenTaskHandler
       retries = 0
       begin
         api.sendPhoto(chat_id: chat_id, photo: Faraday::UploadIO.new(tmp.path, 'image/jpeg', 'image.jpg'), caption: caption)
-      rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed => e
+      rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed, Faraday::TimeoutError => e
         retries += 1
         LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendPhoto retry #{retries}: #{e.class}"
         if retries <= 3

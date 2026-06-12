@@ -9,7 +9,7 @@ module TelegramFile
   # (`https://api.telegram.org/file/bot<TOKEN>/<file_path>`). Forwarding
   # this URL to a third party (e.g. Suno) exposes the bot token to that
   # third party's logs / analytics. Same risk profile as the chat-visible
-  # URL produced by Commands::GptChat#process_voice_message — rotate via
+  # URL produced by MessageResponder#process_voice_message — rotate via
   # @BotFather if you suspect leakage.
   def self.public_url(api, file_id, chat_id: nil)
     file = api.getFile(file_id: file_id)

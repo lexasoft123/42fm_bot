@@ -138,7 +138,7 @@ class SunoWavConvertHandler
         performer: performer.empty? ? '42FM Bot' : performer,
         caption: "🎵 #{title} (WAV)"
       )
-    rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed => e
+    rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed, Faraday::TimeoutError => e
       retries += 1
       LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendAudio retry #{retries}: #{e.class}: #{e.message}"
       if retries <= 3

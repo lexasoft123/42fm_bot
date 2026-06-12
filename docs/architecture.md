@@ -154,6 +154,7 @@ bin/bot
 Receives every inbound message. Builds a `CommandContext`, runs `dispatch`, then `deliver`.
 
 - `respond` — entry point: saves message, skips stale ones, processes voice, calls `dispatch`
+- `process_voice_message` — audio passthrough for `audio:`-enabled chats: posts the voice file's direct (token-bearing, deliberate) URL to the chat. Resolves getFile through `TelegramFile.public_url`, which handles both the gem-2.x typed `Types::File` and legacy Hash shapes — inline `file['result']` access raises `Dry::Struct::MissingAttributeError` on the typed object and aborts dispatch (prod bug, fixed Jun 2026)
 - `dispatch(ctx)` — iterates `Commands::REGISTRY`; returns result from first matching command
 - `deliver(result)` — sends the `CommandResult` payload via the appropriate Telegram API call, then persists a `role: 'bot'` `messages` row for every successfully-sent type (see *Bot-reply persistence* below)
 
@@ -336,6 +337,8 @@ Cost note: an injected base64 image rides every subsequent iteration of the agen
 
 ### Agent Event Loop — `lib/task_handlers/agent_event_handler.rb`
 When image_gen / suno tasks hit interesting outcomes (failure after retries, success after retries), the handler emits an `agent_event` BackgroundTask via the `lib/task_handlers/agent_event_emitter.rb` mixin. `AgentEventHandler` runs `Agent::Runner` with a synthetic `[СЛУЖЕБНОЕ СОБЫТИЕ]` text describing what happened; the agent decides whether to comment, retry via tools, or `(skip)`.
+
+One special case: `song_delivery_failed` fires from `SunoTaskHandler#send_audio` when the song generated fine but the Telegram send conclusively failed (no clips downloaded, or sendMediaGroup retries exhausted). The task is already DB-`done` at that point (`mark_done!` runs before delivery so the clip URLs persist), so this event — plus a chat notification — is the only signal that the song never arrived; the agent should offer re-generation since Suno's CDN URLs expire.
 
 Per-chat rate limit: 10 emits per rolling hour. Loop protection: only image_gen/suno emit; agent_event itself doesn't (single-hop). See ADR-003 PR-2.
 

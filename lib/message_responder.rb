@@ -4,6 +4,7 @@ require 'fileutils'
 require 'unicode_utils'
 
 require './lib/message_sender'
+require './lib/telegram_file'
 require './lib/reply_master'
 require './lib/gogolmogol'
 require './lib/weather'
@@ -317,18 +318,20 @@ class MessageResponder
     message.chat.type == 'private' && @user.super_admin? && AdminMenu::Session.awaiting_input?(@user.uid)
   end
 
+  # Audio passthrough for audio-enabled chats: post the voice file's direct
+  # URL (token-bearing — deliberate, see TelegramFile.public_url) to the chat.
+  # getFile goes through TelegramFile.public_url, which handles both the
+  # gem-2.x typed Types::File and legacy Hash shapes — the old inline
+  # `file['result']` access raised Dry::Struct::MissingAttributeError on
+  # every voice message and aborted dispatch entirely.
   def process_voice_message
     return unless Chat.find_by(chat_id: @chat_id)&.audio
-
-    file_id = message.voice.file_id
-    file = bot.api.getFile(file_id: file_id)
-    file_path = file['result']['file_path']
-    LOGGER.debug "[chat=#{@chat_id}] #{self.class.name}#process_voice_message: #{file_path}"
-
     return unless message.voice.mime_type == "audio/ogg"
 
-    token = Settings.telegram['token']
-    link = "https://api.telegram.org/file/bot#{token}/#{file_path}"
+    link = TelegramFile.public_url(bot.api, message.voice.file_id, chat_id: @chat_id)
+    return unless link
+
+    LOGGER.debug "[chat=#{@chat_id}] #{self.class.name}#process_voice_message: voice link resolved"
     MessageSender.new(bot: @bot, chat: message.chat, text: link).send
   end
 end

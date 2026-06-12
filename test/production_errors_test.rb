@@ -1259,3 +1259,212 @@ class SendImageErrorTest < BotTest
     assert_equal "http://example.com/photo.jpg", photo_sent[:photo]
   end
 end
+
+# ==========================================================================
+# VoiceMessagePassthroughTest — covers Dry::Struct::MissingAttributeError on
+# Telegram::Bot::Types::File (prod: Apr 13 / May 26 / Jun 10 — every voice
+# message in an audio-enabled chat crashed dispatch because
+# process_voice_message did gem-1.x `file['result']` hash access on the
+# gem-2.x typed getFile response).
+# ==========================================================================
+class VoiceMessagePassthroughTest < BotTest
+  include ProdTestHelpers
+  include Fixtures::Users
+
+  # Mimics gem-2.x Telegram::Bot::Types::File: exposes #file_path but raises
+  # on hash-style access, exactly like Dry::Struct#[] does for unknown keys.
+  class TypedFile
+    attr_reader :file_path
+    def initialize(file_path) = @file_path = file_path
+    def [](key) = raise(KeyError, %(Missing attribute: "#{key}"))
+  end
+
+  def setup
+    super
+    stub_settings!
+    require_relative '../lib/message_responder'
+    @user = member_user
+  end
+
+  def make_api(file_path: 'voice/file42.oga')
+    api = Object.new
+    calls = []
+    api.define_singleton_method(:calls) { calls }
+    api.define_singleton_method(:getFile) do |file_id:|
+      calls << [:getFile, file_id]
+      TypedFile.new(file_path)
+    end
+    api.define_singleton_method(:sendChatAction) { |**_| nil }
+    api.define_singleton_method(:sendMessage) do |params|
+      calls << [:sendMessage, params]
+      OpenStruct.new(message_id: 555)
+    end
+    api
+  end
+
+  def voice_msg(mime: 'audio/ogg')
+    OpenStruct.new(
+      text: nil, caption: nil, message_id: 7,
+      reply_to_message: nil, message_thread_id: nil,
+      edit_date: nil, date: Time.now.to_i, forward_origin: nil,
+      voice: OpenStruct.new(file_id: 'VOICE1', mime_type: mime, duration: 3),
+      audio: nil, document: nil, photo: nil,
+      chat: OpenStruct.new(id: 100, title: 'voice chat', type: 'supergroup'),
+      from: OpenStruct.new(id: @user.uid, username: @user.name, first_name: 'T', last_name: nil)
+    )
+  end
+
+  def responder(api, message)
+    MessageResponder.new(bot: OpenStruct.new(api: api), message: message, radio: nil)
+  end
+
+  def test_voice_link_sent_with_typed_getfile_response
+    Chat.create!(chat_id: 100, title: 'v', chat_type: 'supergroup', authorized: true, audio: true)
+    api = make_api
+    responder(api, voice_msg).send(:process_voice_message)
+
+    sent = api.calls.find { |c| c[0] == :sendMessage }
+    assert sent, 'voice link must be posted to the chat'
+    assert_includes sent[1][:text], 'https://api.telegram.org/file/bot123456:ABCDEF/voice/file42.oga'
+  end
+
+  def test_non_ogg_voice_skips_getfile_entirely
+    Chat.create!(chat_id: 100, title: 'v', chat_type: 'supergroup', authorized: true, audio: true)
+    api = make_api
+    responder(api, voice_msg(mime: 'audio/mpeg')).send(:process_voice_message)
+    assert_empty api.calls, 'mime gate must fire before the getFile round-trip'
+  end
+
+  def test_audio_disabled_chat_is_a_noop
+    Chat.create!(chat_id: 100, title: 'v', chat_type: 'supergroup', authorized: true, audio: false)
+    api = make_api
+    responder(api, voice_msg).send(:process_voice_message)
+    assert_empty api.calls
+  end
+end
+
+# ==========================================================================
+# SunoSendAudioDeliveryTest — covers prod task 2011 (Jun 11): sendMediaGroup
+# raised Faraday::TimeoutError on a 15 MB upload; the timeout was not in the
+# retry rescue list and the task was already DB-:done, so the song vanished
+# silently. Now timeouts retry, and a final delivery failure notifies the
+# chat and emits a song_delivery_failed agent_event.
+# ==========================================================================
+class SunoSendAudioDeliveryTest < BotTest
+  include ProdTestHelpers
+
+  CHAT = -100
+
+  def setup
+    super
+    stub_settings!
+    require 'tempfile'
+    require_relative '../lib/task_handlers/suno_handler'
+    @handler = SunoTaskHandler.new
+    @handler.define_singleton_method(:sleep) { |_| } # skip retry backoff
+    @handler.define_singleton_method(:download_to_tempfile) do |_url, _name, chat_id: nil, suffix: '.mp3'|
+      tmp = Tempfile.new(['clip', suffix])
+      tmp.binmode
+      tmp.write('x' * 16)
+      tmp.rewind
+      tmp
+    end
+  end
+
+  def make_task
+    BackgroundTask.create!(
+      task_type: 'suno_generate', chat_id: CHAT, max_attempts: 60,
+      external_id: 'sun-2011',
+      params: { title: 'Тянем', user_uid: 1 }.to_json
+    )
+  end
+
+  # sendMediaGroup raises Faraday::TimeoutError for the first
+  # `media_group_failures` calls, then succeeds.
+  def make_api(media_group_failures:)
+    api = Object.new
+    calls = []
+    attempts = 0
+    api.define_singleton_method(:calls) { calls }
+    api.define_singleton_method(:sendMediaGroup) do |**_kw|
+      calls << [:sendMediaGroup]
+      attempts += 1
+      raise Faraday::TimeoutError, 'Net::ReadTimeout' if attempts <= media_group_failures
+      [OpenStruct.new(message_id: 900 + attempts, message_thread_id: nil, photo: nil)]
+    end
+    api.define_singleton_method(:sendMessage) do |**kw|
+      calls << [:sendMessage, kw]
+      OpenStruct.new(message_id: 555)
+    end
+    api
+  end
+
+  def clips
+    [{ audio_url: 'http://x/a.mp3', title: 'A' }]
+  end
+
+  def delivery_failed_events
+    BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event')
+                  .select { |t| t.params_hash['event_type'] == 'song_delivery_failed' }
+  end
+
+  def test_timeout_exhausts_retries_then_notifies_chat_and_agent
+    api = make_api(media_group_failures: 99)
+    task = make_task
+    @handler.send(:send_audio, api, task, clips, 'Тянем', task.params_hash)
+
+    assert_equal 4, api.calls.count { |c| c[0] == :sendMediaGroup }, '1 attempt + 3 retries'
+    notify = api.calls.find { |c| c[0] == :sendMessage }
+    assert notify, 'chat must be told the delivery failed'
+    assert_match(/не вышло/, notify[1][:text])
+    events = delivery_failed_events
+    assert_equal 1, events.size
+    assert_match(/Тянем/, events.first.params_hash['summary'])
+  end
+
+  def test_timeout_then_success_delivers_without_failure_event
+    api = make_api(media_group_failures: 1)
+    task = make_task
+    @handler.send(:send_audio, api, task, clips, 'Тянем', task.params_hash)
+
+    assert_equal 2, api.calls.count { |c| c[0] == :sendMediaGroup }, 'timeout must be retried'
+    assert_empty delivery_failed_events
+    assert Message.where(chat_id: CHAT, role: 'bot').where('body LIKE ?', '%Тянем%').exists?,
+           'delivered media-group row must be persisted'
+  end
+
+  def test_no_clips_downloaded_notifies_instead_of_silent_skip
+    @handler.define_singleton_method(:download_to_tempfile) { |*_args, **_kw| nil }
+    api = make_api(media_group_failures: 0)
+    task = make_task
+    @handler.send(:send_audio, api, task, clips, 'Тянем', task.params_hash)
+
+    assert_equal 0, api.calls.count { |c| c[0] == :sendMediaGroup }
+    assert_equal 1, delivery_failed_events.size
+  end
+
+  # notify_delivery_failed must be non-raising: if emit_agent_event blew up
+  # and escaped from an early-return path, send_audio's outer rescue would
+  # re-enter it (`unless delivered`) and double-post the failure message.
+  def test_emit_failure_does_not_double_notify
+    @handler.define_singleton_method(:emit_agent_event) { |*_args, **_kw| raise 'db lock' }
+    api = make_api(media_group_failures: 99)
+    task = make_task
+    @handler.send(:send_audio, api, task, clips, 'Тянем', task.params_hash)
+
+    assert_equal 1, api.calls.count { |c| c[0] == :sendMessage },
+                 'exactly one failure notification despite emit_agent_event raising'
+  end
+
+  # A failure AFTER a successful sendMediaGroup (persist/lyrics follow-ups)
+  # means the user HAS the song — must not produce a delivery-failed event.
+  def test_post_delivery_failure_does_not_notify
+    @handler.define_singleton_method(:persist_bot_media_rows) { |*_args, **_kw| raise 'boom' }
+    api = make_api(media_group_failures: 0)
+    task = make_task
+    @handler.send(:send_audio, api, task, clips, 'Тянем', task.params_hash)
+
+    assert_empty delivery_failed_events
+    assert_equal 0, api.calls.count { |c| c[0] == :sendMessage }
+  end
+end

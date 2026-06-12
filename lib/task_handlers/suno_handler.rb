@@ -229,7 +229,7 @@ class SunoTaskHandler
       p = task.params_hash
       title = p['title'] || 'Песня от 42FM'
       maybe_chain_cover_art(task, p, title)
-      send_audio(api, task.chat_id, result, title, p, bg_task_external_id: task.external_id)
+      send_audio(api, task, result, title, p)
       if (p['generation_retries'] || 0) >= 1
         emit_agent_event(task, 'song_succeeded_after_retries',
           summary: "Песня '#{title}' получилась с #{p['generation_retries']}-й попытки.")
@@ -420,7 +420,9 @@ class SunoTaskHandler
     PROMPT
   end
 
-  def send_audio(api, chat_id, clips, title, params, bg_task_external_id: nil)
+  def send_audio(api, task, clips, title, params)
+    chat_id = task.chat_id
+    delivered = false
     artist = params['artist'].to_s.strip
     performer = artist.empty? ? '42FM Bot' : artist
 
@@ -447,6 +449,7 @@ class SunoTaskHandler
 
     if media.empty?
       LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_audio: no clips downloaded — skipping send"
+      notify_delivery_failed(task, api, title)
       return
     end
 
@@ -457,7 +460,7 @@ class SunoTaskHandler
       send_params = { chat_id: chat_id, media: media.to_json }
       temp_files.each_with_index { |tf, i| send_params[:"audio#{i}"] = Faraday::UploadIO.new(tf[:file].path, 'audio/mpeg', tf[:name]) }
       api.sendMediaGroup(**send_params)
-    rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed => e
+    rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed, Faraday::TimeoutError => e
       retries += 1
       LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendMediaGroup retry #{retries}: #{e.class}: #{e.message}"
       if retries <= 3
@@ -470,11 +473,17 @@ class SunoTaskHandler
       temp_files.each { |tf| tf[:file].close; tf[:file].unlink rescue nil }
     end
 
+    if result.nil?
+      notify_delivery_failed(task, api, title)
+      return
+    end
+    delivered = true
+
     messages = result.is_a?(Hash) ? result['result'] : result
     msg_id = messages&.first&.respond_to?(:message_id) ? messages.first.message_id : messages&.first&.dig('message_id')
     LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: sendMediaGroup ok, first_message_id=#{msg_id.inspect}"
 
-    persist_bot_media_rows(chat_id, messages, title, params, bg_task_external_id: bg_task_external_id)
+    persist_bot_media_rows(chat_id, messages, title, params, bg_task_external_id: task.external_id)
 
     lyrics = resolve_delivery_lyrics(params, clips)
     return if lyrics.empty?
@@ -485,6 +494,37 @@ class SunoTaskHandler
     LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: lyrics sent"
   rescue => e
     LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_audio failed: #{e.class}: #{e.message} (#{e.backtrace&.first})"
+    # Only report a lost delivery when the media group itself never went
+    # out — a failure in the persist/lyrics follow-ups after a successful
+    # sendMediaGroup means the user HAS the song.
+    notify_delivery_failed(task, api, title) unless delivered
+  end
+
+  # The task is already DB-:done by the time delivery runs (mark_done!
+  # precedes send_audio so the clip URLs land in result), so a failed send
+  # can't be re-queued via task status — and Suno's CDN URLs expire, making
+  # the loss final for this task. Tell the chat and emit a
+  # song_delivery_failed agent_event so the agent knows the song never
+  # arrived and can offer a re-generation, instead of going silent
+  # (prod task 2011: 15 MB upload timed out, task read :done, user got
+  # nothing and nobody was told).
+  # Method-level rescue (not just around sendMessage): emit_agent_event does
+  # unguarded DB writes that can raise under SQLite contention — if that
+  # escaped from an early-return path, send_audio's outer rescue would
+  # re-enter this method (`unless delivered`) and double-post to the chat.
+  def notify_delivery_failed(task, api, title)
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: song_delivery_failed for '#{title}' (suno task #{task.external_id})"
+    text = 'Песня сгенерировалась, но отправить её в чат не вышло 😔'
+    begin
+      resp = api.sendMessage(chat_id: task.chat_id, text: text)
+      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)
+    rescue => e
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify delivery failure: #{e.class}: #{e.message}"
+    end
+    emit_agent_event(task, 'song_delivery_failed',
+      summary: "Песня '#{title}' сгенерировалась, но доставка в чат не удалась (ошибка отправки в Telegram). Эту генерацию уже не доставить — предложи пользователю заказать песню заново.")
+  rescue => e
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: notify_delivery_failed itself failed: #{e.class}: #{e.message}"
   end
 
   # compose_song stores the locally-composed lyrics in `params['lyrics']`

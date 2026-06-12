@@ -128,7 +128,7 @@ class SunoCoverArtHandler
       send_params = { chat_id: chat_id, media: media.to_json }
       temp_files.each_with_index { |tf, i| send_params[:"photo#{i}"] = Faraday::UploadIO.new(tf.path, 'image/png', "cover_#{i}.png") }
       api.sendMediaGroup(**send_params)
-    rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed => e
+    rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed, Faraday::TimeoutError => e
       retries += 1
       LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendMediaGroup retry #{retries}: #{e.class}: #{e.message}"
       if retries <= 3
