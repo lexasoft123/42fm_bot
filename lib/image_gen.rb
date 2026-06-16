@@ -2,6 +2,7 @@ require_relative 'image_gen/adapter'
 require_relative 'image_gen/flux_adapter'
 require_relative 'image_gen/atlas_adapter'
 require_relative 'image_gen/closerouter_adapter'
+require_relative 'image_gen/catalog'
 
 # Image-generation facade. Picks an adapter from Settings.image_gen and
 # returns a fresh instance per call (adapters are cheap to construct, mostly

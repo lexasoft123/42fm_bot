@@ -45,18 +45,19 @@ module ImageGen
     # When input_image is provided (base64, without data-URI prefix), flux-2-pro
     # switches to image-edit mode and sizes the output to match the input
     # unless width/height are forced.
-    def submit(prompt:, input_image: nil, input_media_type: nil, width: 1024, height: 1024)
+    def submit(prompt:, input_image: nil, input_media_type: nil, width: 1024, height: 1024, model: nil)
+      effective_model = model || @model
       body = { prompt: prompt, safety_tolerance: 5, output_format: 'jpeg' }
       if input_image
         body[:input_image] = "data:image/jpeg;base64,#{input_image}"
-        LOGGER.debug "#{self.class.name}: submitting edit (prompt #{prompt.length} chars, image #{input_image.bytesize} b64-bytes) to #{@model}"
+        LOGGER.debug "#{self.class.name}: submitting edit (prompt #{prompt.length} chars, image #{input_image.bytesize} b64-bytes) to #{effective_model}"
       else
         body[:width]  = width
         body[:height] = height
-        LOGGER.debug "#{self.class.name}: submitting prompt (#{prompt.length} chars) to #{@model}"
+        LOGGER.debug "#{self.class.name}: submitting prompt (#{prompt.length} chars) to #{effective_model}"
       end
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      resp = HTTParty.post("#{@base_url}/v1/#{@model}",
+      resp = HTTParty.post("#{@base_url}/v1/#{effective_model}",
         body: body.to_json, headers: headers, timeout: 60)
       LOGGER.debug "#{self.class.name}#submit took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms code=#{resp.code}"
       raise "Flux submit failed: #{resp.code} #{resp.body}" unless resp.code == 200

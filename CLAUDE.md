@@ -120,7 +120,7 @@ How-to recipes (add a command, patterns, settings, migrations): `docs/architectu
 | Agent mode tools | `lib/agent/tools/*.rb` + `lib/agent/tool_registry.rb` + `lib/agent/runner.rb` |
 | Background tasks | `lib/task_runner.rb` + `lib/task_handlers/*.rb` + `models/background_task.rb` |
 | Suno (compose / add-vocals / cover / cover-art / WAV) | `lib/suno_client.rb` + `lib/task_handlers/suno_*.rb` + `lib/agent/tools/{suno,add_vocals,cover_audio,cover_art,convert_to_wav}.rb` — see `.claude/rules/suno.md` |
-| Image generation (FLUX / Atlas / CloseRouter) | `lib/image_gen/*.rb` + `lib/model_provider_client.rb` + `lib/task_handlers/image_gen_handler.rb` — see `.claude/rules/image-gen.md` |
+| Image generation (FLUX / Atlas / CloseRouter; agent picks model per request) | `lib/image_gen/*.rb` (incl. `catalog.rb`) + `lib/model_provider_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/agent/tools/image_gen.rb` — see `.claude/rules/image-gen.md` |
 | Shared handler context | `lib/chat_context.rb` — `ChatContext` module (chat messages + knowledge for task handlers) |
 | Agent scratchpad / events / cron | `lib/agent/scratchpad.rb` + `lib/cron_scheduler.rb` + `lib/task_handlers/agent_event_*.rb` — see `.claude/rules/agent-runtime.md` |
 | Admin menu / access requests / chat labels | `lib/admin_menu/*.rb` + `lib/access_request.rb` + `models/chat.rb` — see `.claude/rules/admin-menu.md` |

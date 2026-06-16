@@ -127,6 +127,42 @@ class FluxAdapterBackCompatTest < Minitest::Test
   end
 end
 
+# FluxAdapter#submit — stubs HTTParty.post (FLUX talks HTTP directly, not via
+# ModelProviderClient). Verifies the per-request model: kwarg lands in the URL
+# path (FLUX selects the model by URL, e.g. /v1/flux-2-pro).
+class FluxAdapterSubmitTest < Minitest::Test
+  FLUX_CFG = { 'providers' => { 'flux' => { 'api_url' => 'https://api.bfl.ai',
+                                            'api_key' => 'k', 'model' => 'flux-2-pro' } } }.freeze
+  def setup;    Settings.image_gen = FLUX_CFG; Settings.flux = nil; end
+  def teardown; Settings.image_gen = nil;      Settings.flux = nil; end
+
+  def with_post_capture
+    captured = []
+    real = HTTParty.method(:post)
+    HTTParty.singleton_class.send(:define_method, :post) do |url, **_kw|
+      captured << url
+      OpenStruct.new(code: 200, parsed_response: { 'id' => 'flux-id' })
+    end
+    yield captured
+  ensure
+    HTTParty.singleton_class.send(:define_method, :post, real)
+  end
+
+  def test_submit_uses_configured_model_in_url_by_default
+    with_post_capture do |urls|
+      ImageGen::FluxAdapter.new.submit(prompt: 'x')
+      assert_equal 'https://api.bfl.ai/v1/flux-2-pro', urls.first
+    end
+  end
+
+  def test_submit_explicit_model_overrides_url
+    with_post_capture do |urls|
+      ImageGen::FluxAdapter.new.submit(prompt: 'x', model: 'flux-2-flex')
+      assert_equal 'https://api.bfl.ai/v1/flux-2-flex', urls.first
+    end
+  end
+end
+
 # AtlasAdapter — stubs ModelProviderClient at the class level (not HTTParty) so we
 # test adapter logic above the HTTP layer; ModelProviderClient itself is covered by
 # atlas_client_test.rb.
@@ -329,22 +365,52 @@ class AtlasAdapterTest < Minitest::Test
 
   # prompt_template --------------------------------------------------
 
-  def test_prompt_template_text_to_image_mentions_wan_and_has_placeholders
+  def test_prompt_template_text_to_image_is_model_agnostic_with_placeholders
     fake = FakeModelProviderClient.new
     template = with_fake_client(fake) { ImageGen::AtlasAdapter.new.prompt_template(:text_to_image) }
-    assert_match(/Wan 2\.7/, template)
+    # Model name is now interpolated (de-hardcoded from "Wan 2.7") so the same
+    # Atlas adapter can serve nano-banana-2 etc.
+    assert_match(/%\{model_name\}/, template)
+    refute_match(/Wan 2\.7/, template, 'model name must be de-hardcoded')
     assert_match(/%\{request\}/, template)
     assert_match(/%\{context\}/, template)
     assert_match(/%\{knowledge\}/, template)
     refute_match(/FLUX 2 приоритизирует/, template, 'should drop FLUX-specific guidance')
   end
 
-  def test_prompt_template_edit_mode_is_imperative
+  def test_prompt_template_edit_mode_is_imperative_and_model_agnostic
     fake = FakeModelProviderClient.new
     template = with_fake_client(fake) { ImageGen::AtlasAdapter.new.prompt_template(:edit) }
-    assert_match(/image-edit/, template)
-    assert_match(/Wan/, template)
+    assert_match(/%\{model_name\}/, template)
+    refute_match(/Wan/, template, 'edit template model name must be de-hardcoded')
+    assert_match(/повелительно/, template)
     assert_match(/%\{request\}/, template)
+  end
+
+  # Per-request model override: explicit model: kwarg wins over @t2i_model/@edit_model.
+  def test_submit_explicit_model_overrides_configured_t2i
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'x' } })
+    with_fake_client(fake) do
+      ImageGen::AtlasAdapter.new.submit(prompt: 'y', model: 'google/nano-banana-2/text-to-image')
+    end
+    _, _, body = fake.calls.first
+    assert_equal 'google/nano-banana-2/text-to-image', body[:model]
+  end
+
+  def test_submit_explicit_model_overrides_configured_edit
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'x' } })
+    with_fake_client(fake) do
+      ImageGen::AtlasAdapter.new.submit(prompt: 'y', input_image: 'B64', model: 'google/nano-banana-2/edit')
+    end
+    _, _, body = fake.calls.first
+    assert_equal 'google/nano-banana-2/edit', body[:model]
+  end
+
+  def test_submit_nil_model_falls_back_to_configured
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'x' } })
+    with_fake_client(fake) { ImageGen::AtlasAdapter.new.submit(prompt: 'y', model: nil) }
+    _, _, body = fake.calls.first
+    assert_equal 'alibaba/wan-2.7/text-to-image', body[:model], 'nil model → configured default'
   end
 end
 
@@ -436,6 +502,22 @@ class CloseRouterImgAdapterTest < Minitest::Test
     assert_match(/no data\[0\]\.url/, err.message)
   end
 
+  def test_submit_explicit_model_overrides_configured
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => [{ 'url' => 'https://cdn/x.png' }] })
+    with_fake_client(fake) { ImageGen::CloseRouterImgAdapter.new.submit(prompt: 'y', model: 'custom/model') }
+    _, _, body = fake.calls.first
+    assert_equal 'custom/model', body[:model]
+  end
+
+  def test_submit_edit_explicit_model_overrides_configured
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => [{ 'url' => 'https://cdn/x.png' }] })
+    with_fake_client(fake) do
+      ImageGen::CloseRouterImgAdapter.new.submit(prompt: 'y', input_image: 'ZmFrZQ==', model: 'custom/edit')
+    end
+    _, _, body = fake.calls.first
+    assert_equal 'custom/edit', body[:model]
+  end
+
   def test_initialize_raises_when_closerouter_block_missing
     Settings.image_gen = { 'provider' => 'closerouter', 'providers' => {} }
     err = assert_raises(RuntimeError) { ImageGen::CloseRouterImgAdapter.new }
@@ -469,18 +551,19 @@ end
 # real ImageGenTaskHandler without hitting any backend.
 class FakeAdapter < ImageGen::Adapter
   NAME = 'fake'
-  attr_accessor :submit_calls, :poll_calls, :submit_returns, :poll_returns, :sync
+  attr_accessor :submit_calls, :poll_calls, :submit_returns, :poll_returns, :sync, :adapter_for_args
 
   def initialize(submit_returns: 'fake-extid', poll_returns: { url: 'http://x/img.jpg' }, sync: false)
-    @submit_calls   = []
-    @poll_calls     = []
-    @submit_returns = submit_returns
-    @poll_returns   = poll_returns
-    @sync           = sync
+    @submit_calls     = []
+    @poll_calls       = []
+    @adapter_for_args = []
+    @submit_returns   = submit_returns
+    @poll_returns     = poll_returns
+    @sync             = sync
   end
 
-  def submit(prompt:, input_image: nil, input_media_type: nil)
-    @submit_calls << { prompt: prompt, input_image: input_image, input_media_type: input_media_type }
+  def submit(prompt:, input_image: nil, input_media_type: nil, model: nil)
+    @submit_calls << { prompt: prompt, input_image: input_image, input_media_type: input_media_type, model: model }
     @submit_returns
   end
 
@@ -489,8 +572,10 @@ class FakeAdapter < ImageGen::Adapter
     @poll_returns
   end
 
+  # Template references %{model_name} so handler-interpolation tests exercise the
+  # mandatory model_name key on every path (a missing key would raise KeyError).
   def prompt_template(mode)
-    "[#{mode}] %{request} | %{context} | %{knowledge}"
+    "[#{mode}] %{request} | %{context} | %{knowledge} | model=%{model_name}"
   end
 
   def synchronous?
@@ -530,6 +615,19 @@ class HandlerAdapterIntegrationTest < BotTest
     def sendPhoto(**kw);   @calls << [:sendPhoto, kw];   OpenStruct.new(message_id: 2, message_thread_id: nil); end
   end
 
+  HANDLER_CATALOG = {
+    'provider' => 'atlas',
+    'default_model' => 'nano-banana-2',
+    'models' => {
+      'nano-banana-2' => { 'provider' => 'atlas', 't2i' => 'google/nano-banana-2/text-to-image',
+                           'edit' => 'google/nano-banana-2/edit', 'desc' => 'd' },
+      'wan-2.7'       => { 'provider' => 'atlas', 't2i' => 'alibaba/wan-2.7-pro/text-to-image',
+                           'edit' => 'alibaba/wan-2.7/image-edit', 'desc' => 'd' },
+      'flux-2-pro'    => { 'provider' => 'flux', 't2i' => 'flux-2-pro', 'edit' => 'flux-2-pro', 'desc' => 'd' },
+      'bad-provider'  => { 'provider' => 'nope', 't2i' => 'x/y', 'edit' => false, 'desc' => 'd' },
+    },
+  }.freeze
+
   def setup
     super
     @fake_adapter = FakeAdapter.new
@@ -539,11 +637,14 @@ class HandlerAdapterIntegrationTest < BotTest
     Object.const_set(:GptMaster, FakeGptMaster)
     FakeGptMaster.reset!
 
+    Settings.image_gen = Marshal.load(Marshal.dump(HANDLER_CATALOG))
+    ImageGen::Catalog.reset!
+
     ImageGen.singleton_class.send(:alias_method, :__current_adapter, :current_adapter)
     ImageGen.singleton_class.send(:alias_method, :__adapter_for,     :adapter_for)
     fa = @fake_adapter
     ImageGen.define_singleton_method(:current_adapter) { fa }
-    ImageGen.define_singleton_method(:adapter_for)     { |_n| fa }
+    ImageGen.define_singleton_method(:adapter_for)     { |n| fa.adapter_for_args << n; fa }
 
     # Stub away ChatContext lookups + tempfile download (forces sendPhoto's
     # URL-fallback path so we don't need a real image to deliver).
@@ -563,13 +664,17 @@ class HandlerAdapterIntegrationTest < BotTest
     ImageGen.singleton_class.send(:alias_method, :adapter_for,     :__adapter_for)
     ImageGen.singleton_class.send(:remove_method, :__current_adapter)
     ImageGen.singleton_class.send(:remove_method, :__adapter_for)
+    Settings.image_gen = nil
+    ImageGen::Catalog.reset!
     super
   end
 
-  def fresh_task(input_image: nil)
+  def fresh_task(input_image: nil, model: nil, award: false)
     params = { 'request' => 'кот в шляпе', 'user_uid' => 42 }
     params['input_image']      = input_image if input_image
     params['input_media_type'] = 'image/jpeg' if input_image
+    params['model'] = model if model
+    params['award'] = true  if award
     BackgroundTask.create!(task_type: 'image_generate', chat_id: -1, max_attempts: 60, params: params.to_json)
   end
 
@@ -682,5 +787,72 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal 1, task.params_hash['generation_retries']
     assert_equal 'pending', task.status
     refute_nil original_extid
+  end
+
+  # --- per-request model selection (catalog) --------------------------------
+
+  # A task carrying a catalog model key threads the entry's provider-specific
+  # t2i id into adapter.submit(model:) and snapshots the key into params.
+  def test_model_key_threads_catalog_t2i_into_submit
+    task = fresh_task(model: 'wan-2.7')
+    ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal 'alibaba/wan-2.7-pro/text-to-image', @fake_adapter.submit_calls.first[:model]
+    task.reload
+    assert_equal 'wan-2.7', task.params_hash['model'], 'model key snapshotted for forensics'
+    # model_name interpolated into the enrichment prompt
+    assert_match(/model=wan-2\.7/, gpt_text(FakeGptMaster.captured.first))
+  end
+
+  # Edit mode threads the catalog edit id.
+  def test_model_key_threads_catalog_edit_id
+    task = fresh_task(model: 'wan-2.7', input_image: Base64.strict_encode64('fakebytes'))
+    ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal 'alibaba/wan-2.7/image-edit', @fake_adapter.submit_calls.first[:model]
+  end
+
+  # Legacy/no-model task → current_adapter path, model: nil (today's behavior).
+  def test_legacy_task_without_model_passes_nil_model
+    task = fresh_task # no model key
+    ImageGenTaskHandler.new.call(task, @bot)
+    assert_nil @fake_adapter.submit_calls.first[:model]
+    task.reload
+    assert_equal 'fake', task.params_hash['provider']
+    refute task.params_hash.key?('model'), 'no model snapshot for legacy tasks'
+  end
+
+  # A stored model key that isn't in the catalog resolves to the default's t2i id.
+  def test_unknown_model_key_resolves_to_default_t2i
+    task = fresh_task(model: 'bogus')
+    ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal 'google/nano-banana-2/text-to-image', @fake_adapter.submit_calls.first[:model]
+  end
+
+  # Catalog entry with a provider not in ImageGen::ADAPTERS → re-resolve to the
+  # default KEY so adapter and model id stay coherent (finding #6).
+  def test_unknown_provider_reresolves_to_default_key
+    task = fresh_task(model: 'bad-provider')
+    ImageGenTaskHandler.new.call(task, @bot)
+    assert_includes @fake_adapter.adapter_for_args, 'atlas', 'rebuilds default model provider adapter'
+    assert_equal 'google/nano-banana-2/text-to-image', @fake_adapter.submit_calls.first[:model]
+    task.reload
+    assert_equal 'nano-banana-2', task.params_hash['model'], 'snapshot re-resolved to default key'
+  end
+
+  # Selection dispatches the adapter by the ENTRY's provider, not the global one.
+  def test_model_key_dispatches_by_entry_provider
+    task = fresh_task(model: 'flux-2-pro')  # entry provider 'flux' ≠ global 'atlas'
+    ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal 'flux', @fake_adapter.adapter_for_args.last
+  end
+
+  # Award task (made by make_award) carries no model key; the Atlas template's
+  # %{model_name} must still interpolate (no KeyError) with the generic fallback.
+  def test_award_task_without_model_interpolates_default_model_name
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/award.png' }
+    task = fresh_task(award: true)
+    assert_equal :done, ImageGenTaskHandler.new.call(task, @bot)  # would raise KeyError pre-fix
+    assert_match(/model=AI image generator/, gpt_text(FakeGptMaster.captured.first))
+    assert_match(/🏆/, @bot.calls.last[1][:caption])
   end
 end

@@ -18,8 +18,19 @@ class ImageGenTaskHandler
     request = p['request'].to_s
     input_image = p['input_image']
     editing = !input_image.to_s.empty?
+    model_key = p['model']   # nil for legacy/award tasks (no per-request model)
     begin
-      adapter = ImageGen.current_adapter
+      if model_key
+        prov = ImageGen::Catalog.provider_for(model_key)
+        unless ImageGen::ADAPTERS.key?(prov)   # typo'd/unknown provider in catalog entry
+          LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: model #{model_key.inspect} → unknown provider #{prov.inspect}; falling back to default_model"
+          model_key = ImageGen::Catalog.default_key   # re-resolve key so model id matches the adapter
+          prov      = ImageGen::Catalog.provider_for(model_key)
+        end
+        adapter = ImageGen.adapter_for(prov)   # build the entry's provider's adapter
+      else
+        adapter = ImageGen.current_adapter     # legacy / no catalog → today's behavior
+      end
     rescue => e
       LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: adapter resolution failed: #{e.class}: #{e.message}"
       mark_failed_and_notify(task, api, 'adapter_config_error')
@@ -33,7 +44,11 @@ class ImageGenTaskHandler
       context = get_chat_context(task.chat_id)
       knowledge = get_relevant_knowledge(request, task.chat_id)
       template = adapter.prompt_template(editing ? :edit : :text_to_image)
-      llm_prompt = template % { request: request, context: context, knowledge: knowledge }
+      # model_name is passed on EVERY path (incl. award/legacy tasks with no
+      # model key) because the Atlas template references %{model_name} and
+      # Ruby's String#% raises KeyError on a missing referenced key.
+      llm_prompt = template % { request: request, context: context, knowledge: knowledge,
+                               model_name: (model_key || 'AI image generator') }
 
       messages = if editing
         media_type = p['input_media_type'] || 'image/jpeg'
@@ -65,14 +80,20 @@ class ImageGenTaskHandler
       ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
     end
 
+    # Provider-specific model id for this mode; nil ⇒ adapter uses its
+    # configured default (legacy tasks, or an edit:false catalog entry).
+    mode = editing ? :edit : :text_to_image
+    resolved_model_id = model_key ? ImageGen::Catalog.model_id_for(model_key, mode) : nil
     begin
       submit_result = adapter.submit(prompt: p['prompt'],
                                      input_image: input_image.to_s.empty? ? nil : input_image,
-                                     input_media_type: p['input_media_type'])
+                                     input_media_type: p['input_media_type'],
+                                     model: resolved_model_id)
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit: #{e.message}", raise_on_retry: e)
     end
     p['provider'] = adapter.name
+    p['model']    = model_key if model_key   # forensics snapshot (poll dispatches on provider)
 
     # Synchronous adapters (e.g. CloseRouter Nano Banana Pro) return a
     # terminal result Hash from #submit and skip the poll cycle entirely.

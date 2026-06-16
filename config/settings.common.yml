@@ -258,11 +258,14 @@ flux:
 # transition; once prod is on `image_gen.providers.flux.api_key`, both the
 # top-level block and the shim get removed (plan step 16).
 image_gen:
-  provider: atlas                # 'atlas' | 'flux' | 'closerouter'
+  provider: atlas                # 'atlas' | 'flux' | 'closerouter' — adapter for legacy/no-model tasks
+  default_model: nano-banana-2   # catalog key used when the agent omits/sends an unknown model
   providers:
     atlas:
       api_url: 'https://api.atlascloud.ai'
-      text_to_image_model: 'alibaba/wan-2.7-pro/text-to-image'
+      # Default Atlas t2i flipped to nano-banana-2 so legacy/no-model tasks
+      # (current_adapter → @t2i_model) match the catalog default below.
+      text_to_image_model: 'google/nano-banana-2/text-to-image'
       image_edit_model:    'alibaba/wan-2.7/image-edit'
       width:  1024
       height: 1024
@@ -276,6 +279,34 @@ image_gen:
       api_url: 'https://api.closerouter.dev'
       text_to_image_model: 'google/nano-banana-pro'
       image_edit_model:    'google/nano-banana-pro-edit'
+  # Agent-selectable model catalog (ImageGen::Catalog). KEY = stable enum value
+  # the agent passes to generate_image(model:). `provider` must exist under
+  # providers.<provider> above. `t2i`/`edit` are provider-specific model ids
+  # threaded into adapter.submit(model:); `edit: false` → edit unsupported, the
+  # adapter falls back to its configured image_edit_model. `desc` guides the
+  # agent's choice. NB: a model whose provider lacks an api_key in settings.yml
+  # fails at submit. All ids below verified live (submit→poll) 2026-06-16.
+  models:
+    nano-banana-2:
+      provider: atlas
+      t2i:  'google/nano-banana-2/text-to-image'
+      edit: 'google/nano-banana-2/edit'
+      desc: 'Google Nano Banana 2 (Atlas). Силён в фотореализме и тексте на картинке. Универсал, по умолчанию.'
+    wan-2.7:
+      provider: atlas
+      t2i:  'alibaba/wan-2.7-pro/text-to-image'
+      edit: 'alibaba/wan-2.7/image-edit'
+      desc: 'Alibaba Wan 2.7 (Atlas). Хорош для развёрнутых описательных промптов и арта.'
+    nano-banana-pro:
+      provider: closerouter
+      t2i:  'google/nano-banana-pro'
+      edit: 'google/nano-banana-pro-edit'
+      desc: 'Nano Banana Pro (CloseRouter, синхронный). Топ детализация и текст, но медленнее.'
+    flux-2-pro:
+      provider: flux
+      t2i:  'flux-2-pro'
+      edit: 'flux-2-pro'
+      desc: 'FLUX 2 Pro (BFL). Приоритизирует начало промпта, сильный фотореализм с указанием камеры/плёнки.'
 
 # Scheduled digest auto-posts (CronScheduler#maybe_fire_digests).
 # chat_id is env-specific: set it in settings.yml on prod (edit in place,

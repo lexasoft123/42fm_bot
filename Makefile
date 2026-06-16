@@ -28,6 +28,8 @@ TEST_FILES := \
 	test/rate_limiter_test.rb \
 	test/model_provider_client_test.rb \
 	test/image_gen_adapter_test.rb \
+	test/image_gen_catalog_test.rb \
+	test/generate_image_tool_test.rb \
 	test/knowledge_base_test.rb \
 	test/chat_context_serialize_test.rb \
 	test/convert_to_wav_tool_test.rb \

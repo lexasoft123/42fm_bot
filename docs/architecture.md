@@ -110,7 +110,7 @@ bin/bot
 │   │       ├── knowledge.rb   # Knowledge search/add/delete tools
 │   │       ├── horoscope.rb   # Horoscope tool
 │   │       ├── suno.rb        # Suno song generation tool
-│   │       ├── image_gen.rb   # FLUX image generation tool
+│   │       ├── image_gen.rb   # Image generation tool (agent picks model per request from the catalog)
 │   │       └── scratchpad.rb  # remember / forget — agent working memory (ADR-003)
 │   ├── chat_context.rb        # ChatContext module: shared chat context + knowledge lookup for handlers
 │   ├── task_handlers/
@@ -121,9 +121,10 @@ bin/bot
 │   ├── model_provider_client.rb # Generic Bearer+JSON HTTP client (formerly AtlasClient); used by Atlas + CloseRouter adapters
 │   ├── image_gen.rb           # Top-level facade: ADAPTERS registry + current_adapter / adapter_for(snapshot)
 │   ├── image_gen/
-│   │   ├── adapter.rb         # Base class: submit / poll_once / prompt_template(:t2i|:edit) / name / synchronous?
+│   │   ├── adapter.rb         # Base class: submit(...,model:) / poll_once / prompt_template(:t2i|:edit) / name / synchronous?
+│   │   ├── catalog.rb         # ImageGen::Catalog: agent-selectable model catalog (config image_gen.models), lazy + memoized
 │   │   ├── flux_adapter.rb    # FLUX 2 via api.bfl.ai (absorbs former FluxClient + FLUX-tuned templates)
-│   │   ├── atlas_adapter.rb   # Atlas Cloud (default Wan 2.7) via ModelProviderClient + Wan-tuned templates
+│   │   ├── atlas_adapter.rb   # Atlas Cloud (multi-model: nano-banana-2 default / Wan / ...) via ModelProviderClient
 │   │   └── closerouter_adapter.rb # CloseRouter Nano Banana Pro (synchronous /v1/images/generations; no polling)
 │   └── robot/
 │       └── robocoder.rb       # Base64+XOR encode/decode util
@@ -472,13 +473,14 @@ Source resolution mirrors `cover_art` (explicit `suno_task_id` → reply target'
 All three song-producing tools (`compose_song`, `add_vocals`, `cover_audio`) accept `with_cover_art: true`. After the song's `:done` polling, `SunoTaskHandler#maybe_chain_cover_art` enqueues a chained `suno_cover_art` task pointing at the just-completed song's `external_id`. Dedup via `json_extract(params, '$.source_task_id')` lookup. Charged against the `suno` rate-limit bucket (RateLimiter counts all `suno_*` task types); silently dropped at chain time if the bucket is exhausted.
 
 ### Image generation — `lib/image_gen/` + `lib/model_provider_client.rb`
-Service-adapter layer. The `ImageGenTaskHandler` is provider-agnostic; concrete backends live as `ImageGen::Adapter` subclasses, picked at runtime from `Settings.image_gen['provider']`.
+Service-adapter layer. The `ImageGenTaskHandler` is provider-agnostic; concrete backends live as `ImageGen::Adapter` subclasses. The active backend is chosen per-request from an agent-selectable **model catalog**, falling back to `Settings.image_gen['provider']` for legacy/no-model tasks.
 
-- **`ImageGen::Adapter`** (`lib/image_gen/adapter.rb`) — base class. Four abstract-or-overridable methods: `submit(prompt:, input_image:, input_media_type:)`, `poll_once(external_id)`, `prompt_template(:text_to_image|:edit)`, plus `name` (returns `self.class::NAME`) and `synchronous?` (defaults `false`).
-- **`ImageGen` facade** (`lib/image_gen.rb`) — `ADAPTERS = { 'flux' => FluxAdapter, 'atlas' => AtlasAdapter, 'closerouter' => CloseRouterImgAdapter }.freeze`. Submit-side: `current_adapter` reads `Settings.image_gen['provider']`. Poll-side: `adapter_for(snapshot)` resolves by the value snapshotted into `task.params['provider']` at submit time, so a config flip mid-flight doesn't reroute polling to a different prediction id space (legacy rows fall back to `current_adapter`).
+- **Per-request model selection** — the `generate_image` agent tool exposes a `model` enum; the agent picks a catalog key (e.g. `nano-banana-2`, `wan-2.7`, `flux-2-pro`). **`ImageGen::Catalog`** (`lib/image_gen/catalog.rb`) maps each key → `{provider, t2i, edit, desc}` from config (`image_gen.models`). The tool stores the resolved key in `task.params['model']`; `ImageGenTaskHandler` resolves the entry, selects the adapter **by the entry's provider** (not just `current_adapter`), validates that provider against `ImageGen::ADAPTERS` (unknown → re-resolve to `default_model` so adapter and model id stay coherent), snapshots both `provider` and `model` into params, and threads the provider-specific id into `adapter.submit(model:)`. Missing/invalid key → `image_gen.default_model`. `edit: false` in an entry → `model_id_for(:edit)` returns nil → the adapter falls back to its configured `image_edit_model`. The catalog is read **lazily**: Settings isn't loaded at tool-require time (boot.rb requires the tools before `Settings.load!`), so the tool defers the enum/description via `enum_source`/`desc_suffix_source` lambdas resolved in `ToolRegistry.definitions_for` (per-turn, at runtime). `Catalog.all` is memoized; `reset!` is the test seam.
+- **`ImageGen::Adapter`** (`lib/image_gen/adapter.rb`) — base class. Four abstract-or-overridable methods: `submit(prompt:, input_image:, input_media_type:, model:)` (`model:` nil ⇒ adapter's configured default), `poll_once(external_id)`, `prompt_template(:text_to_image|:edit)`, plus `name` (returns `self.class::NAME`) and `synchronous?` (defaults `false`).
+- **`ImageGen` facade** (`lib/image_gen.rb`) — `ADAPTERS = { 'flux' => FluxAdapter, 'atlas' => AtlasAdapter, 'closerouter' => CloseRouterImgAdapter }.freeze`. Submit-side: `current_adapter` reads `Settings.image_gen['provider']` (used only for legacy/no-model tasks; catalog-keyed tasks call `adapter_for(entry_provider)`). Poll-side: `adapter_for(snapshot)` resolves by the value snapshotted into `task.params['provider']` at submit time, so a config flip mid-flight doesn't reroute polling to a different prediction id space (legacy rows fall back to `current_adapter`).
 - **Synchronous adapters** — when `Adapter#synchronous?` returns `true`, `#submit` returns a terminal result Hash (`{url:, completed:true}`) instead of an external_id String. `ImageGenTaskHandler#deliver_sync_result` short-circuits the poll cycle and marks the task done in one call. `#poll_once` raises `NotImplementedError` if reached. Only `CloseRouterImgAdapter` is sync today; Flux + Atlas stay async with the existing `:pending` / `:retry` / `:failed` / `{url:}` poll return contract.
 - **`ImageGen::FluxAdapter`** (`lib/image_gen/flux_adapter.rb`) — FLUX 2 via `api.bfl.ai`. Submit POST to `/v1/{model}`, poll GET `/v1/get_result`. Uses `safety_tolerance: 5` and `output_format: 'jpeg'`. Owns the FLUX-tuned prompt-enrichment templates. Auth header is `x-key`. NOT built on `ModelProviderClient` (different host + auth scheme). Has a one-release back-compat shim that reads top-level `Settings.flux` if `image_gen.providers.flux` is absent — removed once prod settings.yml is migrated.
-- **`ImageGen::AtlasAdapter`** (`lib/image_gen/atlas_adapter.rb`) — Atlas Cloud (default model: `alibaba/wan-2.7/text-to-image` + `alibaba/wan-2.7/image-edit`, configurable). Submit POST to `/api/v1/model/generateImage`, poll GET `/api/v1/model/prediction/{id}`. **Request body is FLAT**: `{model, prompt, width, height}` for T2I, `{model, prompt, image: 'data:image/<type>;base64,<b64>'}` for edit (the `image:` field also accepts URLs; min resolution 240×240). Atlas's published `input.{...}` example shape silently fails — submit returns 200+id but poll instantly returns masked "Field required" — so we use the flat shape, confirmed via live probe. Status mapping: `processing|queued` → `:pending`, `completed|succeeded` → `{url:}`, `failed` → `:failed`, anything else → log once + `:pending`. Response wraps under `data.{...}`; adapter accepts both wrapped and unwrapped defensively. Submit-response id resolution accepts both `data.id` (canonical) and top-level `id`. Owns Wan-tuned prompt templates.
+- **`ImageGen::AtlasAdapter`** (`lib/image_gen/atlas_adapter.rb`) — Atlas Cloud (default t2i: `google/nano-banana-2/text-to-image`, default edit: `alibaba/wan-2.7/image-edit`, both configurable; per-request `model:` overrides). Prompt templates are model-agnostic (`%{model_name}` interpolated by the handler) since the adapter now serves multiple Atlas models. Submit POST to `/api/v1/model/generateImage`, poll GET `/api/v1/model/prediction/{id}`. **Request body is FLAT**: `{model, prompt, width, height}` for T2I, `{model, prompt, image: 'data:image/<type>;base64,<b64>'}` for edit (the `image:` field also accepts URLs; min resolution 240×240). Atlas's published `input.{...}` example shape silently fails — submit returns 200+id but poll instantly returns masked "Field required" — so we use the flat shape, confirmed via live probe. Status mapping: `processing|queued` → `:pending`, `completed|succeeded` → `{url:}`, `failed` → `:failed`, anything else → log once + `:pending`. Response wraps under `data.{...}`; adapter accepts both wrapped and unwrapped defensively. Submit-response id resolution accepts both `data.id` (canonical) and top-level `id`. Owns Wan-tuned prompt templates.
 - **`ImageGen::CloseRouterImgAdapter`** (`lib/image_gen/closerouter_adapter.rb`) — CloseRouter Nano Banana Pro (Google) via `api.closerouter.dev`. Default models: `google/nano-banana-pro` (T2I) and `google/nano-banana-pro-edit` (image edit) — two separate model ids, NOT a flag on the base model. **Synchronous**: single `POST /v1/images/generations` returns `{data: [{url: 'https://cdn/...png', ...}]}` directly; adapter extracts `data[0].url` and returns `{url:, completed:true}`. Edit body uses plural `images: ['data:image/<type>;base64,<b64>']` (array; supports multi-image input though we send one). `synchronous? = true` so `ImageGenTaskHandler` skips the poll cycle. Owns Nano-Banana-tuned prompt-enrichment templates (Russian-aware, names-preserved, FLUX-style structure conventions).
 - **`ModelProviderClient`** (`lib/model_provider_client.rb`) — generic Bearer+JSON HTTP wrapper (formerly `AtlasClient`; renamed because it's no longer Atlas-specific). Constructor takes a config dict (`api_url`, `api_key`) + `tag:` for greppable logs (`'AtlasImg'`, `'CloseRouterImg'`, future `'CloseRouterVideo'`). Asymmetry: `post` raises on non-2xx (so handler `bail_or_retry` engages); `get` returns `[code, body]` and swallows `OpenSSL::SSL::SSLError`/`Net::OpenTimeout`/`Errno::ECONNRESET` (so polling degrades to `:pending` on transient blips). `post` does NOT swallow SSL errors — preserves FluxAdapter's existing behavior; submit-side TLS resilience can be retrofitted with a per-call retry wrapper if needed.
 
@@ -826,12 +828,13 @@ flux:
   api_key: ...
   model: flux-2-pro
 image_gen:
-  provider: atlas                 # 'atlas' | 'flux' (default: atlas)
+  provider: atlas                 # adapter for legacy/no-model tasks ('atlas' | 'flux' | 'closerouter')
+  default_model: nano-banana-2    # catalog key used when agent omits/sends unknown model
   providers:
     atlas:
       api_url: https://api.atlascloud.ai
       api_key: ...
-      text_to_image_model: alibaba/wan-2.7/text-to-image
+      text_to_image_model: google/nano-banana-2/text-to-image
       image_edit_model:    alibaba/wan-2.7/image-edit
       width:  1024
       height: 1024
@@ -839,6 +842,11 @@ image_gen:
       api_url: https://api.bfl.ai
       api_key: ...
       model: flux-2-pro
+  models:                         # agent-selectable catalog (ImageGen::Catalog); KEY = generate_image(model:) enum value
+    nano-banana-2: { provider: atlas, t2i: google/nano-banana-2/text-to-image, edit: google/nano-banana-2/edit, desc: '...' }
+    wan-2.7:       { provider: atlas, t2i: alibaba/wan-2.7-pro/text-to-image,  edit: alibaba/wan-2.7/image-edit, desc: '...' }
+    nano-banana-pro: { provider: closerouter, t2i: google/nano-banana-pro, edit: google/nano-banana-pro-edit, desc: '...' }
+    flux-2-pro:    { provider: flux,  t2i: flux-2-pro, edit: flux-2-pro, desc: '...' }
 digests:                    # scheduled auto-posts (CronScheduler#maybe_fire_digests)
   enabled: true             # optional group — deliberately NOT in Settings::REQUIRED_KEYS
   chat_id:                  # env-specific: set in settings.yml on prod (edit in place, never scp); nil = no-op

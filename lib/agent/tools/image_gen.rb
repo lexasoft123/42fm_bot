@@ -12,6 +12,14 @@ Agent::ToolRegistry.register(
   parameters: {
     'prompt'      => { type: 'string',  description: 'Текст запроса пользователя дословно на его языке, без перевода и без технических дополнений (стиля/камеры/освещения). Обогащение делает следующий шаг.' },
     'edit_source' => { type: 'boolean', description: 'true если редактируем фото из сообщения пользователя; false/опущен — генерация с нуля', optional: true },
+    # enum/описание моделей строятся лениво из ImageGen::Catalog в
+    # ToolRegistry.definitions_for (Settings ещё не загружен на этапе require'а тулов).
+    'model'       => {
+      type: 'string', optional: true,
+      description: 'Какую модель использовать для генерации. Если пользователь не назвал конкретную модель — НЕ указывай, будет выбрана модель по умолчанию. Доступные модели:',
+      enum_source:        -> { ImageGen::Catalog.enum },
+      desc_suffix_source: -> { "\n#{ImageGen::Catalog.describe_options}" },
+    },
   },
   handler: ->(args, ctx) {
     role = ctx[:user]&.role
@@ -24,7 +32,8 @@ Agent::ToolRegistry.register(
       )
     end
     edit = args['edit_source'] && ctx[:image].is_a?(Hash) && ctx[:image][:data]
-    params = { request: args['prompt'], user_uid: ctx[:user]&.uid }
+    model_key = ImageGen::Catalog.resolve_key(args['model'])   # blank/unknown → default key
+    params = { request: args['prompt'], user_uid: ctx[:user]&.uid, model: model_key }
     if edit
       params[:input_image]      = ctx[:image][:data]
       params[:input_media_type] = ctx[:image][:media_type]

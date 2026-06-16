@@ -206,6 +206,61 @@ class ToolRegistryTest < BotTest
     assert_equal 'weather', d[:function][:name]
     assert d[:function][:parameters].key?(:properties)
   end
+
+  # optional: true params are excluded from `required`; required params stay.
+  def test_definitions_optional_param_excluded_from_required
+    Agent::ToolRegistry.register(
+      name: 'mk', description: 'maker',
+      parameters: {
+        'prompt' => { type: 'string', description: 'p' },
+        'flag'   => { type: 'boolean', description: 'f', optional: true },
+      },
+      handler: ->(_a, _c) { '' }
+    )
+    %w[anthropic openai].each do |api|
+      defs = Agent::ToolRegistry.definitions_for(user_role: 'member', api_type: api)
+      schema = api == 'anthropic' ? defs.first[:input_schema] : defs.first[:function][:parameters]
+      assert_includes schema[:required], 'prompt', "#{api}: required param must stay required"
+      refute_includes schema[:required], 'flag', "#{api}: optional param must not be required"
+      # internal `optional` marker must not leak into the emitted property schema
+      refute schema[:properties]['flag'].key?(:optional), 'optional key must be stripped from schema'
+    end
+  end
+
+  # enum_source/desc_suffix_source lambdas are resolved at definitions_for time
+  # (deferred so they can read Settings, which isn't loaded at tool-require time).
+  def test_definitions_resolves_dynamic_enum_and_desc_suffix
+    Agent::ToolRegistry.register(
+      name: 'pick', description: 'picker',
+      parameters: {
+        'model' => { type: 'string', description: 'Choose:', optional: true,
+                     enum_source: -> { %w[a b c] },
+                     desc_suffix_source: -> { "\na — first\nb — second" } },
+      },
+      handler: ->(_a, _c) { '' }
+    )
+    defs = Agent::ToolRegistry.definitions_for(user_role: 'member', api_type: 'openai')
+    prop = defs.first[:function][:parameters][:properties]['model']
+    assert_equal %w[a b c], prop[:enum]
+    assert_match(/Choose:/, prop[:description])
+    assert_match(/a — first/, prop[:description])
+    refute prop.key?(:enum_source), 'enum_source marker must be stripped from schema'
+    refute prop.key?(:desc_suffix_source), 'desc_suffix_source marker must be stripped'
+  end
+
+  # An empty enum_source result must not emit an empty enum (would over-constrain
+  # the LLM to no valid value). The param degrades to a free-form string.
+  def test_definitions_omits_enum_when_source_empty
+    Agent::ToolRegistry.register(
+      name: 'pick', description: 'picker',
+      parameters: { 'model' => { type: 'string', description: 'd', optional: true,
+                                 enum_source: -> { [] } } },
+      handler: ->(_a, _c) { '' }
+    )
+    defs = Agent::ToolRegistry.definitions_for(user_role: 'member', api_type: 'openai')
+    prop = defs.first[:function][:parameters][:properties]['model']
+    refute prop.key?(:enum), 'must not emit an empty enum'
+  end
 end
 
 # ==========================================================================

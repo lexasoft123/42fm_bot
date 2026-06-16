@@ -36,15 +36,15 @@ module ImageGen
     # `[:url]` and skips polling. Shape `{url:}` matches the async-path Hash
     # returned by Atlas/Flux poll_once → consistent `background_tasks.result`
     # JSON across sync/async adapters.
-    def submit(prompt:, input_image: nil, input_media_type: 'image/jpeg')
+    def submit(prompt:, input_image: nil, input_media_type: 'image/jpeg', model: nil)
       body = if input_image
         # Edit mode uses plural `images` (multi-image input supported by the
         # model; we send an array of one). Atlas/Flux use singular `image`.
-        { model: @edit_model,
+        { model: (model || @edit_model),
           prompt: prompt,
           images: ["data:#{input_media_type};base64,#{input_image}"] }
       else
-        { model: @t2i_model, prompt: prompt }
+        { model: (model || @t2i_model), prompt: prompt }
       end
       LOGGER.debug "#{self.class.name}: submitting #{input_image ? 'edit' : 't2i'} (prompt #{prompt.length} chars) to #{body[:model]}"
       # Synchronous: server holds the connection open for the entire generation

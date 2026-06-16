@@ -5,7 +5,10 @@ module ImageGen
   class Adapter
     # Submit a generation/edit job. Returns external task_id String.
     # input_image: base64 string (no data-URI prefix), or nil for text-to-image.
-    def submit(prompt:, input_image: nil, input_media_type: nil)
+    # model: provider-specific model id to use for THIS request, or nil to use
+    #   the adapter's configured default (@t2i_model/@edit_model). Threaded from
+    #   the agent-selected catalog entry (see ImageGen::Catalog).
+    def submit(prompt:, input_image: nil, input_media_type: nil, model: nil)
       raise NotImplementedError
     end
 
