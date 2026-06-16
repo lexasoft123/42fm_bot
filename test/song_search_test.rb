@@ -115,6 +115,12 @@ class SongSearchTest < BotTest
     assert_includes ids, @cash.id
   end
 
+  def test_internal_punctuation_splits_into_tokens
+    # "ac/dc" must tokenize like the FTS index (ac, dc), not collapse to "acdc".
+    ids = Song.search("ac/dc").map(&:id)
+    assert_includes ids, @acdc.id
+  end
+
   def test_numeric_year_search_returns_empty
     # Year is an integer column, not in FTS index; no text fields contain bare "2013"
     assert_equal [], Song.search("2013")

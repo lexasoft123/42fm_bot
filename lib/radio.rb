@@ -57,7 +57,7 @@ class Radio
     songs = Song.search(track, limit: 50)
     return nil if songs.empty?
 
-    song   = songs.sample
+    song   = pick_request(track, songs)
     # Tag the push with annotate: so #queue can pick this request out of
     # request.alive (see REQUEST_TAG). The metadata list (bot_req="1") is a
     # fixed prefix; Liquidsoap's annotate grammar consumes everything after
@@ -194,6 +194,30 @@ class Radio
   def search_track(query)
     songs = Song.search(query, limit: 50)
     songs.map(&:absolute_path)
+  end
+
+  # Pick which search hit to actually queue. Song.search ranks hits by
+  # relevance, but a specific-title order like "!заказ back in black" also
+  # matches every track on that *album*, so a blind .sample used to queue a
+  # random album-mate (e.g. "Shoot to Thrill").
+  #
+  # A hit counts as a "named track" only when every query token appears in its
+  # own "artist title" — deliberately NOT the album, which is exactly what
+  # separates "Back in Black" the track from its album-mates. Token matching
+  # (rather than a substring) mirrors how Song.search picked the hits, so a
+  # reordered query ("black back in") still pins the right track. Broad/artist
+  # queries match many hits, so sampling still gives variety. Cyrillic titles
+  # fall through to sampling — Song.search reaches them via transliteration,
+  # not literal text — which is the intended behaviour for artist orders.
+  def pick_request(query, songs)
+    tokens = query.to_s.downcase.scan(/[\p{L}\p{N}]+/)
+    return songs.sample if tokens.empty?
+
+    named = songs.select do |s|
+      haystack = "#{s.artist} #{s.title}".downcase
+      tokens.all? { |t| haystack.include?(t) }
+    end
+    (named.empty? ? songs : named).sample
   end
 
   def get_track_metadata(req_id)

@@ -129,7 +129,11 @@ class Song < ActiveRecord::Base
   private
 
   def self.sanitize_fts_query(query)
-    words = query.gsub(/[^\p{L}\p{N}\s]/, '').split.reject(&:empty?)
+    # Replace punctuation with a space (not nothing) so a query splits on the
+    # same boundaries as the FTS5 tokenizer. "ac/dc" must become "ac dc" → two
+    # tokens that match the indexed "ac"/"dc"; deleting the slash gave "acdc",
+    # a single token that matches neither.
+    words = query.gsub(/[^\p{L}\p{N}\s]/, ' ').split.reject(&:empty?)
     words.map { |w| "#{w}*" }.join(' ')
   end
 

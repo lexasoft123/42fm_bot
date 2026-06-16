@@ -77,6 +77,47 @@ class RadioDegradationTest < BotTest
     assert_includes pushed, 'annotate:bot_req="1":'
   end
 
+  # Regression: ordering a specific title must return THAT title, not a
+  # random album-mate. "back in black" matches every track on AC/DC's album
+  # "Back in Black", so the old blind songs.sample returned e.g. "Shoot to
+  # Thrill". pick_request must prefer the title hit.
+  def test_request_prefers_title_over_album_mate
+    acdc(album: 'Back in Black')                       # title "Back in Black"
+    Song.create!(artist: 'AC/DC', title: 'Shoot to Thrill',
+                 album: 'Back in Black', filepath: 'acdc/shoot.mp3')
+    radio = radio_with { |cmd, raw: false| cmd.start_with?('request.push') ? '42' : '' }
+    # Sample many times: a random pick would eventually return the album-mate.
+    20.times do
+      name = radio.request('back in black')[:name]
+      assert_includes name, 'Back in Black'
+      refute_includes name, 'Shoot to Thrill'
+    end
+  end
+
+  # Token-based matching means a re-ordered title still pins the right track
+  # (a substring match would miss this and fall back to random sampling).
+  def test_request_reordered_title_still_pins_track
+    acdc(album: 'Back in Black')
+    Song.create!(artist: 'AC/DC', title: 'Shoot to Thrill',
+                 album: 'Back in Black', filepath: 'acdc/shoot.mp3')
+    radio = radio_with { |cmd, raw: false| cmd.start_with?('request.push') ? '42' : '' }
+    20.times do
+      name = radio.request('black back in')[:name]
+      assert_includes name, 'Back in Black'
+      refute_includes name, 'Shoot to Thrill'
+    end
+  end
+
+  # A broad/artist query must still return some track (variety preserved —
+  # every hit qualifies, so pick_request samples across the whole set).
+  def test_request_artist_query_returns_a_track
+    acdc(album: 'Back in Black')
+    Song.create!(artist: 'AC/DC', title: 'Shoot to Thrill',
+                 album: 'Back in Black', filepath: 'acdc/shoot.mp3')
+    radio = radio_with { |cmd, raw: false| cmd.start_with?('request.push') ? '42' : '' }
+    assert_includes radio.request('ac/dc')[:name], 'AC/DC'
+  end
+
   # Keepalive periodically pings with the status command so the persistent
   # socket never goes stale between user commands.
   def test_keepalive_pings_with_status_command
