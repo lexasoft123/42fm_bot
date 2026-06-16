@@ -497,6 +497,54 @@ class GptMasterBodyBuildingTest < BotTest
   end
 end
 
+class GptMasterErrorBodyTest < BotTest
+  # Regression: Grok/xAI sometimes returns a non-200 with a bare-string body
+  # (or a JSON string literal), which HTTParty parses into a Ruby String. The
+  # error-log line called #dig on it, raising `TypeError: String does not have
+  # #dig method` — turning a routine API failure into an unhandled crash that
+  # propagated out of call_raw. Both call paths must degrade gracefully instead.
+  def test_call_raw_returns_nil_on_non200_with_string_body
+    HTTPartyStub.with_response(FakeResponse.new(500, 'upstream exploded')) do
+      result = GptMaster.new([{ role: 'user', content: 'x' }],
+                             setting: 'openai', chat_id: 1, purpose: 'agent').call_raw(tools: [])
+      assert_nil result
+    end
+  end
+
+  def test_call_returns_fallback_on_non200_with_string_body
+    HTTPartyStub.with_response(FakeResponse.new(500, 'upstream exploded')) do
+      result = GptMaster.new([{ role: 'user', content: 'x' }],
+                             setting: 'openai', chat_id: 1, purpose: 'main_chat').call
+      assert_equal 'жпт не жпт', result
+    end
+  end
+
+  # Sibling failure mode: a non-JSON body (HTML 502 page, plain-text proxy
+  # error) under a JSON content-type makes HTTParty's #parsed_response itself
+  # raise JSON::ParserError — error_message must swallow it and fall back to the
+  # raw body rather than letting it propagate out of call/call_raw.
+  def test_call_raw_returns_nil_when_parsed_response_raises
+    raising = Object.new
+    def raising.code; 502; end
+    def raising.body; '<html>502 Bad Gateway</html>'; end
+    def raising.parsed_response; raise JSON::ParserError, 'unexpected token'; end
+    HTTPartyStub.with_response(raising) do
+      result = GptMaster.new([{ role: 'user', content: 'x' }],
+                             setting: 'openai', chat_id: 1, purpose: 'agent').call_raw(tools: [])
+      assert_nil result
+    end
+  end
+
+  # Hash error bodies still get their nested error.message extracted for the log.
+  def test_call_raw_returns_nil_on_non200_with_hash_error_body
+    HTTPartyStub.with_response(FakeResponse.new(402, { 'error' => { 'message' => 'Insufficient Balance' } })) do
+      result = GptMaster.new([{ role: 'user', content: 'x' }],
+                             setting: 'openai', chat_id: 1, purpose: 'agent').call_raw(tools: [])
+      assert_nil result
+    end
+  end
+end
+
 class GptMasterClassMethodsTest < BotTest
   def test_ask_does_not_split_cache_break
     captured = nil

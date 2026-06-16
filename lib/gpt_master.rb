@@ -49,7 +49,7 @@ class GptMaster
         LOGGER.warn "#{tag}#call: overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
         sleep delay
       else
-        LOGGER.error "#{tag}#call: #{response.code} #{response.parsed_response&.dig('error', 'message') || response.body}"
+        LOGGER.error "#{tag}#call: #{response.code} #{error_message(response)}"
         return 'жпт не жпт'
       end
     end
@@ -77,7 +77,7 @@ class GptMaster
         LOGGER.warn "#{tag}#call_raw: overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
         sleep delay
       else
-        LOGGER.error "#{tag}#call_raw: #{response.code} #{response.parsed_response&.dig('error', 'message') || response.body}"
+        LOGGER.error "#{tag}#call_raw: #{response.code} #{error_message(response)}"
         return nil
       end
     end
@@ -225,6 +225,25 @@ class GptMaster
     when Array then obj.map { |v| symbolize(v) }
     else obj
     end
+  end
+
+  # Best-effort error string for the non-200 log line. A provider error body
+  # is usually JSON ({"error": {"message": ...}}), but some providers (notably
+  # Grok/xAI on certain failures) return a bare string or a JSON string literal,
+  # which HTTParty parses into a Ruby String. Calling #dig on that raised
+  # `TypeError: String does not have #dig method`, turning a routine API failure
+  # into an unhandled crash. Only dig when the parsed body is actually a Hash.
+  # `parsed_response` itself can also raise (HTTParty does not rescue
+  # JSON::ParserError, so a non-JSON body — HTML 502, plain-text proxy error —
+  # under a JSON content-type blows up here too); swallow that and fall back to
+  # the raw body so this log line can never crash the request it's reporting on.
+  def error_message(response)
+    parsed = begin
+      response.parsed_response
+    rescue StandardError
+      nil
+    end
+    (parsed.is_a?(Hash) && parsed.dig('error', 'message')) || response.body
   end
 
   def extract_content(response)
