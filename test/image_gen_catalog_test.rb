@@ -14,7 +14,7 @@ class ImageGenCatalogTest < Minitest::Test
     'default_model' => 'nano-banana-2',
     'models' => {
       'nano-banana-2' => { 'provider' => 'atlas', 't2i' => 'google/nano-banana-2/text-to-image',
-                           'edit' => 'google/nano-banana-2/edit', 'desc' => 'NB2 desc' },
+                           'edit' => 'google/nano-banana-2/edit', 'multi_image' => true, 'desc' => 'NB2 desc' },
       'wan-2.7'       => { 'provider' => 'atlas', 't2i' => 'alibaba/wan-2.7-pro/text-to-image',
                            'edit' => 'alibaba/wan-2.7/image-edit', 'desc' => 'Wan desc' },
       'flux-2-pro'    => { 'provider' => 'flux', 't2i' => 'flux-2-pro',
@@ -67,6 +67,23 @@ class ImageGenCatalogTest < Minitest::Test
     assert ImageGen::Catalog.edit_supported?('nano-banana-2')
     assert ImageGen::Catalog.edit_supported?('wan-2.7')
     refute ImageGen::Catalog.edit_supported?('flux-2-pro')
+  end
+
+  def test_multi_image
+    assert ImageGen::Catalog.multi_image?('nano-banana-2'), 'flagged multi_image: true'
+    refute ImageGen::Catalog.multi_image?('wan-2.7'),       'no flag → single image'
+    refute ImageGen::Catalog.multi_image?('flux-2-pro')
+    # unknown key resolves to the (capable) default
+    assert ImageGen::Catalog.multi_image?('bogus')
+  end
+
+  def test_multi_image_default_key
+    # Default (nano-banana-2) is itself capable → returned as-is.
+    assert_equal 'nano-banana-2', ImageGen::Catalog.multi_image_default_key
+    # Default flipped to a single-image model → falls back to first capable key.
+    Settings.image_gen = Marshal.load(Marshal.dump(CATALOG)).merge('default_model' => 'wan-2.7')
+    ImageGen::Catalog.reset!
+    assert_equal 'nano-banana-2', ImageGen::Catalog.multi_image_default_key
   end
 
   def test_enum_and_describe_options

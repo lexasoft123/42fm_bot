@@ -4,11 +4,15 @@ module ImageGen
   # provider-agnostic.
   class Adapter
     # Submit a generation/edit job. Returns external task_id String.
-    # input_image: base64 string (no data-URI prefix), or nil for text-to-image.
+    # input_images: array of { data: <base64 string, no data-URI prefix>,
+    #   media_type: 'image/jpeg' } — the edit source images, or nil/[] for
+    #   text-to-image. Adapters that only support one source image (Flux, and
+    #   Atlas's Wan model) use the FIRST entry. Multi-image-capable models
+    #   (nano-banana family) send them all (see ImageGen::Catalog.multi_image?).
     # model: provider-specific model id to use for THIS request, or nil to use
     #   the adapter's configured default (@t2i_model/@edit_model). Threaded from
     #   the agent-selected catalog entry (see ImageGen::Catalog).
-    def submit(prompt:, input_image: nil, input_media_type: nil, model: nil)
+    def submit(prompt:, input_images: nil, model: nil)
       raise NotImplementedError
     end
 

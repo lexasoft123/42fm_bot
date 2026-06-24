@@ -36,17 +36,18 @@ module ImageGen
     # `[:url]` and skips polling. Shape `{url:}` matches the async-path Hash
     # returned by Atlas/Flux poll_once → consistent `background_tasks.result`
     # JSON across sync/async adapters.
-    def submit(prompt:, input_image: nil, input_media_type: 'image/jpeg', model: nil)
-      body = if input_image
-        # Edit mode uses plural `images` (multi-image input supported by the
-        # model; we send an array of one). Atlas/Flux use singular `image`.
+    def submit(prompt:, input_images: nil, model: nil)
+      imgs = Array(input_images)
+      body = if imgs.any?
+        # Edit mode uses plural `images` (Nano Banana Pro combines multiple
+        # input images). Atlas-Wan/Flux use singular `image`.
         { model: (model || @edit_model),
           prompt: prompt,
-          images: ["data:#{input_media_type};base64,#{input_image}"] }
+          images: imgs.map { |i| "data:#{i[:media_type] || 'image/jpeg'};base64,#{i[:data]}" } }
       else
         { model: (model || @t2i_model), prompt: prompt }
       end
-      LOGGER.debug "#{self.class.name}: submitting #{input_image ? 'edit' : 't2i'} (prompt #{prompt.length} chars) to #{body[:model]}"
+      LOGGER.debug "#{self.class.name}: submitting #{imgs.any? ? "edit (#{imgs.size} img)" : 't2i'} (prompt #{prompt.length} chars) to #{body[:model]}"
       # Synchronous: server holds the connection open for the entire generation
       # (typically 30-120s for Nano Banana Pro on real prompts), so the POST
       # timeout has to cover end-to-end generation, not just the request RTT.

@@ -36,27 +36,39 @@ module ImageGen
       @height     = cfg['height'] || 1024
     end
 
-    # Text-to-image (default) and image-edit (when input_image present).
+    # Text-to-image (default) and image-edit (when input_images present).
     #
-    # Request shape confirmed via live probe 2026-04-30 against Wan 2.7:
+    # Request shape (flat — Atlas's published "input.prompt" example does NOT
+    # work; submit returns 200+id but polling returns `code:400, "Field
+    # required: ***"` immediately, so fields go at top level):
     #   submit: POST /api/v1/model/generateImage
     #   T2I body  : { model: '...text-to-image', prompt: '...', width:, height: }
-    #   edit body : { model: '...image-edit',    prompt: '...', image: 'data:image/jpeg;base64,...' }
-    #     NB: FLAT shape — Atlas's published "input.prompt" example does NOT
-    #     work for Wan; submit returns 200+id but polling returns
-    #     `code:400, "Field required: ***"` immediately. Fields go at top level.
-    #     The `image` field accepts URLs OR `data:image/<type>;base64,<b64>`
-    #     URIs. Min image resolution 240×240.
+    #   edit body : { model: '...image-edit',    prompt: '...', <image field> }
+    #
+    # THE EDIT IMAGE FIELD IS PER-MODEL (this differs by model family — getting
+    # it wrong makes the model silently ignore the source and regenerate from
+    # scratch, with a successful-looking task):
+    #   - Wan 2.7         → singular  `image:  'data:...;base64,...'`  (confirmed live 2026-04-30)
+    #   - nano-banana/*   → plural    `images: ['data:...;base64,...', ...]`  (confirmed live 2026-06-24)
+    # Both accept base64 data URIs (no public-URL/upload step). nano-banana
+    # accepts up to ~10 images (combine); Wan reads a single image. Min res 240×240.
     #   submit response: { code:200, data: { id, status:'processing', urls:{get}, ... } }
     #   poll    response: { code, data: { id, status, outputs:[<url>], error, ... } }
     #     status set: 'processing' | 'completed' | 'failed'
     #     terminal failures put HTTP 200 with `code:400` AND `data.status:'failed'`,
     #     so we trust `data.status`.
-    def submit(prompt:, input_image: nil, input_media_type: 'image/jpeg', model: nil)
-      body = if input_image
-        { model: (model || @edit_model),
-          prompt: prompt,
-          image: "data:#{input_media_type};base64,#{input_image}" }
+    def submit(prompt:, input_images: nil, model: nil)
+      imgs = Array(input_images)
+      body = if imgs.any?
+        edit_model = (model || @edit_model)
+        data_uris  = imgs.map { |i| "data:#{i[:media_type] || 'image/jpeg'};base64,#{i[:data]}" }
+        base = { model: edit_model, prompt: prompt }
+        # Per-model field: nano-banana reads `images` (array), Wan reads `image`.
+        if edit_model.to_s.include?('nano-banana')
+          base.merge(images: data_uris)
+        else
+          base.merge(image: data_uris.first)
+        end
       else
         { model: (model || @t2i_model),
           prompt: prompt,

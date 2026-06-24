@@ -1,4 +1,5 @@
 require_relative 'agent_event_emitter'
+require_relative '../telegram_file'
 
 class ImageGenTaskHandler
   include ChatContext
@@ -16,9 +17,12 @@ class ImageGenTaskHandler
   def compose_and_submit(task, api)
     p = task.params_hash
     request = p['request'].to_s
-    input_image = p['input_image']
-    editing = !input_image.to_s.empty?
     model_key = p['model']   # nil for legacy/award tasks (no per-request model)
+    # Did the user ask to edit/combine? (inline image, history message_ids, or a
+    # legacy single-image task enqueued before this deploy.)
+    edit_intended = !p['input_image'].to_s.empty? ||
+                    Array(p['input_images']).any? ||
+                    Array(p['source_message_ids']).any?
     begin
       if model_key
         prov = ImageGen::Catalog.provider_for(model_key)
@@ -37,7 +41,21 @@ class ImageGenTaskHandler
       return :failed
     end
 
-    # Generate prompt via LLM with chat context (+ vision of the source image when editing)
+    # Resolve edit source image(s): inline (current/reply, already base64) plus
+    # any chat-history photos the agent referenced by message_id — downloaded
+    # HERE because the handler runs in TaskRunner, not the bot's listen loop.
+    images  = resolve_input_images(task, api, p)
+    editing = images.any?
+    # Edit requested but nothing usable resolved (e.g. every referenced photo
+    # predates photo-capture) — fail loudly instead of silently regenerating
+    # from scratch (the exact silent-degradation this change exists to kill).
+    if edit_intended && images.empty?
+      mark_failed_and_notify(task, api, 'edit_sources_unavailable',
+        user_text: "Не нашёл картинок для редактирования — возможно, они слишком старые. Пришли картинку заново.")
+      return :failed
+    end
+
+    # Generate prompt via LLM with chat context (+ vision of the source images when editing)
     unless p['prompt']
       LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generating prompt for '#{request}' (edit=#{editing}, provider=#{adapter.name})"
 
@@ -51,11 +69,10 @@ class ImageGenTaskHandler
                                model_name: (model_key || 'AI image generator') }
 
       messages = if editing
-        media_type = p['input_media_type'] || 'image/jpeg'
-        [{ role: 'user', content: [
-          { type: 'image', source: { type: 'base64', media_type: media_type, data: input_image } },
-          { type: 'text',  text: llm_prompt }
-        ] }]
+        image_blocks = images.map do |img|
+          { type: 'image', source: { type: 'base64', media_type: img[:media_type], data: img[:data] } }
+        end
+        [{ role: 'user', content: image_blocks + [{ type: 'text', text: llm_prompt }] }]
       else
         [{ role: 'user', content: llm_prompt }]
       end
@@ -86,8 +103,7 @@ class ImageGenTaskHandler
     resolved_model_id = model_key ? ImageGen::Catalog.model_id_for(model_key, mode) : nil
     begin
       submit_result = adapter.submit(prompt: p['prompt'],
-                                     input_image: input_image.to_s.empty? ? nil : input_image,
-                                     input_media_type: p['input_media_type'],
+                                     input_images: editing ? images : nil,
                                      model: resolved_model_id)
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit: #{e.message}", raise_on_retry: e)
@@ -199,10 +215,48 @@ class ImageGenTaskHandler
     end
   end
 
-  def mark_failed_and_notify(task, api, reason)
+  # Resolve the ordered edit-source image list:
+  #   1. inline images (current/replied photo) — already base64 in params
+  #   2. legacy singular input_image (tasks enqueued before this deploy)
+  #   3. chat-history photos referenced by message_id — same resolution as the
+  #      view_image tool, downloaded here (TaskRunner, not the bot loop)
+  # Missing/old message_ids (no stored file_id) and failed downloads are skipped
+  # with a warning. Returns up to MAX_EDIT_IMAGES of { data:, media_type: }.
+  def resolve_input_images(task, api, p)
+    images = []
+    Array(p['input_images']).each do |img|
+      data = img['data'] || img[:data]
+      next if data.to_s.empty?
+      images << { data: data, media_type: img['media_type'] || img[:media_type] || 'image/jpeg' }
+    end
+    if images.empty? && !p['input_image'].to_s.empty?   # legacy single-image task
+      images << { data: p['input_image'], media_type: p['input_media_type'] || 'image/jpeg' }
+    end
+    Array(p['source_message_ids']).each do |mid|
+      file_id = ActiveRecord::Base.connection_pool.with_connection do
+        Message.where(chat_id: task.chat_id, message_id: mid.to_i).pick(:attachment_photo_file_id)
+      end
+      unless file_id
+        LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: source message #{mid} has no stored photo — skipping"
+        next
+      end
+      img = TelegramFile.download_image(api, file_id, chat_id: task.chat_id)
+      unless img
+        LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to download photo from message #{mid} — skipping"
+        next
+      end
+      images << { data: img[:data], media_type: img[:media_type] || 'image/jpeg' }
+    end
+    # Post-resolution backstop. The tool pre-caps source_message_ids before
+    # enqueue, but this also bounds legacy/in-flight tasks (and any future
+    # enqueuer) regardless of how they were created.
+    images.first(ImageGen::MAX_EDIT_IMAGES)
+  end
+
+  def mark_failed_and_notify(task, api, reason, user_text: "Не удалось сгенерировать картинку")
     LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generation #{reason} for #{task.external_id}"
     ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(reason) }
-    text = "Не удалось сгенерировать картинку"
+    text = user_text
     begin
       resp = api.sendMessage(chat_id: task.chat_id, text: text)
       Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)

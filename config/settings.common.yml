@@ -284,29 +284,35 @@ image_gen:
   # providers.<provider> above. `t2i`/`edit` are provider-specific model ids
   # threaded into adapter.submit(model:); `edit: false` → edit unsupported, the
   # adapter falls back to its configured image_edit_model. `desc` guides the
-  # agent's choice. NB: a model whose provider lacks an api_key in settings.yml
-  # fails at submit. All ids below verified live (submit→poll) 2026-06-16.
+  # agent's choice. `multi_image: true` → the model can EDIT/COMBINE several
+  # input images at once (nano-banana family); omitted ⇒ single input image only
+  # (Wan/Flux use the first and ignore the rest). The generate_image tool
+  # auto-switches a combine request (>1 image) to a multi_image model. NB: a
+  # model whose provider lacks an api_key in settings.yml fails at submit. All
+  # ids below verified live (submit→poll) 2026-06-16.
   models:
     nano-banana-2:
       provider: atlas
       t2i:  'google/nano-banana-2/text-to-image'
       edit: 'google/nano-banana-2/edit'
-      desc: 'Google Nano Banana 2 (Atlas). Силён в фотореализме и тексте на картинке. Универсал, по умолчанию.'
+      multi_image: true
+      desc: 'Google Nano Banana 2 (Atlas). Силён в фотореализме и тексте на картинке. Умеет объединять несколько картинок. Универсал, по умолчанию.'
     wan-2.7:
       provider: atlas
       t2i:  'alibaba/wan-2.7-pro/text-to-image'
       edit: 'alibaba/wan-2.7/image-edit'
-      desc: 'Alibaba Wan 2.7 (Atlas). Хорош для развёрнутых описательных промптов и арта.'
+      desc: 'Alibaba Wan 2.7 (Atlas). Хорош для развёрнутых описательных промптов и арта. Редактирует только одну исходную картинку.'
     nano-banana-pro:
       provider: closerouter
       t2i:  'google/nano-banana-pro'
       edit: 'google/nano-banana-pro-edit'
-      desc: 'Nano Banana Pro (CloseRouter, синхронный). Топ детализация и текст, но медленнее.'
+      multi_image: true
+      desc: 'Nano Banana Pro (CloseRouter, синхронный). Топ детализация и текст, умеет объединять несколько картинок, но медленнее.'
     flux-2-pro:
       provider: flux
       t2i:  'flux-2-pro'
       edit: 'flux-2-pro'
-      desc: 'FLUX 2 Pro (BFL). Приоритизирует начало промпта, сильный фотореализм с указанием камеры/плёнки.'
+      desc: 'FLUX 2 Pro (BFL). Приоритизирует начало промпта, сильный фотореализм с указанием камеры/плёнки. Редактирует только одну исходную картинку.'
 
 # Scheduled digest auto-posts (CronScheduler#maybe_fire_digests).
 # chat_id is env-specific: set it in settings.yml on prod (edit in place,

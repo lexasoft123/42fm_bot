@@ -60,6 +60,24 @@ module ImageGen
       e['edit'] != false && !e['edit'].nil?
     end
 
+    # True when the model can edit/combine MORE than one input image at once
+    # (nano-banana family, flagged `multi_image: true` in config). Models
+    # without the flag (Wan/Flux) take a single source image. The generate_image
+    # tool uses this to auto-switch a combine request to a capable model.
+    def multi_image?(key)
+      !!((entry(resolve_key(key)) || {})['multi_image'])
+    end
+
+    # The model key a combine (>1 image) request auto-switches to: the configured
+    # default if it's multi_image-capable, else the first catalogued multi_image
+    # model. Falls back to default_key if the catalog has none capable (caller
+    # logs in that case — the combine would degrade to first-image-only).
+    def multi_image_default_key
+      d = default_key
+      return d if multi_image?(d)
+      keys.find { |k| multi_image?(k) } || d
+    end
+
     # --- tool-schema derivation (called from ToolRegistry.definitions_for) ---
 
     def enum

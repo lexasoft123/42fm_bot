@@ -245,13 +245,13 @@ class AtlasAdapterTest < Minitest::Test
     refute body.key?(:input), 'request must NOT wrap fields in :input — Atlas rejects that'
   end
 
-  def test_submit_image_edit_uses_edit_model_and_data_uri
+  def test_submit_image_edit_wan_uses_singular_image_field
+    # Default edit model is Wan (alibaba/wan-2.7/image-edit) → singular `image`.
     fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'edit-id' } })
     id = with_fake_client(fake) do
       ImageGen::AtlasAdapter.new.submit(
         prompt: 'add sunglasses',
-        input_image: 'BASE64BYTES',
-        input_media_type: 'image/png'
+        input_images: [{ data: 'BASE64BYTES', media_type: 'image/png' }]
       )
     end
     assert_equal 'edit-id', id
@@ -260,8 +260,55 @@ class AtlasAdapterTest < Minitest::Test
     assert_equal 'alibaba/wan-2.7/image-edit', body[:model]
     assert_equal 'add sunglasses', body[:prompt]
     assert_equal 'data:image/png;base64,BASE64BYTES', body[:image]
+    refute body.key?(:images), 'Wan reads singular `image`, not the `images` array'
     refute body.key?(:width),  'image-edit body should not include width'
     refute body.key?(:height), 'image-edit body should not include height'
+  end
+
+  def test_submit_image_edit_nano_banana_uses_images_array
+    # nano-banana edit models read a plural `images` array (and ignore a
+    # singular `image`, silently degrading to text-to-image — the bug this fixes).
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'nb-id' } })
+    with_fake_client(fake) do
+      ImageGen::AtlasAdapter.new.submit(
+        prompt: 'add the teacher',
+        input_images: [{ data: 'B64A', media_type: 'image/jpeg' }],
+        model: 'google/nano-banana-2/edit'
+      )
+    end
+    _, _, body = fake.calls.first
+    assert_equal 'google/nano-banana-2/edit', body[:model]
+    assert_equal ['data:image/jpeg;base64,B64A'], body[:images]
+    refute body.key?(:image), 'nano-banana reads plural `images`, not singular `image`'
+  end
+
+  def test_submit_image_edit_nano_banana_combines_multiple_images
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'nb-id' } })
+    with_fake_client(fake) do
+      ImageGen::AtlasAdapter.new.submit(
+        prompt: 'combine',
+        input_images: [{ data: 'B64A', media_type: 'image/jpeg' },
+                       { data: 'B64B', media_type: 'image/png' }],
+        model: 'google/nano-banana-2/edit'
+      )
+    end
+    _, _, body = fake.calls.first
+    assert_equal ['data:image/jpeg;base64,B64A', 'data:image/png;base64,B64B'], body[:images]
+  end
+
+  def test_submit_image_edit_wan_with_multiple_images_uses_first
+    # A combine routed to Wan (single-image) keeps only the first image.
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'w-id' } })
+    with_fake_client(fake) do
+      ImageGen::AtlasAdapter.new.submit(
+        prompt: 'combine',
+        input_images: [{ data: 'B64A', media_type: 'image/jpeg' },
+                       { data: 'B64B', media_type: 'image/png' }]
+      )
+    end
+    _, _, body = fake.calls.first
+    assert_equal 'data:image/jpeg;base64,B64A', body[:image], 'Wan edits only the first image'
+    refute body.key?(:images)
   end
 
   def test_submit_handles_unwrapped_id_response_shape
@@ -400,7 +447,9 @@ class AtlasAdapterTest < Minitest::Test
   def test_submit_explicit_model_overrides_configured_edit
     fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'x' } })
     with_fake_client(fake) do
-      ImageGen::AtlasAdapter.new.submit(prompt: 'y', input_image: 'B64', model: 'google/nano-banana-2/edit')
+      ImageGen::AtlasAdapter.new.submit(prompt: 'y',
+        input_images: [{ data: 'B64', media_type: 'image/jpeg' }],
+        model: 'google/nano-banana-2/edit')
     end
     _, _, body = fake.calls.first
     assert_equal 'google/nano-banana-2/edit', body[:model]
@@ -481,8 +530,7 @@ class CloseRouterImgAdapterTest < Minitest::Test
     result = with_fake_client(fake) do
       ImageGen::CloseRouterImgAdapter.new.submit(
         prompt: 'add a hat',
-        input_image: 'ZmFrZWJ5dGVz', # base64 'fakebytes'
-        input_media_type: 'image/png',
+        input_images: [{ data: 'ZmFrZWJ5dGVz', media_type: 'image/png' }], # base64 'fakebytes'
       )
     end
     _method, _path, body = fake.calls.first
@@ -492,6 +540,19 @@ class CloseRouterImgAdapterTest < Minitest::Test
     assert_equal 1, body[:images].length
     assert_equal 'data:image/png;base64,ZmFrZWJ5dGVz', body[:images].first
     assert_equal({ url: 'https://cdn/edit.png' }, result)
+  end
+
+  def test_submit_edit_combines_multiple_images
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => [{ 'url' => 'https://cdn/edit.png' }] })
+    with_fake_client(fake) do
+      ImageGen::CloseRouterImgAdapter.new.submit(
+        prompt: 'combine',
+        input_images: [{ data: 'AAA', media_type: 'image/jpeg' },
+                       { data: 'BBB', media_type: 'image/png' }],
+      )
+    end
+    _m, _p, body = fake.calls.first
+    assert_equal ['data:image/jpeg;base64,AAA', 'data:image/png;base64,BBB'], body[:images]
   end
 
   def test_submit_raises_when_response_missing_data_url
@@ -512,7 +573,7 @@ class CloseRouterImgAdapterTest < Minitest::Test
   def test_submit_edit_explicit_model_overrides_configured
     fake = FakeModelProviderClient.new(post_returns: { 'data' => [{ 'url' => 'https://cdn/x.png' }] })
     with_fake_client(fake) do
-      ImageGen::CloseRouterImgAdapter.new.submit(prompt: 'y', input_image: 'ZmFrZQ==', model: 'custom/edit')
+      ImageGen::CloseRouterImgAdapter.new.submit(prompt: 'y', input_images: [{ data: 'ZmFrZQ==', media_type: 'image/jpeg' }], model: 'custom/edit')
     end
     _, _, body = fake.calls.first
     assert_equal 'custom/edit', body[:model]
@@ -562,8 +623,8 @@ class FakeAdapter < ImageGen::Adapter
     @sync             = sync
   end
 
-  def submit(prompt:, input_image: nil, input_media_type: nil, model: nil)
-    @submit_calls << { prompt: prompt, input_image: input_image, input_media_type: input_media_type, model: model }
+  def submit(prompt:, input_images: nil, model: nil)
+    @submit_calls << { prompt: prompt, input_images: input_images, model: model }
     @submit_returns
   end
 
@@ -654,6 +715,14 @@ class HandlerAdapterIntegrationTest < BotTest
       define_method(:download_to_tempfile)    { |_url| nil }
     end
 
+    # Stub history-photo downloads: file_id 'BADDL' fails (simulates a transient
+    # download error), everything else returns a canned image so that
+    # source_message_ids resolution is deterministic.
+    @orig_download_image = TelegramFile.method(:download_image)
+    TelegramFile.singleton_class.send(:define_method, :download_image) do |_api, file_id, **_|
+      file_id == 'BADDL' ? nil : { data: "DL_#{file_id}", media_type: 'image/jpeg' }
+    end
+
     Chat.create!(chat_id: -1, title: 't', chat_type: 'group', authorized: true, audio: false)
   end
 
@@ -664,15 +733,18 @@ class HandlerAdapterIntegrationTest < BotTest
     ImageGen.singleton_class.send(:alias_method, :adapter_for,     :__adapter_for)
     ImageGen.singleton_class.send(:remove_method, :__current_adapter)
     ImageGen.singleton_class.send(:remove_method, :__adapter_for)
+    TelegramFile.singleton_class.send(:define_method, :download_image, @orig_download_image) if @orig_download_image
     Settings.image_gen = nil
     ImageGen::Catalog.reset!
     super
   end
 
-  def fresh_task(input_image: nil, model: nil, award: false)
+  def fresh_task(input_image: nil, input_images: nil, source_message_ids: nil, model: nil, award: false)
     params = { 'request' => 'кот в шляпе', 'user_uid' => 42 }
-    params['input_image']      = input_image if input_image
-    params['input_media_type'] = 'image/jpeg' if input_image
+    params['input_image']        = input_image if input_image
+    params['input_media_type']   = 'image/jpeg' if input_image
+    params['input_images']       = input_images if input_images
+    params['source_message_ids'] = source_message_ids if source_message_ids
     params['model'] = model if model
     params['award'] = true  if award
     BackgroundTask.create!(task_type: 'image_generate', chat_id: -1, max_attempts: 60, params: params.to_json)
@@ -854,5 +926,67 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal :done, ImageGenTaskHandler.new.call(task, @bot)  # would raise KeyError pre-fix
     assert_match(/model=AI image generator/, gpt_text(FakeGptMaster.captured.first))
     assert_match(/🏆/, @bot.calls.last[1][:caption])
+  end
+
+  # --- multi-image edit sourcing (inline + chat history) --------------------
+
+  # A legacy single-image task (input_image, enqueued before this deploy) still
+  # resolves into the input_images array the adapter now expects.
+  def test_legacy_input_image_resolves_into_input_images
+    b64 = Base64.strict_encode64('fakebytes')
+    task = fresh_task(model: 'nano-banana-2', input_image: b64)
+    ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal [{ data: b64, media_type: 'image/jpeg' }], @fake_adapter.submit_calls.first[:input_images]
+  end
+
+  # History photo referenced by message_id is resolved (DB → file_id → download)
+  # in the handler and passed as an edit source.
+  def test_source_message_id_downloads_and_edits
+    Message.create!(chat_id: -1, message_id: 555, role: 'user', body: '[фото]', user_uid: 7,
+                    attachment_photo_file_id: 'FID1')
+    task = fresh_task(model: 'nano-banana-2', source_message_ids: [555])
+    ImageGenTaskHandler.new.call(task, @bot)
+    imgs = @fake_adapter.submit_calls.first[:input_images]
+    assert_equal [{ data: 'DL_FID1', media_type: 'image/jpeg' }], imgs
+    assert_match(/\[edit\]/, gpt_text(FakeGptMaster.captured.first), 'history image makes it an edit')
+  end
+
+  # Inline image (current/reply) comes first, then history images, in order.
+  def test_inline_and_history_combined_inline_first
+    Message.create!(chat_id: -1, message_id: 710, role: 'user', body: '[фото]', user_uid: 7,
+                    attachment_photo_file_id: 'FIDH')
+    task = fresh_task(model: 'nano-banana-2',
+                      input_images: [{ 'data' => 'INLINE', 'media_type' => 'image/png' }],
+                      source_message_ids: [710])
+    ImageGenTaskHandler.new.call(task, @bot)
+    imgs = @fake_adapter.submit_calls.first[:input_images]
+    assert_equal 'INLINE',     imgs[0][:data], 'inline/current image first'
+    assert_equal 'image/png',  imgs[0][:media_type]
+    assert_equal 'DL_FIDH',    imgs[1][:data]
+  end
+
+  # A stale/missing message_id (no stored photo) is skipped; the rest proceed.
+  def test_stale_source_message_id_skipped_others_proceed
+    Message.create!(chat_id: -1, message_id: 600, role: 'user', body: '[фото]', user_uid: 7,
+                    attachment_photo_file_id: 'FID2')
+    # 601 has no message row → no file_id → skipped.
+    task = fresh_task(model: 'nano-banana-2', source_message_ids: [601, 600])
+    ImageGenTaskHandler.new.call(task, @bot)
+    imgs = @fake_adapter.submit_calls.first[:input_images]
+    assert_equal [{ data: 'DL_FID2', media_type: 'image/jpeg' }], imgs
+  end
+
+  # Edit was requested but NOTHING usable resolved → fail with a user-facing
+  # notice, never silently regenerate from scratch (the bug class being killed).
+  def test_edit_intended_but_all_sources_unavailable_fails_with_notice
+    task = fresh_task(model: 'nano-banana-2', source_message_ids: [999]) # no message row
+    result = ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal :failed, result
+    task.reload
+    assert_equal 'failed', task.status
+    assert_empty @fake_adapter.submit_calls, 'must not submit a text-to-image fallback'
+    msg = @bot.calls.find { |c| c[0] == :sendMessage }
+    assert msg, 'a failure notice was sent to the chat'
+    assert_match(/редактирован/i, msg[1][:text])
   end
 end

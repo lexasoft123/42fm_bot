@@ -20,6 +20,12 @@ module ImageGen
     'closerouter' => CloseRouterImgAdapter,
   }.freeze
 
+  # Max edit source images per request (inline + chat-history combined). Bounds
+  # the nano-banana combine size, the enrichment vision payload, and how long a
+  # TaskRunner worker is held downloading history photos (only 2 workers exist).
+  # Read by the generate_image tool (cap) and ImageGenTaskHandler (resolution).
+  MAX_EDIT_IMAGES = 6
+
   def self.current_adapter
     name = Settings.image_gen&.dig('provider') or
       raise 'image_gen.provider not configured'

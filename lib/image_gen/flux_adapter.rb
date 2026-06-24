@@ -42,15 +42,19 @@ module ImageGen
     end
 
     # Submit image generation or editing. Returns task_id string.
-    # When input_image is provided (base64, without data-URI prefix), flux-2-pro
-    # switches to image-edit mode and sizes the output to match the input
-    # unless width/height are forced.
-    def submit(prompt:, input_image: nil, input_media_type: nil, width: 1024, height: 1024, model: nil)
+    # When input_images is provided, flux-2-pro switches to image-edit mode and
+    # sizes the output to match the input unless width/height are forced. FLUX
+    # edits a SINGLE source image — if several are passed (a combine the agent
+    # should have routed to a nano-banana model), use the first and warn.
+    def submit(prompt:, input_images: nil, width: 1024, height: 1024, model: nil)
       effective_model = model || @model
+      imgs = Array(input_images)
       body = { prompt: prompt, safety_tolerance: 5, output_format: 'jpeg' }
-      if input_image
-        body[:input_image] = "data:image/jpeg;base64,#{input_image}"
-        LOGGER.debug "#{self.class.name}: submitting edit (prompt #{prompt.length} chars, image #{input_image.bytesize} b64-bytes) to #{effective_model}"
+      if imgs.any?
+        LOGGER.warn "#{self.class.name}: #{imgs.size} input images given but FLUX edits one — using the first" if imgs.size > 1
+        first = imgs.first
+        body[:input_image] = "data:#{first[:media_type] || 'image/jpeg'};base64,#{first[:data]}"
+        LOGGER.debug "#{self.class.name}: submitting edit (prompt #{prompt.length} chars, #{imgs.size} image(s)) to #{effective_model}"
       else
         body[:width]  = width
         body[:height] = height
