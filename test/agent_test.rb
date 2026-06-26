@@ -552,6 +552,73 @@ class RunnerTest < BotTest
     assert_match(/🎨/, result)
   end
 
+  # Watchdog also fires when the user gave an imperative draw directive but the
+  # agent ended the turn with a bare promise ("ща сделаю") — NO 🎨 caption, no
+  # tool call. This is the prod silent-failure mode (nothing delivered).
+  def test_watchdog_nudges_on_draw_directive_without_tool_call_or_caption
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'Make a picture',
+      parameters: { 'request' => { type: 'string' } },
+      handler: ->(_a, _c) { 'ok, queued' }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_text('Ща на исходнике сделаю препода явно препода, жди.'),       # iter1: promise, no 🎨, no call
+      anthropic_tool_call('generate_image', { 'request' => 'дорисуй препода' }), # iter2: after nudge
+      anthropic_text('Готово')                                                   # iter3: final
+    )
+    result = build_runner(text: 'дорисуй чтобы было понятно что это препод', user: @user).run
+    assert_equal 'Готово', result
+    calls = FakeGptMaster.calls.select { |c| c[:method] == :call_raw }
+    assert_equal 3, calls.size, 'draw directive + no generate_image call must nudge then retry'
+    nudge = calls[1][:messages].last
+    nudge_text = nudge[:content].is_a?(Array) ? nudge[:content].first[:text] : nudge[:content]
+    assert_match(/generate_image/, nudge_text)
+  end
+
+  # Watchdog must NOT fire for a non-draw request even when generate_image IS
+  # available — it's gated on the directive, not the tool's mere existence.
+  def test_watchdog_skips_non_draw_request
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'Make a picture',
+      parameters: { 'request' => { type: 'string' } }, handler: ->(_a, _c) { 'ok' }
+    )
+    FakeGptMaster.enqueue(anthropic_text('просто ответ, без картинки'))
+    result = build_runner(text: 'как дела?', user: @user).run
+    calls = FakeGptMaster.calls.select { |c| c[:method] == :call_raw }
+    assert_equal 1, calls.size, 'no draw directive → no nudge'
+    assert_equal 'просто ответ, без картинки', result
+  end
+
+  # "сгенерируй <non-image>" (пароль/текст/идею) is generic generate, NOT a draw
+  # directive — must not nudge (would otherwise force an unwanted image).
+  def test_watchdog_skips_generic_generate_request
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'Make a picture',
+      parameters: { 'request' => { type: 'string' } }, handler: ->(_a, _c) { 'ok' }
+    )
+    FakeGptMaster.enqueue(anthropic_text('Пароль: hunter2'))
+    result = build_runner(text: 'сгенерируй надёжный пароль', user: @user).run
+    calls = FakeGptMaster.calls.select { |c| c[:method] == :call_raw }
+    assert_equal 1, calls.size, 'сгенерируй ≠ draw directive → no nudge'
+    assert_equal 'Пароль: hunter2', result
+  end
+
+  # Non-user (agent-event) turns must NOT fire the directive watchdog even when
+  # @text echoes the original draw request — else it re-triggers image-gen on
+  # the agent-event loop. (user_initiated: false)
+  def test_watchdog_directive_skipped_on_non_user_initiated_turn
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'Make a picture',
+      parameters: { 'request' => { type: 'string' } }, handler: ->(_a, _c) { 'ok' }
+    )
+    FakeGptMaster.enqueue(anthropic_text('(skip)'))
+    result = build_runner(text: 'Запрос: дорисуй препода | Причина: image_failed',
+                          user: @user, user_initiated: false).run
+    calls = FakeGptMaster.calls.select { |c| c[:method] == :call_raw }
+    assert_equal 1, calls.size, 'agent-event turn must not nudge on echoed directive'
+    assert_equal '(skip)', result
+  end
+
   # Tool result longer than MAX_TOOL_RESULT_LENGTH is truncated with '...'
   def test_tool_result_truncation
     long_result = 'x' * 3000

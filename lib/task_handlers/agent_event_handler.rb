@@ -20,7 +20,11 @@ class AgentEventHandler
       radio:     nil, # tools that need a Radio socket will fail-soft
       chat_id:   task.chat_id,
       user:      user,
-      api:       api
+      api:       api,
+      # Not a real user turn: user_text is a synthetic event prompt that echoes
+      # the original "Запрос: …" — keep the draw-directive watchdog off so it
+      # can't re-trigger image-gen on the agent-event loop.
+      user_initiated: false
     )
 
     text = runner.run

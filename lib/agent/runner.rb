@@ -13,7 +13,7 @@ module Agent
     # backs up `bot.listen`'s single-threaded queue.
     SLOW_ITERATION_MS = 5_000
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil, user_initiated: true)
       @text       = text
       @context    = context
       @knowledge  = knowledge
@@ -24,6 +24,11 @@ module Agent
       @chat_id    = chat_id
       @user       = user
       @message_id = message_id
+      # True only for real user turns (gpt_chat/gpt_question). The agent-event
+      # loop reuses Runner with a synthetic prompt that echoes the original
+      # request, so the draw-directive watchdog must stay OFF there — otherwise
+      # it would re-trigger image-gen on the very loop built to prevent that.
+      @user_initiated = user_initiated
       # When the user attached/replied with an image, route through `agent_vision`
       # (typically Anthropic with vision) so the model can actually see it. The
       # text-only `agent` setting (typically DeepSeek for cheaper tool-loop runs)
@@ -87,14 +92,16 @@ module Agent
         if tool_calls.empty?
           text = extract_text(raw) || 'жпт не жпт'
 
-          # Image-hallucination watchdog: Grok occasionally imitates the
-          # `🎨 <caption>` format used by image-gen replies in chat history
-          # instead of calling generate_image. If the agent ends the turn
-          # with that pattern but never actually invoked generate_image,
-          # nudge it once and re-loop.
-          if !generate_image_called && !watchdog_fired && hallucinated_image_caption?(text)
+          # Image watchdog: the agent sometimes promises/describes an image but
+          # never calls generate_image — either imitating the `🎨 <caption>`
+          # format from chat history, or answering an explicit draw directive
+          # ("дорисуй…") with a bare promise ("ща сделаю"). If the turn ends
+          # with no generate_image call in either case, nudge once and re-loop.
+          hallucinated = hallucinated_image_caption?(text)
+          if !generate_image_called && !watchdog_fired && (hallucinated || image_request_unanswered?)
             watchdog_fired = true
-            alog :warn, "watchdog: 🎨 caption in text but no generate_image call — nudging"
+            reason = hallucinated ? '🎨 caption in text' : 'draw directive in request'
+            alog :warn, "watchdog: #{reason} but no generate_image call — nudging"
             messages << build_assistant_message(raw)
             messages << build_image_call_nudge
             next
@@ -163,10 +170,26 @@ module Agent
       text.match?(HALLUCINATED_IMAGE_CAPTION)
     end
 
+    # The user gave an explicit imperative draw/edit directive but the turn
+    # ended without ever calling generate_image — i.e. the agent promised in
+    # text ("ща нарисую/сделаю") instead of acting (prod silent-failure mode).
+    # Cyrillic-stem match (Ruby \b is ASCII-only, so match stems directly):
+    # на/до/от/пере/под/за/с + рисуй(те), or bare рисуй(те). Deliberately NOT
+    # сгенерируй — too generic ("сгенерируй пароль/текст/идею" isn't an image).
+    # Gated to real user turns (@user_initiated): the agent-event path echoes
+    # the original request into @text and must not re-trigger image-gen.
+    DRAW_DIRECTIVE = /(?:на|до|от|пере|под|за|с)?рису(?:й|йте)/i
+    def image_request_unanswered?
+      return false unless @user_initiated
+      return false if @text.nil? || @text.empty?
+      @text.match?(DRAW_DIRECTIVE)
+    end
+
     def build_image_call_nudge
-      msg = 'Ты описал картинку текстом, но не вызвал инструмент generate_image. ' \
-            'Сейчас вызови generate_image с подходящим request — без описания в тексте, ' \
-            'без 🎨-префикса, картинку отрисует сам инструмент.'
+      msg = 'Похоже, надо нарисовать/дорисовать картинку, но ты не вызвал инструмент ' \
+            'generate_image (только описал словами или пообещал). Сейчас вызови generate_image ' \
+            'с подходящим request — без описания в тексте и без 🎨-префикса; если правишь ' \
+            'присланное фото, добавь edit_source. Картинку отрисует сам инструмент.'
       if anthropic?
         { role: 'user', content: [{ type: 'text', text: msg }] }
       else
