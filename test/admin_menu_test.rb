@@ -266,6 +266,131 @@ class AdminMenuViewsTest < BotTest
     assert_match(/^id: -556$/, v[:text])
     refute_match(/unknown \(id/, v[:text])
   end
+
+  # --- "Open profile / open chat" links (url buttons) ---
+
+  class FakeLinkApi
+    attr_reader :calls
+    def initialize(username: nil, invite_link: nil, raise_with: nil)
+      @username = username; @invite_link = invite_link; @raise_with = raise_with; @calls = []
+    end
+
+    def getChat(chat_id:)
+      @calls << chat_id
+      raise Telegram::Bot::Exceptions::Base, @raise_with if @raise_with
+      OpenStruct.new(username: @username, invite_link: @invite_link)
+    end
+  end
+
+  def urls_of(view)
+    view[:reply_markup].inline_keyboard.flatten.map(&:url).compact
+  end
+
+  def test_user_detail_has_profile_link
+    User.create!(uid: 12345, name: 'Вася', role: 'member')
+    v = AdminMenu::Views.user_detail(uid: 12345)
+    assert_includes urls_of(v), 'tg://user?id=12345'
+  end
+
+  # A private chat's id IS the user's uid → link straight to the profile,
+  # no API call needed (this is the access-request "Принят: φ (id: …)" case).
+  def test_chat_detail_private_has_profile_link
+    Chat.create!(chat_id: 755777089, title: 'φ', chat_type: 'private', authorized: true, audio: false)
+    v = AdminMenu::Views.chat_detail(chat_id: 755777089) # no api needed
+    assert_includes urls_of(v), 'tg://user?id=755777089'
+  end
+
+  def test_chat_detail_public_group_gets_tme_link
+    Chat.create!(chat_id: -100200, title: 'Cool', chat_type: 'supergroup', authorized: true, audio: false)
+    api = FakeLinkApi.new(username: 'coolchat')
+    v = AdminMenu::Views.chat_detail(chat_id: -100200, api: api)
+    assert_includes urls_of(v), 'https://t.me/coolchat'
+    assert_equal [-100200], api.calls
+  end
+
+  def test_chat_detail_falls_back_to_invite_link
+    Chat.create!(chat_id: -100250, title: 'Priv', chat_type: 'supergroup', authorized: true, audio: false)
+    api = FakeLinkApi.new(invite_link: 'https://t.me/+abc123')
+    v = AdminMenu::Views.chat_detail(chat_id: -100250, api: api)
+    assert_includes urls_of(v), 'https://t.me/+abc123'
+  end
+
+  def test_chat_detail_no_link_when_group_is_unlinkable
+    Chat.create!(chat_id: -100260, title: 'Priv', chat_type: 'supergroup', authorized: true, audio: false)
+    api = FakeLinkApi.new # no username, no invite_link
+    v = AdminMenu::Views.chat_detail(chat_id: -100260, api: api)
+    assert_empty urls_of(v), 'private group with no public handle gets no link button'
+    cb = v[:reply_markup].inline_keyboard.flatten.map(&:callback_data).compact
+    assert_includes cb, 'adm:chat_toggle_auth:-100260', 'normal controls still present'
+  end
+
+  def test_chat_detail_getchat_failure_is_silent
+    Chat.create!(chat_id: -100300, title: 'x', chat_type: 'supergroup', authorized: true, audio: false)
+    api = FakeLinkApi.new(raise_with: 'Bad Request: chat not found')
+    v = AdminMenu::Views.chat_detail(chat_id: -100300, api: api)
+    assert_empty urls_of(v), 'getChat failure must not add a broken link'
+    cb = v[:reply_markup].inline_keyboard.flatten.map(&:callback_data).compact
+    assert_includes cb, 'adm:chat_toggle_auth:-100300'
+  end
+
+  def test_chat_detail_group_no_getchat_without_api
+    Chat.create!(chat_id: -100400, title: 'x', chat_type: 'supergroup', authorized: true, audio: false)
+    v = AdminMenu::Views.chat_detail(chat_id: -100400) # api nil
+    assert_empty urls_of(v)
+  end
+
+  def test_chat_detail_unauthorized_group_never_calls_getchat
+    Chat.create!(chat_id: -100600, title: 'x', chat_type: 'group', authorized: false, audio: false)
+    api = FakeLinkApi.new(username: 'c')
+    v = AdminMenu::Views.chat_detail(chat_id: -100600, api: api)
+    assert_empty api.calls, 'unauthorized rows must not trigger getChat (single-threaded stall)'
+    assert_empty urls_of(v)
+  end
+
+  def test_chat_detail_username_link_is_cached_per_process
+    Chat.create!(chat_id: -100500, title: 'x', chat_type: 'supergroup', authorized: true, audio: false)
+    api = FakeLinkApi.new(username: 'c')
+    AdminMenu::Views.chat_detail(chat_id: -100500, api: api)
+    AdminMenu::Views.chat_detail(chat_id: -100500, api: api)
+    assert_equal 1, api.calls.size, 'stable @username result cached — no repeat hammering'
+  end
+
+  # Finding 1: invite links get revoked/rotated → returned live, never cached.
+  def test_invite_link_is_not_cached_so_revoked_invites_self_heal
+    Chat.create!(chat_id: -100251, title: 'Priv', chat_type: 'supergroup', authorized: true, audio: false)
+    api = FakeLinkApi.new(invite_link: 'https://t.me/+abc')
+    AdminMenu::Views.chat_detail(chat_id: -100251, api: api)
+    AdminMenu::Views.chat_detail(chat_id: -100251, api: api)
+    assert_equal 2, api.calls.size, 'invite-link result must not be cached (invites rotate)'
+  end
+
+  # Finding 2: a permanent "chat not found" is cached; transient errors are not.
+  def test_definitive_chat_not_found_is_cached
+    Chat.create!(chat_id: -100310, title: 'x', chat_type: 'supergroup', authorized: true, audio: false)
+    api = FakeLinkApi.new(raise_with: 'Bad Request: chat not found')
+    AdminMenu::Views.chat_detail(chat_id: -100310, api: api)
+    AdminMenu::Views.chat_detail(chat_id: -100310, api: api)
+    assert_equal 1, api.calls.size, 'permanent "chat not found" cached, not re-fetched'
+  end
+
+  def test_transient_getchat_failure_retries_next_open
+    Chat.create!(chat_id: -100320, title: 'x', chat_type: 'supergroup', authorized: true, audio: false)
+    api = FakeLinkApi.new(raise_with: 'Too Many Requests: retry after 5')
+    AdminMenu::Views.chat_detail(chat_id: -100320, api: api)
+    AdminMenu::Views.chat_detail(chat_id: -100320, api: api)
+    assert_equal 2, api.calls.size, 'transient failure not cached — retry on next open'
+  end
+
+  # Finding 3: exercise the Hash / 'result'-envelope branch of tg_attr.
+  class HashGetChatApi
+    def getChat(chat_id:); { 'result' => { 'username' => 'hashchat' } }; end
+  end
+
+  def test_chat_detail_reads_hash_shaped_getchat_result
+    Chat.create!(chat_id: -100700, title: 'x', chat_type: 'supergroup', authorized: true, audio: false)
+    v = AdminMenu::Views.chat_detail(chat_id: -100700, api: HashGetChatApi.new)
+    assert_includes urls_of(v), 'https://t.me/hashchat', 'tg_attr must read the Hash/result-envelope shape'
+  end
 end
 
 class AdminMenuCallbackHandlerTest < BotTest

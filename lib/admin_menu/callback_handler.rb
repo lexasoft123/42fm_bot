@@ -60,7 +60,7 @@ module AdminMenu
       end
 
       msg = perform_mutation(action, bot)
-      view_response = post_mutation_view(action)
+      view_response = post_mutation_view(action, bot&.api)
       uid = query.from&.id
       edit_message(bot, chat_id, message_id, uid, view_response)
       safe_answer(bot, query, msg || '✓')
@@ -70,7 +70,7 @@ module AdminMenu
       case view
       when :root        then Views.root
       when :chats       then Views.chats(**params, api: api) # api → title self-heal
-      when :chat_detail then Views.chat_detail(**params)
+      when :chat_detail then Views.chat_detail(**params, api: api) # api → open-chat link
       when :chat_limits then Views.chat_limits(**params)
       when :admins      then Views.admins(**params)
       when :user_detail then Views.user_detail(**params)
@@ -79,10 +79,10 @@ module AdminMenu
       end
     end
 
-    def post_mutation_view(action)
+    def post_mutation_view(action, api = nil)
       case action.view
       when :toggle_auth, :toggle_auth_confirm, :toggle_audio
-        Views.chat_detail(chat_id: action.params[:chat_id])
+        Views.chat_detail(chat_id: action.params[:chat_id], api: api)
       when :user_toggle
         Views.user_detail(uid: action.params[:uid])
       when :req_accept, :req_decline

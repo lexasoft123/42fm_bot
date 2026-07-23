@@ -43,19 +43,22 @@ module AdminMenu
       { text: text, reply_markup: inline(buttons) }
     end
 
-    def chat_detail(chat_id:)
+    def chat_detail(chat_id:, api: nil)
       chat = Chat.find_by(chat_id: chat_id)
       return { text: "Чат #{chat_id} не найден", reply_markup: inline([[btn('⬅️ Назад', 'adm:chats:0')]]) } unless chat
 
       auth_label  = chat.authorized ? '🔒 Деавторизовать' : '🔓 Авторизовать'
       audio_label = chat.audio      ? '🎵 Аудио: вкл'      : '🎵 Аудио: выкл'
 
-      buttons = [
+      buttons = []
+      open_btn = chat_open_button(chat, api)
+      buttons << [open_btn] if open_btn
+      buttons.concat([
         [btn(auth_label,   "adm:chat_toggle_auth:#{chat_id}")],
         [btn(audio_label,  "adm:chat_toggle_audio:#{chat_id}")],
         [btn('⚙️ Лимиты',  "adm:chat_limits:#{chat_id}")],
         [btn('⬅️ Назад',   'adm:chats:0')],
-      ]
+      ])
 
       lines = [
         unknown_title?(chat.title) ? "id: #{chat.chat_id}" : "#{chat.title} (id: #{chat.chat_id})",
@@ -114,6 +117,7 @@ module AdminMenu
 
       label = user.role == 'admin' ? '⬇️ Снять роль admin' : '👑 Назначить admin'
       buttons = [
+        [link_btn('👤 Открыть профиль', "tg://user?id=#{uid}")],
         [btn(label, "adm:user_toggle:#{uid}")],
         [btn('⬅️ Назад', 'adm:admins:0')],
       ]
@@ -211,6 +215,7 @@ module AdminMenu
 
     def reset_getchat_cache_for_test!
       @getchat_failed = Set.new
+      @chat_link_cache = {}
     end
 
     # Groups have .title; private chats have first/last name + username.
@@ -218,8 +223,65 @@ module AdminMenu
       Chat.label_from_telegram(info)
     end
 
+    # "Open" button for the chat detail view so an admin can jump to the
+    # chat/user from the menu. A private chat IS a user (chat_id == the
+    # user's uid), so link straight to the profile card via tg://user?id —
+    # no API call, always available. Groups/channels have no id-based deep
+    # link: fall back to a public https://t.me/<username> (or the primary
+    # invite link) discovered via getChat — authorized rows only (same
+    # single-threaded-loop rationale as refresh_titles!). Returns nil when
+    # nothing is linkable (the common case for private groups).
+    def chat_open_button(chat, api)
+      if chat.chat_type == 'private'
+        return link_btn('👤 Открыть профиль', "tg://user?id=#{chat.chat_id}")
+      end
+      return nil unless api && chat.authorized
+      url = chat_public_url(chat.chat_id, api)
+      url && link_btn('🔗 Открыть чат', url)
+    end
+
+    # Resolve a public URL for a group/channel via getChat. Caching is
+    # SELECTIVE (mirrors refresh_titles!'s definitive-vs-transient split), so
+    # repeatedly opening a detail view never hammers the single-threaded loop
+    # for the stable cases, while dead/rotated links self-heal:
+    #   • public @username → stable → cached
+    #   • primary invite link → revocable/rotatable → returned live, NOT cached
+    #   • genuine miss (private group, no handle) → cached (spares getChat)
+    #   • "chat not found" → permanent → cached; any other (transient) error
+    #     (429 / network / proxy) → NOT cached, retried on the next open
+    def chat_public_url(chat_id, api)
+      @chat_link_cache ||= {}
+      return @chat_link_cache[chat_id] if @chat_link_cache.key?(chat_id)
+      begin
+        info  = api.getChat(chat_id: chat_id)
+        uname = tg_attr(info, :username).to_s.strip
+        return @chat_link_cache[chat_id] = "https://t.me/#{uname}" unless uname.empty?
+        link = tg_attr(info, :invite_link).to_s.strip
+        return link unless link.empty? # live, never cached — invites get revoked
+        @chat_link_cache[chat_id] = nil # genuine miss → cache to spare getChat
+      rescue => e
+        LOGGER.debug "[admin_menu] getChat(#{chat_id}) link fetch: #{e.class}: #{e.message}" if defined?(LOGGER)
+        @chat_link_cache[chat_id] = nil if e.message.to_s.include?('chat not found')
+        nil
+      end
+    end
+
+    # Read a field off a getChat result across gem-2.x typed structs and
+    # Hash/'result'-enveloped shapes (mirrors Chat.label_from_telegram).
+    def tg_attr(info, key)
+      if info.respond_to?(key)
+        info.public_send(key)
+      elsif info.is_a?(Hash)
+        info.dig('result', key.to_s) || info[key.to_s]
+      end
+    end
+
     def btn(text, callback_data)
       Telegram::Bot::Types::InlineKeyboardButton.new(text: text, callback_data: callback_data)
+    end
+
+    def link_btn(text, url)
+      Telegram::Bot::Types::InlineKeyboardButton.new(text: text, url: url)
     end
 
     def inline(rows)
