@@ -12,13 +12,13 @@ module Commands
 
       lines = facts.map { |k|
         safe = k.content.gsub(/([_*`\[\]])/, '\\\\\1')
-        "*[#{k.id}]* [#{k.source}] #{safe}"
+        "**[#{k.id}]** [#{k.source}] #{safe}"
       }
       scope = Knowledge.where(chat_id: chat_id)
       total = scope.count
       manual = scope.where(source: 'manual').count
       auto = total - manual
-      header = "*База знаний (последние #{facts.size} из #{total} | ручных: #{manual}, авто: #{auto}):*"
+      header = "**База знаний (последние #{facts.size} из #{total} | ручных: #{manual}, авто: #{auto}):**"
       CommandResult.text("#{header}\n#{lines.join("\n")}")
     end
   end

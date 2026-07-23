@@ -113,6 +113,7 @@ How-to recipes (add a command, patterns, settings, migrations): `docs/architectu
 | Add/change a command | New file in `lib/commands/` + require in `message_responder.rb` + entry in `lib/commands/registry.rb` |
 | New service/API | `lib/new_service.rb` + require in `config/boot.rb` |
 | Reply text templates | `config/replies/*.yml` |
+| Bot text send path / rich formatting | `lib/message_sender.rb` (rich-first + classic fallback) + `lib/telegram_rich_client.rb` (Bot API 10.1 `sendRichMessage`) — see `.claude/rules/messages-context.md` |
 | GPT prompt/model | `config/settings.yml` (`chat_gpt.settings.*` + `chat_gpt.providers.*`) + `lib/gpt_master.rb` |
 | TTS / audio | `lib/polly.rb` (AWS Polly + FFmpeg → OGG Opus) + `lib/tts_service.rb` |
 | Radio (Liquidsoap TCP) | `lib/radio.rb` |

@@ -47,6 +47,8 @@ TEST_FILES := \
 	test/quote_command_test.rb \
 	test/chat_wrapped_test.rb \
 	test/access_request_test.rb \
+	test/telegram_rich_client_test.rb \
+	test/message_sender_rich_test.rb \
 	test/gpt_chat_test.rb
 
 test:

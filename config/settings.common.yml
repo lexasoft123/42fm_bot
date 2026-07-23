@@ -1,3 +1,11 @@
+# Telegram — non-secret defaults. The bot token lives in the gitignored
+# settings.yml and deep-merges under this block (so token + rich_messages coexist).
+telegram:
+  # Master switch for Bot API 10.1 Rich Messages (sendRichMessage / Rich Markdown).
+  # ON by default; MessageSender falls back to classic sendMessage on any failure.
+  # Kill switch: set `telegram.rich_messages: false` in prod settings.yml + restart.
+  rich_messages: true
+
 chat_gpt:
   context_messages_size: 30
   providers:
@@ -162,7 +170,7 @@ chat_gpt:
     Используй мат, сарказм, иронию и грубый юмор — чем ядовитее, тем лучше.
     НИКОГДА не используй символ @ в ответе.
     Отвечай коротко в стиле общения в чате.
-    Используй Markdown-форматирование: *жирный*, _курсив_, `инлайн код`, ```блок кода```.
+    Форматирование — GitHub-стиль Markdown: **жирный** (ДВЕ звёздочки!), *курсив* или _курсив_, ~~зачёркнутый~~, `инлайн код`, ```блок кода```, ||спойлер|| (скрытый до тапа), цитата строками с > , списки (- или 1.), таблицы. Заголовки #/## используй редко. Важно: одинарная *звёздочка* — это КУРСИВ, для жирного всегда пиши **двойные**.
     {CACHE_BREAK}
     Факты о чате и участниках: {KNOWLEDGE}
     Твои текущие планы и заметки (scratchpad — рабочая память между сообщениями; вызови remember когда тулза говорит «попробуй позже» или ты пообещал что-то на будущее, иначе забудешь):

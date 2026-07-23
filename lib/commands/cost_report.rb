@@ -17,17 +17,17 @@ module Commands
     def execute
       return admin_denied unless admin?
 
-      lines = ["💰 *Расходы API*"]
+      lines = ["💰 **Расходы API**"]
       lines << ''
-      lines << "*Этот чат (#{chat_label}):*"
+      lines << "**Этот чат (#{chat_label}):**"
       WINDOWS.each { |label, sec| lines << format_window(label, sec, chat_id: chat_id) }
 
       lines << ''
-      lines << '*Топ юзеров в этом чате:*'
+      lines << '**Топ юзеров в этом чате:**'
       WINDOWS.each { |label, sec| lines << format_top_users(label, sec, chat_id: chat_id) }
 
       lines << ''
-      lines << '*Все чаты:*'
+      lines << '**Все чаты:**'
       WINDOWS.each { |label, sec| lines << format_window(label, sec, chat_id: nil) }
 
       CommandResult.text(lines.join("\n"))
@@ -43,7 +43,7 @@ module Commands
       saved_cents = ApiUsage.cache_savings_cents(scope)
       by_purpose  = scope.group(:purpose).pluck(:purpose, Arel.sql('SUM(cost_cents)'), Arel.sql('COUNT(*)'))
 
-      header = "• *#{label}*: #{fmt_cost(total_cents)} (#{count} вызовов, сэкономлено кэшем #{fmt_cost(saved_cents)})"
+      header = "• **#{label}**: #{fmt_cost(total_cents)} (#{count} вызовов, сэкономлено кэшем #{fmt_cost(saved_cents)})"
       return header if by_purpose.empty?
 
       rows = by_purpose.sort_by { |_, c, _| -c.to_f }.map do |purpose, cents, n|
@@ -62,14 +62,14 @@ module Commands
         .sort_by { |_, cents, _| -cents.to_f }
         .first(TOP_USERS_LIMIT)
 
-      return "• *#{label}*: нет данных" if rows.empty?
+      return "• **#{label}**: нет данных" if rows.empty?
 
       names = User.where(uid: rows.map(&:first)).pluck(:uid, :name, :first_name).to_h { |u, n, f| [u, n || f || u.to_s] }
       body = rows.map do |uid, cents, n|
         "    #{names[uid] || uid}: #{fmt_cost(cents)} (#{n})"
       end.join("\n")
 
-      "• *#{label}*:\n#{body}"
+      "• **#{label}**:\n#{body}"
     end
 
     def fmt_cost(cents)

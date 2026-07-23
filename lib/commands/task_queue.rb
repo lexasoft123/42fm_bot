@@ -18,7 +18,7 @@ module Commands
       lines = tasks.map { |t| format_task(t) }
       pending = BackgroundTask.where(chat_id: chat_id, status: 'pending').count
 
-      header = pending > 0 ? "📋 *Очередь задач* (активных: #{pending})" : "📋 *Последние задачи*"
+      header = pending > 0 ? "📋 **Очередь задач** (активных: #{pending})" : "📋 **Последние задачи**"
       CommandResult.text("#{header}\n\n#{lines.join("\n")}")
     end
 
