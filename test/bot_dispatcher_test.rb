@@ -11,6 +11,7 @@ end
 
 require 'telegram/bot'
 require_relative '../lib/bot_dispatcher'
+require_relative '../lib/access_request'
 
 # Locks in the security invariant from the admin-menu PR: super-admins bypass
 # the chats-table allowlist ONLY in private chats. A regression like dropping
@@ -64,6 +65,89 @@ class BotDispatcherAuthorizedTest < BotTest
     Chat.create!(chat_id: GROUP, title: 'g', chat_type: 'supergroup', authorized: false, audio: false)
     msg = make_msg(uid: 555, chat_id: GROUP, chat_type: 'supergroup')
     refute BotDispatcher.authorized?(msg)
+  end
+end
+
+# Unauthorized-chat recording (admin-menu surfacing fix). A group the bot is
+# added to must land in the chats table as authorized=false so it can be seen
+# and toggled from /admin — WITHOUT notifying admins. Private chats stay owned
+# by the AccessRequest /start flow and must NOT be recorded on the drop path.
+class BotDispatcherUnauthorizedRecordingTest < BotTest
+  GROUP = -1002883573395
+
+  class FakeApi
+    attr_reader :sent
+    def initialize; @sent = []; end
+    def sendMessage(**kwargs); @sent << kwargs; OpenStruct.new(message_id: 1); end
+  end
+  FakeBot = Struct.new(:api)
+
+  def setup
+    super
+    Settings.auth = { 'super_admin_uids' => [] }
+    @bot = FakeBot.new(FakeApi.new)
+  end
+
+  def msg(chat_id:, type:, text: 'бот привет', title: 'Fun and nausea',
+          first_name: nil, last_name: nil, username: nil, uid: 555)
+    OpenStruct.new(
+      from: OpenStruct.new(id: uid, username: username),
+      text: text, caption: nil,
+      chat: OpenStruct.new(id: chat_id, type: type, title: title,
+                           first_name: first_name, last_name: last_name, username: username),
+    )
+  end
+
+  def test_unauthorized_group_recorded_unauthorized_without_notifying
+    refute Chat.where(chat_id: GROUP).exists?
+    BotDispatcher.handle_message(@bot, msg(chat_id: GROUP, type: 'supergroup'))
+    chat = Chat.find_by(chat_id: GROUP)
+    refute_nil chat, 'unauthorized group must be recorded so it surfaces in /admin'
+    refute chat.authorized, 'recorded group must stay unauthorized'
+    assert_equal 'Fun and nausea', chat.title
+    assert_equal 'supergroup', chat.chat_type
+    assert_empty @bot.api.sent, 'groups must NOT notify admins'
+  end
+
+  def test_unauthorized_private_non_start_not_recorded
+    BotDispatcher.handle_message(@bot, msg(chat_id: 777, type: 'private', text: 'привет',
+                                           title: nil, first_name: 'Вася'))
+    assert_nil Chat.find_by(chat_id: 777),
+               'random unauthorized DMs must not pollute the chats table'
+    assert_empty @bot.api.sent
+  end
+
+  # Recording an already-seen unauthorized group refreshes its metadata
+  # (title/last_seen — so the menu's "dead rows sink" ordering stays fresh)
+  # but must never touch `authorized` (touch_seen sets it only on new rows).
+  # NB: the real guard against flipping an *authorized* chat is the enclosing
+  # `unless authorized?` — such a chat never reaches this branch at all.
+  def test_recording_refreshes_metadata_but_preserves_unauthorized_state
+    Chat.create!(chat_id: GROUP, title: 'old', chat_type: 'supergroup', authorized: false, audio: false)
+    BotDispatcher.handle_message(@bot, msg(chat_id: GROUP, type: 'supergroup'))
+    row = Chat.find_by(chat_id: GROUP)
+    refute row.authorized, 'recording must never flip auth state'
+    assert_equal 'Fun and nausea', row.title, 'recording should refresh the title'
+  end
+
+  # End-to-end through handle_message: a private /start still files the access
+  # request (row + admin notification) while the new non-private recording
+  # branch stays skipped — locks in the ordering interaction from review #1.
+  def test_private_start_files_request_and_skips_recording_branch
+    admin = 9001
+    Settings.auth = { 'super_admin_uids' => [admin] }
+    BotDispatcher.handle_message(@bot, msg(chat_id: 777, type: 'private', text: '/start',
+                                           title: nil, first_name: 'Вася', uid: 777))
+    row = Chat.find_by(chat_id: 777)
+    refute_nil row, 'private /start must still create the AccessRequest row'
+    refute row.authorized, 'request must not auto-authorize'
+    to_admin = @bot.api.sent.select { |m| m[:chat_id] == admin }
+    to_user  = @bot.api.sent.select { |m| m[:chat_id] == 777 }
+    assert_equal 1, to_admin.size, 'super-admin must be notified exactly once'
+    assert_includes to_admin.first[:reply_markup].inline_keyboard.flatten.map(&:callback_data),
+                    'adm:req_accept:777'
+    assert_equal 1, to_user.size
+    assert_includes to_user.first[:text], 'отправлена'
   end
 end
 

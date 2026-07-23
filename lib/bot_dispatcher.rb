@@ -66,6 +66,19 @@ module BotDispatcher
       # PRIVATE chat files an access request (super-admins get ✅/❌
       # buttons). Everything else keeps the historical silence.
       AccessRequest.maybe_handle(bot, message)
+      # Groups never file access requests (authorizing a group stays a
+      # deliberate /admin menu act) — but without a chats row an unauthorized
+      # group can never even SURFACE in the menu, so it could never be
+      # authorized there (only via config-seed + restart). Record it silently:
+      # no admin notification, authorized stays false (touch_seen only sets
+      # authorized=false on brand-new rows, so it never flips an existing one).
+      # Skip private chats: AccessRequest already owns their row (via /start),
+      # and recording every unauthorized DM would be a chats-table growth vector.
+      # Runs AFTER AccessRequest so the /start anti-spam `already_filed` check
+      # still sees the pre-existing state, not a row we just created.
+      if message.chat.type != 'private'
+        Chat.touch_seen(chat_id, title: Chat.label_from_telegram(message.chat), type: message.chat.type) rescue nil
+      end
       return
     end
 
