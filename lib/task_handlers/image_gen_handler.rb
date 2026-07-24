@@ -168,6 +168,10 @@ class ImageGenTaskHandler
   end
 
   MAX_GENERATION_RETRIES = 3
+  # Consecutive status-endpoint (poll) errors tolerated before failing the task.
+  # ~5 polls ≈ 75s — long enough to ride out a transient Atlas blip, far short of
+  # the 60-attempt (~15min) timeout that would otherwise fire with a wrong message.
+  MAX_POLL_ERRORS = 5
 
   def poll_and_deliver(task, api)
     provider = task.params_hash['provider']
@@ -184,6 +188,24 @@ class ImageGenTaskHandler
 
     case result
     when :pending
+      # Reset is deliberately :pending-only — Atlas never returns :retry, and
+      # Hash/:failed are terminal. A future :retry-returning model would carry a
+      # prior error streak forward (harmless; revisit if such a model is added).
+      reset_poll_errors(task) # a healthy 200 poll clears the consecutive-error streak
+      :pending
+    when :poll_error
+      # The status endpoint failed (e.g. Atlas 500). Tolerate a few CONSECUTIVE
+      # errors (transient blip) but fail fast on a persistent outage instead of
+      # spinning to the 60-attempt timeout with a misleading "timeout" message.
+      p    = task.params_hash
+      errs = (p['poll_errors'] || 0) + 1
+      p['poll_errors'] = errs
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{adapter.name} poll unavailable for #{task.external_id} (#{errs}/#{MAX_POLL_ERRORS})"
+      if errs >= MAX_POLL_ERRORS
+        mark_failed_and_notify(task, api, 'poll_unavailable')
+        return :failed
+      end
+      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
       :pending
     when :retry
       p = task.params_hash
@@ -251,6 +273,15 @@ class ImageGenTaskHandler
     # enqueue, but this also bounds legacy/in-flight tasks (and any future
     # enqueuer) regardless of how they were created.
     images.first(ImageGen::MAX_EDIT_IMAGES)
+  end
+
+  # Clear the consecutive poll-error counter after a healthy poll so a later
+  # transient blip starts fresh. Only writes when the counter is non-zero.
+  def reset_poll_errors(task)
+    p = task.params_hash
+    return unless (p['poll_errors'] || 0) > 0
+    p['poll_errors'] = 0
+    ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
   end
 
   def mark_failed_and_notify(task, api, reason, user_text: "Не удалось сгенерировать картинку")

@@ -311,6 +311,37 @@ class AtlasAdapterTest < Minitest::Test
     refute body.key?(:images)
   end
 
+  def test_submit_text_to_image_seedream_uses_size_field
+    # Seedream takes `size: "WIDTH*HEIGHT"`, NOT width/height integers.
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'sd-id' } })
+    with_fake_client(fake) do
+      ImageGen::AtlasAdapter.new.submit(prompt: 'seascape', model: 'bytedance/seedream-v5.0-pro/text-to-image')
+    end
+    _, _, body = fake.calls.first
+    assert_equal 'bytedance/seedream-v5.0-pro/text-to-image', body[:model]
+    assert_equal '1024*1024', body[:size]
+    refute body.key?(:width),  'Seedream uses `size`, not width'
+    refute body.key?(:height), 'Seedream uses `size`, not height'
+  end
+
+  def test_submit_image_edit_seedream_uses_images_array
+    # Seedream edit reads a plural `images` array (like nano-banana). Sending a
+    # singular `image` would make it silently regenerate from scratch.
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'sd-edit' } })
+    with_fake_client(fake) do
+      ImageGen::AtlasAdapter.new.submit(
+        prompt: 'add a crown',
+        input_images: [{ data: 'B64A', media_type: 'image/jpeg' },
+                       { data: 'B64B', media_type: 'image/png' }],
+        model: 'bytedance/seedream-v5.0-pro/edit'
+      )
+    end
+    _, _, body = fake.calls.first
+    assert_equal 'bytedance/seedream-v5.0-pro/edit', body[:model]
+    assert_equal ['data:image/jpeg;base64,B64A', 'data:image/png;base64,B64B'], body[:images]
+    refute body.key?(:image), 'Seedream reads plural `images`, not singular `image`'
+  end
+
   def test_submit_handles_unwrapped_id_response_shape
     # Defensive: if Atlas ever returns the id at top level instead of data.id.
     fake = FakeModelProviderClient.new(post_returns: { 'id' => 'top-level' })
@@ -386,11 +417,26 @@ class AtlasAdapterTest < Minitest::Test
     assert_equal :pending, out
   end
 
-  def test_poll_transient_ssl_returns_pending
-    # ModelProviderClient#get returns [nil, nil] on SSL/timeout. Adapter treats as :pending.
+  # A non-200 poll (HTTP 500/400) or a swallowed transient ([nil,nil]) is NOT
+  # "processing" — signal :poll_error so the handler can fail fast after a few
+  # CONSECUTIVE errors instead of masking a failed job as pending until timeout.
+  def test_poll_http_500_returns_poll_error
+    fake = FakeModelProviderClient.new(get_returns: [500, { 'error' => 'boom' }])
+    out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
+    assert_equal :poll_error, out
+  end
+
+  def test_poll_http_400_returns_poll_error
+    fake = FakeModelProviderClient.new(get_returns: [400, nil])
+    out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
+    assert_equal :poll_error, out
+  end
+
+  def test_poll_transient_ssl_returns_poll_error
+    # ModelProviderClient#get returns [nil, nil] on SSL/timeout.
     fake = FakeModelProviderClient.new(get_returns: [nil, nil])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
-    assert_equal :pending, out
+    assert_equal :poll_error, out
   end
 
   def test_poll_completed_without_outputs_returns_failed

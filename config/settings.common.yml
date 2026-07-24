@@ -310,6 +310,12 @@ image_gen:
       t2i:  'alibaba/wan-2.7-pro/text-to-image'
       edit: 'alibaba/wan-2.7/image-edit'
       desc: 'Alibaba Wan 2.7 (Atlas). Хорош для развёрнутых описательных промптов и арта. Редактирует только одну исходную картинку.'
+    seedream-5-pro:
+      provider: atlas
+      t2i:  'bytedance/seedream-v5.0-pro/text-to-image'
+      edit: 'bytedance/seedream-v5.0-pro/edit'
+      multi_image: true
+      desc: 'Bytedance Seedream 5.0 Pro (Atlas). Флагман: сильное следование промпту, отличная типографика и текст на картинке, фотореалистичная детализация. Умеет объединять до 10 картинок.'
     nano-banana-pro:
       provider: closerouter
       t2i:  'google/nano-banana-pro'

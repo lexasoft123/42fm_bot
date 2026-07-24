@@ -42,16 +42,21 @@ module ImageGen
     # work; submit returns 200+id but polling returns `code:400, "Field
     # required: ***"` immediately, so fields go at top level):
     #   submit: POST /api/v1/model/generateImage
-    #   T2I body  : { model: '...text-to-image', prompt: '...', width:, height: }
+    #   T2I body  : { model: '...text-to-image', prompt: '...', <size field> }
     #   edit body : { model: '...image-edit',    prompt: '...', <image field> }
+    #
+    # T2I SIZING IS PER-MODEL: Wan/nano-banana take width+height integers;
+    # Seedream takes a single `size: "WIDTH*HEIGHT"` string (width/height are
+    # not recognised).
     #
     # THE EDIT IMAGE FIELD IS PER-MODEL (this differs by model family — getting
     # it wrong makes the model silently ignore the source and regenerate from
     # scratch, with a successful-looking task):
-    #   - Wan 2.7         → singular  `image:  'data:...;base64,...'`  (confirmed live 2026-04-30)
-    #   - nano-banana/*   → plural    `images: ['data:...;base64,...', ...]`  (confirmed live 2026-06-24)
-    # Both accept base64 data URIs (no public-URL/upload step). nano-banana
-    # accepts up to ~10 images (combine); Wan reads a single image. Min res 240×240.
+    #   - Wan 2.7          → singular  `image:  'data:...;base64,...'`  (confirmed live 2026-04-30)
+    #   - nano-banana/*    → plural    `images: ['data:...;base64,...', ...]`  (confirmed live 2026-06-24)
+    #   - seedream-v5.0/*  → plural    `images: ['data:...;base64,...', ...]`  (Atlas docs: up to 10 refs)
+    # All accept base64 data URIs (no public-URL/upload step). nano-banana &
+    # Seedream accept up to ~10 images (combine); Wan reads a single image. Min res 240×240.
     #   submit response: { code:200, data: { id, status:'processing', urls:{get}, ... } }
     #   poll    response: { code, data: { id, status, outputs:[<url>], error, ... } }
     #     status set: 'processing' | 'completed' | 'failed'
@@ -63,16 +68,23 @@ module ImageGen
         edit_model = (model || @edit_model)
         data_uris  = imgs.map { |i| "data:#{i[:media_type] || 'image/jpeg'};base64,#{i[:data]}" }
         base = { model: edit_model, prompt: prompt }
-        # Per-model field: nano-banana reads `images` (array), Wan reads `image`.
-        if edit_model.to_s.include?('nano-banana')
+        # Per-model field: nano-banana & Seedream read `images` (array), Wan
+        # reads singular `image`. Wrong one → silent regenerate-from-scratch.
+        if edit_model.to_s.match?(/nano-banana|seedream/)
           base.merge(images: data_uris)
         else
           base.merge(image: data_uris.first)
         end
       else
-        { model: (model || @t2i_model),
-          prompt: prompt,
-          width: @width, height: @height }
+        t2i_model = (model || @t2i_model)
+        base = { model: t2i_model, prompt: prompt }
+        # Per-model sizing: Seedream takes `size: "WIDTH*HEIGHT"`; Wan/nano-banana
+        # take separate width/height integers.
+        if t2i_model.to_s.include?('seedream')
+          base.merge(size: "#{@width}*#{@height}")
+        else
+          base.merge(width: @width, height: @height)
+        end
       end
       resp = @client.post('/api/v1/model/generateImage', body)
       resp['id'] || resp.dig('data', 'id') ||
@@ -81,7 +93,15 @@ module ImageGen
 
     def poll_once(external_id)
       code, body = @client.get("/api/v1/model/prediction/#{external_id}")
-      return :pending unless code == 200 && body
+      unless code == 200 && body
+        # A non-200 is NOT "still processing" — Atlas's status endpoint returns
+        # HTTP 500 persistently for some failed predictions (Atlas web shows them
+        # failed while we'd otherwise poll `:pending` until the 60-attempt
+        # timeout). Signal :poll_error so the handler fails fast after a few
+        # CONSECUTIVE errors; single transient blips are still tolerated there.
+        LOGGER.warn "AtlasAdapter: poll HTTP #{code.inspect} for #{external_id}"
+        return :poll_error
+      end
 
       data = body['data'] || body  # tolerate either wrapping
       case data['status']
