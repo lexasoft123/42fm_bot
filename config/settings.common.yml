@@ -342,10 +342,11 @@ auth:
   rate_limits:
     image: { max: 1, window_minutes: 20 }
     suno:  { max: 1, window_minutes: 20 }
-    # Per-role overrides — used when ctx[:user].role matches. RateLimiter
-    # consults these BEFORE the per-chat or default bucket. Counters are
-    # still per-chat-shared, so an admin's higher cap simply lets them keep
-    # acting after regular users have hit theirs.
+    # Per-role overrides — used when ctx[:user].role matches. For admins,
+    # RateLimiter uses the MORE PERMISSIVE of this override and the chat's
+    # per-chat bucket (so a super-admin raising their own cap via the /admin
+    # menu applies, but a restrictive per-chat/config-seeded value can't drop an
+    # admin below this). Counters stay per-chat-shared.
     admin:
       image: { max: 5, window_minutes: 20 }
       suno:  { max: 5, window_minutes: 20 }

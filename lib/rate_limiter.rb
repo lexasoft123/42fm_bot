@@ -22,26 +22,33 @@ module RateLimiter
   }.freeze
 
   # Resolve the rate-limit bucket for a (chat, service, role) triple.
-  # Priority order:
-  #   1. role == 'admin' AND Settings.auth['rate_limits']['admin'][service] set
-  #      → admin global override (e.g. 10x the regular cap).
-  #   2. Per-chat chat.rate_limits[service] → set via the admin menu.
-  #   3. Settings.auth['rate_limits'][service] → global default from settings.
-  #   4. Hard-coded fallback { max: 1, window_minutes: 20 }.
-  #
-  # Counters remain per-chat-shared: an admin's higher cap means they can
-  # keep acting after regular users have exhausted theirs (correct semantics —
-  # the chat counter still increments, but the admin's limit allows more).
+  #   - Non-admin: per-chat chat.rate_limits[service] → global default → hardcoded.
+  #   - Admin: the MORE PERMISSIVE of the per-chat bucket and the admin override
+  #     (auth.rate_limits.admin[service]). So a super-admin RAISING their own cap
+  #     via the /admin menu applies, but a restrictive per-chat/config-seeded
+  #     value can't drop an admin below the admin override. Falls through to the
+  #     global default / hardcoded when neither is set.
+  # NOTE: menu edits and config seeds both live in chat.rate_limits (written by
+  # Chat.sync_from_config!), so they're indistinguishable here — hence "more
+  # permissive" rather than "the per-chat value always wins".
+  # Counters stay per-chat-shared (the chat counter increments for everyone).
   def self.limit_for(chat_id, service, role: nil)
+    chat     = Chat.find_by(chat_id: chat_id)
+    per_chat = parse_rate_limits(chat&.rate_limits)&.dig(service)
+
     if role.to_s == 'admin'
       admin_limit = Settings.auth.dig('rate_limits', 'admin', service)
-      return admin_limit if admin_limit
+      return more_permissive(per_chat, admin_limit) if admin_limit
     end
-    chat = Chat.find_by(chat_id: chat_id)
-    per_chat = parse_rate_limits(chat&.rate_limits)&.dig(service)
-    per_chat ||
-      Settings.auth.dig('rate_limits', service) ||
-      { 'max' => 1, 'window_minutes' => 20 }
+    per_chat || Settings.auth.dig('rate_limits', service) || { 'max' => 1, 'window_minutes' => 20 }
+  end
+
+  # The bucket allowing higher throughput (max per minute) wins; nil loses.
+  def self.more_permissive(a, b)
+    return b unless a
+    return a unless b
+    rate = ->(l) { l['max'].to_f / [l['window_minutes'].to_f, 0.01].max }
+    rate.call(a) >= rate.call(b) ? a : b
   end
 
   def self.parse_rate_limits(json)

@@ -64,14 +64,42 @@ class RateLimiterTest < BotTest
     assert_equal 3, l['max']
   end
 
-  def test_admin_global_overrides_per_chat
+  # An explicit per-chat menu edit wins even for admins (previously the admin
+  # default silently overrode it — the trap that let super-admins hit limits
+  # despite raising the menu value for their own chat).
+  def test_per_chat_edit_wins_over_admin_default
     Settings.auth['rate_limits']['admin'] = {
-      'image' => { 'max' => 10, 'window_minutes' => 20 },
+      'image' => { 'max' => 5, 'window_minutes' => 20 },
     }
     Chat.create!(chat_id: CHAT, title: 't', chat_type: 'group', authorized: true, audio: false,
-                 rate_limits: { 'image' => { 'max' => 3, 'window_minutes' => 15 } }.to_json)
+                 rate_limits: { 'image' => { 'max' => 10, 'window_minutes' => 1 } }.to_json)
     l = RateLimiter.limit_for(CHAT, 'image', role: 'admin')
-    assert_equal 10, l['max'], 'admin global cap should override per-chat for admins'
+    assert_equal 10, l['max'], 'per-chat menu edit must apply to admins too'
+    assert_equal 1,  l['window_minutes']
+  end
+
+  # Admin override applies when NO per-chat edit exists.
+  def test_admin_default_applies_without_per_chat_edit
+    Settings.auth['rate_limits']['admin'] = {
+      'image' => { 'max' => 5, 'window_minutes' => 20 },
+    }
+    l = RateLimiter.limit_for(CHAT, 'image', role: 'admin')
+    assert_equal 5, l['max'], 'no per-chat edit ⇒ admin override applies'
+  end
+
+  # Regression guard (prod: cloud_cook / Белоброва seeded image max=2 < admin 5):
+  # a RESTRICTIVE per-chat/config-seeded value must NOT drop an admin below the
+  # admin override — admins get the more permissive of the two.
+  def test_restrictive_per_chat_does_not_lower_admin
+    Settings.auth['rate_limits']['admin'] = {
+      'image' => { 'max' => 5, 'window_minutes' => 20 },
+    }
+    Chat.create!(chat_id: CHAT, title: 't', chat_type: 'group', authorized: true, audio: false,
+                 rate_limits: { 'image' => { 'max' => 2, 'window_minutes' => 20 } }.to_json)
+    l = RateLimiter.limit_for(CHAT, 'image', role: 'admin')
+    assert_equal 5, l['max'], 'admin keeps the higher admin cap, not the restrictive per-chat 2'
+    # ...but a regular member in that chat still gets the restrictive per-chat 2.
+    assert_equal 2, RateLimiter.limit_for(CHAT, 'image', role: 'member')['max']
   end
 
   def test_admin_keeps_going_after_regular_cap_hit
