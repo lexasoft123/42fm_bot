@@ -2,3 +2,10 @@ adapter: sqlite3
 database: db/bot.db
 pool: 10
 reaping_frequency: 30
+# Milliseconds a writer waits for a competing write lock before raising
+# SQLite3::BusyException. Without it the sqlite3 adapter installs no busy
+# handler at all, so ANY concurrent writer fails instantly -- and an exception
+# on the bot's write path escapes bot.listen and triggers the 5s crash-retry in
+# lib/bot.rb. Matters whenever a second process writes the same DB, e.g.
+# `rake knowledge:pack_embeddings` run inside the container against live prod.
+timeout: 5000

@@ -34,10 +34,10 @@ Agent::ToolRegistry.register(
   description: 'Удаляет факт из базы знаний по ID. Только для администраторов',
   parameters: { 'id' => { type: 'integer', description: 'ID факта для удаления' } },
   handler: ->(args, ctx) {
-    k = Knowledge.find_by(id: args['id'], chat_id: ctx[:chat_id])
+    k = Knowledge.live.find_by(id: args['id'], chat_id: ctx[:chat_id])
     return "Факт ##{args['id']} не найден" unless k
-    k.destroy
-    "Удалён факт ##{args['id']}"
+    k.soft_delete!('admin')
+    "Удалён факт ##{args['id']} (можно вернуть: бот верни #{args['id']})"
   },
   admin_only: true
 )

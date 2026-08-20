@@ -10,11 +10,11 @@ module Commands
       return admin_denied unless admin?
 
       id = cmd.match(PATTERN)[:id].to_i
-      k  = Knowledge.find_by(id: id, chat_id: chat_id)
+      k  = Knowledge.live.find_by(id: id, chat_id: chat_id)
       return CommandResult.text("Факт ##{id} не найден.") unless k
 
-      k.destroy
-      CommandResult.text("Забыл факт ##{id}: _#{k.content}_")
+      k.soft_delete!('admin')
+      CommandResult.text("Забыл факт ##{id}: _#{k.content}_\n(вернуть: `бот верни #{id}`)")
     end
   end
 end

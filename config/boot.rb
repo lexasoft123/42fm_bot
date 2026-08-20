@@ -5,6 +5,7 @@ Dir.chdir APP_PATH
 require './lib/settings'
 require './lib/log_timing'
 require './lib/model_provider_client'
+require './lib/embedding_cache'
 require 'telegram/bot'
 require './lib/radio'
 require './lib/admin_menu'

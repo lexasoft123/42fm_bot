@@ -46,7 +46,37 @@ class CronScheduler
         end
         maybe_fire_digests
         maybe_announce_expired_rules
+        maybe_fire_knowledge_review
       end
+    end
+
+    # Daily knowledge dedup sweep, once per chat per local day.
+    #
+    # Deliberately NOT modelled on maybe_fire_digests: that one is gated on a
+    # single Settings.digests['chat_id'] and takes its offset from the digests
+    # block. This iterates every authorized chat big enough to be worth it.
+    def maybe_fire_knowledge_review
+      cfg = (Settings.knowledge['review'] rescue nil) || {}
+      return unless cfg['enabled']
+
+      offset = (cfg['utc_offset'] || 0).to_i * 3600
+      local_now = Time.now.utc + offset
+      local_midnight_utc = Time.utc(local_now.year, local_now.month, local_now.day) - offset
+      min_facts = cfg.fetch('review_min_facts', 200)
+
+      Chat.where(authorized: true).pluck(:chat_id).each do |chat_id|
+        # Day-guard first: it is an index hit, whereas the fact count scans.
+        # This tick runs every 60s, so ordering decides whether the count runs
+        # once a day per chat or 1,440 times.
+        already = BackgroundTask.where(chat_id: chat_id, task_type: 'knowledge_review')
+                                .where('created_at >= ?', local_midnight_utc).exists?
+        next if already
+        next if Knowledge.live.where(chat_id: chat_id).count < min_facts
+        BackgroundTask.create!(task_type: 'knowledge_review', chat_id: chat_id, params: {}.to_json)
+        LOGGER.info "[chat=#{chat_id}] CronScheduler: queued daily knowledge review" if defined?(LOGGER)
+      end
+    rescue => e
+      LOGGER.error "CronScheduler#maybe_fire_knowledge_review: #{e.class}: #{e.message}" if defined?(LOGGER)
     end
 
     # Rules-war obituaries (F4). pop_expired_rules is the ONLY deletion

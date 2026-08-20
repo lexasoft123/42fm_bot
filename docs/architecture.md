@@ -232,12 +232,13 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 | `users` | `uid` (Telegram ID), `name`, `first_name`, `last_name`, `role` (`new`/`member`/`admin`), `last_order` |
 | `messages` | `user_uid` (nullable — nil for bot replies), `chat_id`, `body`, `role` (`user`/`bot`), `message_id` (Telegram per-chat id, nullable on legacy rows), `reply_to_message_id`, `message_thread_id` (forum topic), `forwarded` (bool, default false), `edited_at`, `bg_task_external_id` (nullable — populated for bot-delivered media so `cover_art` can resolve a reply-target back to its source song), `attachment_file_id` + `attachment_mime_type` + `attachment_title` + `attachment_performer` + `attachment_duration` (nullable — populated when an incoming user message has audio/voice/audio-MIME document; title falls back to `Document.file_name` minus extension when ID3 title is absent. Used by `Commands::GptChat#attached_audio` lookback and surfaced in `ChatContext.serialize_msg` as `audio: true` + `audio_meta: {title, performer, duration, mime}` so the agent names cover/add-vocals output after the actual track instead of inferring from prior chat context. Audio-only messages (no text caption) are persisted with body=`'[аудио]'` so they appear in chat context), `attachment_photo_file_id` (photo attachments, largest size ≤1280px — fetched on demand by the `view_image` agent tool; photo-only rows get body `[фото]`), `reactions_count` (int, default 0 — aggregate Telegram reaction count maintained by `BotDispatcher#handle_reaction` (per-user delta, best-effort) and `#handle_reaction_count` (authoritative overwrite); feeds `Message.top_reacted` → `бот цитата` + Wrapped "funniest"; see "Telegram reactions capture") |
 | `phrases` | `user_id`, `content` (unique) — user-submitted catchphrases |
-| `knowledge` | `topic`, `content`, `embedding` (JSON float array), `source` (`manual`/`auto`), `chat_id` (bigint, indexed) |
-| `knowledge_compact_log` | `chat_id`, `merged`, `removed`, `kept`, `threshold`, `created_at` — one row per compaction run |
+| `knowledge` | `deleted_at` + `deleted_reason` (soft delete — `admin`/`merged`/`duplicate`/…; all read paths filter via `scope :live`), `reviewed_at`, `merged_from` (JSON array of source ids), `topic`, `content`, `embedding_blob` (packed float32 BLOB — `Array#pack('f*')`, ~6 KB/row, the read path), `embedding` (legacy JSON float array, ~29 KB/row — still dual-written while `knowledge.dual_write_legacy` is on, read only as a fallback), `source` (`manual`/`auto`), `chat_id` (bigint, indexed) |
+| `knowledge_subjects` | `knowledge_id` (FK, **ON DELETE CASCADE**), `uid` (Telegram user id, indexed), `source` (`extract`/`backfill`) — many-to-many: which participants a fact is *about*. Drives per-person centroid removal in dedup, and is the prerequisite for the per-person retirement in ADR-004 |
+| `knowledge_compact_log` | `chat_id`, `merged`, `removed`, `deleted`, `kept`, `chunks`, `threshold`, `run_type`, `dry_run`, `created_at` — one row per review run; the daily deletion budget is `sum(removed + deleted)` over today's non-dry rows |
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 | `songs` | `title`, `artist`, `album`, `genre`, `year` (int), `filepath` (unique, relative to music root), `duration` (int, seconds), `category` (top-level dir) |
 | `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — content table mode (`content='songs'`, `content_rowid='id'`), `unicode61 remove_diacritics 1` tokenizer, auto-synced via INSERT/UPDATE/DELETE triggers |
-| `api_usage` | `chat_id` (nullable), `user_uid` (nullable — null for knowledge extraction/compaction), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_compact`/`suno_compose`/`suno_tags`/`image_prompt`), `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per API response; `ApiUsage.record` is fire-and-forget (rescues errors so telemetry never breaks replies) |
+| `api_usage` | `chat_id` (nullable), `user_uid` (nullable — null for knowledge extraction/compaction), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_review`/`suno_compose`/`suno_tags`/`image_prompt`), `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per API response; `ApiUsage.record` is fire-and-forget (rescues errors so telemetry never breaks replies) |
 | `chat_states` | `chat_id` (PK, bigint), `scratchpad` (JSON: `intentions`/`notes`/`expectations` arrays of `{id, content, created_at}` + the rules-war `rules` array `{id: r-NNN, content, set_by, set_by_name, target, expires_at, challenges_survived, court?}` + top-level `challenge_log` timestamps), `updated_at`. Per-chat agent working memory; written via the `remember`/`forget` agent tools and the rules-game tools, read into `{SCRATCHPAD}` on every agent turn. Hard cap 6000 chars with FIFO eviction (rules exempt — see "Rules-war game"). See ADR-003. |
 
 **Relationships:**
@@ -298,21 +299,58 @@ Media sends (sticker/image/voice) thread the originating `message_thread_id` so 
 ### EmbeddingService — `lib/embedding_service.rb`
 Calls an OpenAI-compatible embeddings API (`embeddings.api_url`) to produce float vectors for text. Returns `nil` on failure. Used by `KnowledgeBase`.
 
+### EmbeddingCache — `lib/embedding_cache.rb`
+One L2-normalized `Numo::SFloat` matrix per chat (plus the parallel array of `Knowledge` ids), so scoring a query is a single BLAS matvec with **zero DB reads**. Before this, `search` read and `JSON.parse`d the whole per-chat table on every agent turn — 171 MB / ~1650 ms for the prod main chat (6,133 facts), inside `bot.listen`'s single-threaded loop. Measured after: ~2 ms per turn, 35.9 MB resident.
+
+- `fetch(chat_id)` → `Entry(ids, matrix, dim)`, never `nil`, lazily built
+- `invalidate(chat_id)` / `invalidate_all` / `reset_for_test!` / `stats`
+
+Two invariants that are easy to break:
+- **`fetch` never blocks.** The per-chat build lock is taken with `try_lock`, never `synchronize`; a thread that loses the race builds its own copy rather than waiting. `fetch` is reached from the listen loop, the extraction `Thread`, TaskRunner workers and CronScheduler, and a cold build on the legacy path takes ~1.7 s.
+- **Invalidation is an `after_commit` callback on `Knowledge`**, not per-call-site discipline — a stale cache means silently wrong search results. `update_all`/`delete_all`/raw SQL bypass it; the only such call site is the offline backfill, which changes storage format but not vector values.
+
+Build-time hardening: rows whose embedding length differs from the chat's modal length are excluded and warned about (`Numo`'s `cast` silently zero-pads ragged rows, so a change of embeddings model would otherwise corrupt every score), and norms are clamped so a stored zero-norm vector scores 0.0 instead of producing `NaN` (which made `sort_by` raise).
+
 ### KnowledgeBase — `lib/knowledge_base.rb`
 Semantic RAG store:
-- `KnowledgeBase.add(topic:, content:, source:)` — embed + store a fact; deduplicates via cosine similarity threshold (0.92)
-- `KnowledgeBase.search(query, top_k:)` — embed query, return top-K facts by cosine similarity
-- `KnowledgeBase.extract_and_store(messages)` — uses `GptMaster.ask` with a structured prompt to extract 3–7 facts from recent chat messages, stores non-duplicate ones as `source: 'auto'`; calls `maybe_trigger_compact` after each batch
-- `KnowledgeBase.compact!(chat_id:, threshold: 0.85)` — clusters all stored embeddings via pairwise cosine similarity + union-find (no API calls), then LLM-merges each cluster ≥ 2 into one comprehensive fact; logs all cluster before/after to `log/knowledge_compact.log`; writes result to `knowledge_compact_log` table
+- `KnowledgeBase.add(topic:, content:, chat_id:, source:, subjects:, merged_from:, reviewed_at:)` — embed + store a fact, with its subject uids
+- `KnowledgeBase.search(query, chat_id:, top_k:, offset:)` — embed query, score it against the cached matrix, then load only the top-K rows. Emits a `kb_search: … embed_ms= score_ms= total_ms= cache=hit|miss` line to `bot.log`
+- `KnowledgeBase.extract_and_store(messages, chat_id:)` — uses `GptMaster.ask` with a structured prompt to extract 3–7 facts from recent chat messages, stores them as `source: 'auto'` with the `subjects` uids the model returned (validated against the uids actually present in the batch); calls `maybe_trigger_review` after each batch. Embedding happens **before** the write transaction — `add` embeds inline, and holding a SQLite write lock across several HTTP round-trips would stall the listen loop's own inserts
+- `KnowledgeBase.review!(chat_id:, dry_run:, max_chunks:)` — the dedup entry point: builds candidate clusters, has the LLM judge each one, applies what survives validation and the daily budget. **The only path that deletes a fact.** Logs every before/after to `log/knowledge_compact.log` and one summary row to `knowledge_compact_log`
+
+**There is no write-time dedup gate.** The old `similar_exists?` rejected a new fact only above 0.92 cosine; measured across all 18,803,778 pairs of the prod main chat the maximum similarity between any two facts is **0.6994**, so it had never once fired — while costing a full per-chat table scan plus an embeddings API call for each of the 3–7 facts in every extraction batch. It was deleted. Deduplication happens in the review sweep, at thresholds where duplicates actually exist.
 
 Auto-extraction is triggered by `MessageResponder#maybe_extract_knowledge` every `knowledge.extract_every` user messages per chat, runs in a background `Thread`.
 
-Auto-compaction is triggered by `maybe_trigger_compact` after each extraction batch. Uses an adaptive threshold: if the last compaction found only small clusters (avg ≤ 2 entries), the effective threshold scales up to 3× `compact_at` before the next run. Threshold settings: `knowledge.compact_at` (entry count trigger, default 100), `knowledge.compact_threshold` (cosine similarity, default 0.85). Logs to `log/knowledge_compact.log`.
+### Dedup: `KnowledgeBase::Cluster` + `KnowledgeBase::Review`
+
+**One pipeline, one deleting actor.** `Cluster` proposes candidates, `Review` judges and applies, and nothing else deletes facts. `KnowledgeBase.review!` is the entry point; it runs as a `knowledge_review` background task (never inline — it makes one LLM call per cluster).
+
+`Cluster` generates candidates over **two different similarity spaces**, clustered separately and never mixed:
+
+| | Space | Threshold | Catches |
+|---|---|---|---|
+| **G1** | raw normalized cosine | `compact_threshold` 0.66 | cross-person duplicates |
+| **G2** | per-person centroid-removed residual | `subject_threshold` 0.55 | same-person, same-incident families |
+
+G2 exists because person identity dominates the embedding: two facts about the same participant score ~0.60 largely *because* both are about them, which is why no global threshold can separate "same fact restated" from "same person, new fact". Subtracting the bucket centroid (from `knowledge_subjects`) cancels that shared direction. G2 emits first and claims its facts; G1 then runs over the remainder, so no fact lands in two clusters and no merge can operate on a row another merge already deleted.
+
+Both use **seed-and-absorb** (leader clustering): every member is within the threshold of the *seed*, so clusters have a bounded radius and cannot chain — the union-find this replaced produced a 1,385-fact connected component at 0.62. The size cap (`max_cluster` 8) is native to the algorithm, which is what keeps the merge prompt bounded.
+
+`Review` sends each cluster to a cheap LLM (`knowledge_review` setting) whose contract lets it **refuse**: measured candidate precision is only ~67–80%, so refusing is the normal case, and the old `MERGE_PROMPT` — which asserted the cluster *was* duplicated — reliably fused distinct facts. Every answer is validated in code: hallucinated ids dropped, `manual` facts immune, merges of <2 ids dropped, facts younger than `min_age_days` skipped, merge beating delete for the same id, and everything over the daily budget logged but not applied.
+
+Deletion is **soft** (`deleted_at`/`deleted_reason`) because the deleting actor is a language model. The daily budget is per chat, counts merge-sourced deletions (a 3-fact merge spends 3), and is shared across every run that day. `бот верни <id>` restores.
+
+Thresholds were calibrated by sampling real clusters — see `rake knowledge:cluster_preview`, which runs both generators with no LLM calls and no writes.
+
+The sweep is triggered three ways: `maybe_trigger_review` after an extraction batch once the fact count crosses `knowledge.compact_at` (with the same adaptive factor and cooldown as before), `CronScheduler#maybe_fire_knowledge_review` once per chat per local day, and `бот ревизия знаний` on demand. All three enqueue a `knowledge_review` background task — it is never run inline. Chats below `knowledge.review.review_min_facts` are skipped entirely.
+
+**Resumability:** facts judged within `knowledge.review.ttl_days` are excluded from candidate generation, so a nightly run doesn't re-pay for verdicts it already has. A dry run deliberately does **not** stamp `reviewed_at`, or it would silently consume the queue.
 
 ### Agent Scratchpad — `lib/agent/scratchpad.rb` + `models/chat_state.rb`
 Per-chat working memory distinct from the knowledge base — knowledge = facts about the world, scratchpad = agent's own intentions/expectations/notes. Stored in `chat_states.scratchpad` (JSON), one row per chat. Three categories: `intentions`, `notes`, `expectations`. Hard cap 6000 chars (~1500 tokens) with FIFO eviction from the largest category. Rendered as `{SCRATCHPAD}` placeholder in `agent_prompt`. Agent manages it via `remember`/`forget` tools (`lib/agent/tools/scratchpad.rb`). See ADR-003 for the full architecture rationale.
 
-**Compaction** (`Agent::Scratchpad.compact(chat_id, max_age_days:)`): pure-Ruby pruning of entries past `expires_at` plus entries older than `max_age_days` (default 30). Runs inline on every `Scratchpad.add` for expiry-based pruning. Manual run: `rake scratchpad:compact [MAX_AGE_DAYS=N] [CHAT_ID=...]`. No LLM calls — at the 6000-char cap, semantic compaction isn't worth the cost. The `бот сожми знания` (admin only) command triggers compaction immediately for the current chat.
+**Compaction** (`Agent::Scratchpad.compact(chat_id, max_age_days:)`): pure-Ruby pruning of entries past `expires_at` plus entries older than `max_age_days` (default 30). Runs inline on every `Scratchpad.add` for expiry-based pruning. Manual run: `rake scratchpad:compact [MAX_AGE_DAYS=N] [CHAT_ID=...]`. No LLM calls — at the 6000-char cap, semantic compaction isn't worth the cost.
 
 **Time-deferred intentions — `CronScheduler` (`lib/cron_scheduler.rb`)**: thread that wakes every 60s, finds chats with scratchpad intentions whose `due_at` has passed, and emits one `agent_event(cron_tick)` per chat carrying the due intent ids. Marks them `acted: true` so the next tick doesn't re-dispatch. Subject to the same per-chat 10/hour `agent_event` rate cap. Lets the agent act on time-deferred intentions (e.g. retry a rate-limited image after the cooldown). Started from `lib/bot.rb` alongside `TaskRunner.start`. The tick also runs `maybe_fire_digests` (weekly Wrapped auto-post — own `weekly_wrapped` task type, bypasses the agent_event cap) and `maybe_announce_expired_rules` (rules-war obituaries — see "Rules-war game").
 
@@ -407,7 +445,7 @@ Generic DB-backed persistent task system for long-running operations. A poller t
 **Current handlers:**
 - `SunoTaskHandler` (`suno_generate`) — LLM request parsing → GPT lyrics composition → LLM tag enrichment → Suno V5 API submit → poll → download both clip variants → send as media group with `Performer_-_Song_Name.mp3` filenames → send lyrics as reply. Uses `ChatContext` for context-aware lyrics. Triggered exclusively via the `compose_song` agent tool (no direct command).
 - `ImageGenTaskHandler` (`image_generate`) — LLM English prompt generation (with chat context + knowledge) → FLUX 2 API submit → poll → send photo. Uses `ChatContext` for context-aware prompts. Triggered exclusively via the `generate_image` agent tool (no direct command).
-- `KnowledgeCompactHandler` (`knowledge_compact`) — calls `KnowledgeBase.compact!` for the task's chat; logs to `log/knowledge_compact.log`; enqueued automatically by `maybe_trigger_compact` when entry count crosses the adaptive threshold.
+- `KnowledgeReviewHandler` (`knowledge_review`, plus the legacy `knowledge_compact` type as a drain for pending rows) — calls `KnowledgeBase.review!` for the task's chat; logs to `log/knowledge_compact.log`; rescues and marks the task failed itself rather than letting TaskRunner post an error into the chat.
 - `WrappedDigestHandler` (`weekly_wrapped`) — weekly Chat Wrapped auto-post with the retry-safe «Революция» roll (see "Chat Wrapped"). Enqueued by `CronScheduler#maybe_fire_digests`.
 - `RuleObituaryHandler` (`rule_obituary`) — template obituary post for expired rules-war rules (no LLM); batching/caps owned by the cron tick (see "Rules-war game").
 
@@ -590,8 +628,9 @@ Inline-keyboard menu in the super-admin's private chat for runtime bot administr
 | `бот почему/как/зачем... <text>` | GPT question matcher |
 | `бот запомни <content>` | Add fact to knowledge base (admin only) |
 | `бот знания` | List all knowledge base entries with IDs |
-| `бот забудь <id>` | Delete a knowledge base entry (admin only) |
-| `бот сожми знания` | LLM-compact near-duplicate knowledge entries (admin only) |
+| `бот забудь <id>` | Soft-delete a knowledge base entry (admin only) — recoverable |
+| `бот верни <id>` | Restore a soft-deleted fact (admin only). Refuses on a merged source unless followed by `точно` |
+| `бот ревизия знаний` | Queue the LLM dedup sweep for this chat (admin only). `бот сожми знания` is a synonym |
 
 ### Voice TTS
 | Command | Description |
@@ -738,6 +777,27 @@ Settings.my_feature['api_key']
 
 If the group is **required for the app to boot**, also add the key to `REQUIRED_KEYS` in `lib/settings.rb` — the deep-merge validator rejects unknown required groups otherwise. Optional groups (e.g. `digests`) stay out of `REQUIRED_KEYS` deliberately.
 
+### Adding a rake task
+
+Tasks live in the single top-level `Rakefile` (there is no `lib/tasks/`). Anything touching app code needs the boot preamble — and `LOGGER` too if the code it calls logs, since only `lib/bot.rb` assigns it in normal operation:
+
+```ruby
+namespace :knowledge do
+  desc "What it does (ENV_VAR=default, OTHER=optional)"
+  task :thing do
+    require './config/boot'
+    config = AppConfigurator.new
+    config.configure
+    LOGGER = config.logger unless defined?(LOGGER)
+
+    chat_ids = ENV['CHAT_ID'] ? [ENV['CHAT_ID'].to_i] : Knowledge.live.distinct.pluck(:chat_id)
+    chat_ids.each { |cid| puts "chat #{cid}: ..." }
+  end
+end
+```
+
+Conventions: options come from `ENV`, progress goes to `puts`, and a `desc` line is mandatory (it is the only place the options are documented). Destructive tasks must **refuse and exit 1** rather than prompt — see `knowledge:drop_legacy_embeddings`. Batch anything that writes, and prefer `update_all` when the change doesn't affect vectors, so `EmbeddingCache` isn't invalidated once per row. Remember `after_commit` fires only in the rake process: if a task mutates `knowledge`, print a reminder to restart the bot.
+
 ### Database changes
 
 Create a migration file (sequential number prefix). ActiveRecord is 7.2 — use `Migration[7.2]` for new migrations:
@@ -832,8 +892,28 @@ chat_gpt:
 knowledge:
   top_k: 3            # facts to inject per GPT call
   extract_every: 50   # auto-extract after every N user messages per chat
-  compact_at: 100     # trigger background compaction when entry count reaches this
-  compact_threshold: 0.85  # cosine similarity threshold for clustering near-dupes
+  dual_write_legacy: true  # also write the legacy JSON embedding column (rollback path for 023)
+  compact_at: 500          # queue a review once the fact count reaches this
+  compact_threshold: 0.66  # G1: raw cosine. Measured max pairwise similarity is 0.6994
+  compact_min_pairwise: 0.62
+  subject_threshold: 0.55  # G2: per-person centroid-removed residual space
+  subject_min_pairwise: 0.50
+  subject_min_facts: 20    # below this a bucket centroid is noise
+  subject_min_residual: 0.0
+  max_cluster: 8
+  review:
+    enabled: true
+    utc_offset: 3
+    review_min_facts: 200      # skip small chats entirely
+    ttl_days: 30               # don't re-judge a fact within this window
+    max_chunks_per_run: 60
+    min_age_days: 3
+    max_delete_per_day: 5      # ramp step 1; -> 40 (above the ~34/day inflow) at steady state
+    max_delete_pct: 2
+    max_merge_per_run: 40
+    purge_after_days: 30
+    # subject_aliases lives ONLY in the gitignored config/settings.yml -- it maps
+    # uids to the names people are called by, which is personal data.
 suno:
   api_url: https://api.sunoapi.org
   api_key: ...
@@ -928,6 +1008,39 @@ Log rotation: size-based — rotates at `max_size_mb`, keeps `keep_files` old fi
 ---
 
 ## Operations
+
+### Knowledge embedding storage — backfill and cutover
+
+Migration 023 added `knowledge.embedding_blob` (packed float32). New facts are written to **both** columns while `knowledge.dual_write_legacy` is true, which is what makes a `git revert` of the deploy safe. The cutover to blob-only is a separate, deliberate, partly-irreversible sequence — run it in this order:
+
+```bash
+docker compose exec bot bundle exec rake knowledge:pack_embeddings   # batched, resumable, safe on a live bot
+docker compose exec bot bundle exec rake knowledge:verify_embeddings # must print PASS
+```
+
+`pack_embeddings` uses `update_all`, so the running bot's `EmbeddingCache` is untouched and **no restart is needed** — the vector values don't change, only their storage. Rows whose legacy JSON won't parse are skipped and listed; they keep their JSON.
+
+Only once `verify_embeddings` passes and the cache has run clean for a few days:
+
+1. ssh in, set `knowledge: {dual_write_legacy: false}` in `config/settings.yml` (never scp it — see the rules in CLAUDE.md), restart the bot.
+2. `rake knowledge:drop_legacy_embeddings` — refuses while any row still has JSON but no usable blob, and refuses while `dual_write_legacy` is still on.
+3. Stop the bot, `sqlite3 db/bot.db 'VACUUM;'` (reclaims ~170 MB; needs ~2× the DB size free), start it again.
+
+**Rollback**: before the cutover, `git revert` alone is sufficient — the legacy column is still populated. After the cutover, run `rake knowledge:unpack_embeddings` first to rebuild the JSON column, then revert.
+
+| Task | Purpose |
+|------|---------|
+| `knowledge:pack_embeddings [BATCH=200] [CHAT_ID=]` | Backfill `embedding_blob` from legacy JSON. Resumable and idempotent |
+| `knowledge:verify_embeddings [SAMPLE=200]` | Compare both columns elementwise; PASS/FAIL, exits non-zero on mismatch |
+| `knowledge:unpack_embeddings` | Inverse — rebuild JSON from blobs. The post-cutover rollback path |
+| `knowledge:drop_legacy_embeddings [BATCH=500]` | Clear the legacy column. Destructive; guarded twice |
+| `knowledge:analyze [CHAT_ID=] [TOP=20]` | Pairwise similarity histogram + top near-pairs (pure Ruby, O(n²) — will not finish on a chat with thousands of facts) |
+| `knowledge:backfill_subjects [CHAT_ID=] [DRY_RUN=1]` | Populate `knowledge_subjects` from the curated `knowledge.subject_aliases` map. Deletes and re-derives only its own `source: 'backfill'` rows, so fixing a wrong alias is corrective, not additive |
+| `knowledge:cluster_preview [CHAT_ID=] [SUBJECT_THRESHOLD=] [THRESHOLD=] [SHOW=8]` | Run both candidate generators with **no LLM calls and no writes**. Prints cluster counts, a size histogram, the residual-norm distribution (for choosing `subject_min_residual`) and random samples. Calibrate every threshold here |
+| `knowledge:review [CHAT_ID=] [DRY_RUN=1] [MAX_CHUNKS=]` | Run the dedup sweep. `DRY_RUN=1` judges and reports `would_merge`/`would_remove` without writing. **Restart the bot afterwards** — `after_commit` cache invalidation only fires in the writing process |
+| `knowledge:purge_deleted` | Hard-delete tombstones older than `review.purge_after_days`, protecting sources of merges still inside the rollback window |
+| `knowledge:rollback_merges SINCE=...` | Undo review merges: hard-delete the merged facts and restore their sources. Run **before** reverting Deploy 2 code |
+| `knowledge:compact` | Removed — exits 1 pointing at `knowledge:review` |
 
 ### Backing up the prod DB
 

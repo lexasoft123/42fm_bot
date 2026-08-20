@@ -18,7 +18,8 @@ require_relative '../lib/embedding_service'
 require_relative '../lib/knowledge_base'
 require_relative '../lib/commands/knowledge_add'
 require_relative '../lib/commands/knowledge_delete'
-require_relative '../lib/commands/knowledge_compact'
+require_relative '../lib/commands/knowledge_review'
+require_relative '../lib/commands/knowledge_restore'
 require_relative '../lib/task_runner'
 require_relative '../lib/reply_markup_formatter'
 require_relative '../lib/message_sender'
@@ -1201,7 +1202,10 @@ class RequireAdminTest < BotTest
     result = Commands::KnowledgeDelete.new(ctx).execute
     assert_equal :text, result.type
     assert_match(/Забыл/, result.payload)
-    assert_nil Knowledge.find_by(id: kid)
+    # Deletion is soft since Deploy 2: the row survives with a tombstone so an
+    # admin can undo it with `бот верни`, but it leaves every read path.
+    assert_nil Knowledge.live.find_by(id: kid)
+    assert_equal 'admin', Knowledge.find_by(id: kid).deleted_reason
   end
 end
 

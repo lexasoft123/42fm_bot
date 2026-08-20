@@ -88,6 +88,12 @@ chat_gpt:
       provider: anthropic
       model: claude-sonnet-4-6
       max_tokens: 16000
+    # Knowledge dedup judge. High-volume mechanical judgement over small
+    # clusters -- flash is the right tier, and materially cheaper than the
+    # v4-pro used for extraction.
+    knowledge_review:
+      provider: deepseek
+      model: deepseek-v4-flash
     embedder:
       provider: openai
       model: text-embedding-3-small
@@ -211,9 +217,61 @@ horoscope:
 knowledge:
   top_k: 3
   extract_every: 50
+  # Keep writing the legacy JSON `embedding` column alongside the packed
+  # float32 `embedding_blob`. This is the rollback path for migration 023: with
+  # it off, facts created after the deploy exist only in the new format, so
+  # reverting the code would silently make them unsearchable. Flip to false
+  # only after `rake knowledge:verify_embeddings` passes and the cache has run
+  # clean in prod; then `rake knowledge:drop_legacy_embeddings` + VACUUM.
+  dual_write_legacy: true
   compact_at: 500
-  compact_threshold: 0.7
   compact_cooldown_hours: 6
+  # --- candidate generation (see .claude/rules/knowledge.md) ---
+  # G1, raw cosine. Measured over all 18.8M pairs of the prod main chat the
+  # maximum similarity between any two facts is 0.6994, so the old 0.7 could
+  # never match anything at all.
+  compact_threshold: 0.66
+  compact_min_pairwise: 0.62
+  # G2, per-person centroid-removed residual space. This is the PRODUCTIVE
+  # generator: measured against the real judge it supplied 9.7% of candidates
+  # but 64% of the merges (23% hit rate vs G1's 4.4%).
+  #
+  # Deliberately loose. Raw candidate precision here is poor -- eyeballing the
+  # clusters at 0.42 shows whole biographies grouped together -- but the LLM
+  # judge is the precision filter by design, and it demonstrably copes: judging
+  # 60 clusters that exist ONLY at 0.42 (not at 0.55) gave the SAME 20% hit
+  # rate, and every merge it returned was correct on inspection, including a
+  # near-verbatim duplicate that 0.55 could not see. Tightening this to 0.55
+  # cut candidates from 414 to 30 and threw away ~3x the yield for no quality
+  # gain. Do not tighten it on the basis of how the raw clusters look; measure
+  # the judge's output.
+  subject_threshold: 0.42
+  subject_min_pairwise: 0.38
+  subject_min_facts: 20
+  # Guard against clustering facts that sit near their bucket centroid, whose
+  # residual direction is mostly noise once renormalized. Measured on the prod
+  # main chat the residual norms are min 0.64 / p10 0.73 / median 0.81, i.e. no
+  # fact is anywhere near its centroid -- so 0.0 (disabled) is the MEASURED
+  # right value here, not an oversight. Re-check with `rake knowledge:cluster_preview`,
+  # which prints the distribution, before assuming it stays true.
+  subject_min_residual: 0.0
+  max_cluster: 8
+  review:
+    # Ships DORMANT. The dedup sweep is the only path that deletes facts, and an
+    # LLM is the deciding actor -- it should not run against an EmbeddingCache
+    # that has never run in prod. Flip to true after the cache has been healthy
+    # for a week (see docs/adr/005). Until then `бот ревизия знаний` and
+    # `rake knowledge:review` still work on demand.
+    enabled: false
+    ttl_days: 30            # don't re-judge a fact within this window
+    max_chunks_per_run: 60  # bounds one run's LLM calls and worker time
+    utc_offset: 3
+    review_min_facts: 200   # skip small chats: they'd pay the cost for ~no yield
+    min_age_days: 3
+    max_delete_per_day: 5   # ramp step 1; raise to 40 (> the ~34/day inflow) at steady state
+    max_delete_pct: 2
+    max_merge_per_run: 40
+    purge_after_days: 30
 
 suno:
   api_url: 'https://api.sunoapi.org'

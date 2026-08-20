@@ -5,7 +5,7 @@ class Chat < ActiveRecord::Base
   has_many :messages,         foreign_key: :chat_id
   has_many :background_tasks, foreign_key: :chat_id
   has_many :api_usages,       foreign_key: :chat_id
-  has_many :knowledge_facts,  class_name: 'Knowledge', foreign_key: :chat_id
+  has_many :knowledge_facts,  -> { live }, class_name: 'Knowledge', foreign_key: :chat_id
 
   # Legacy config/seed data uses the literal title "unknown" — treat it
   # like no title at all. Shared by the admin menu views and

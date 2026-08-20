@@ -19,7 +19,7 @@ require_relative '../lib/commands/gpt_chat'
 %w[admin_menu_open tts_voice bober_voice order_block order_request
    radio_search radio_track stats radio_queue weather listeners
    remove_track remaining history radio_top meta help knowledge_add
-   knowledge_list knowledge_delete knowledge_compact news rules quote
+   knowledge_list knowledge_delete knowledge_review knowledge_restore news rules quote
    wrapped dice phrase_top task_queue cost_report fallback_reply
    registry].each { |f| require_relative "../lib/commands/#{f}" }
 

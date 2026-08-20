@@ -32,6 +32,10 @@ TEST_FILES := \
 	test/image_gen_catalog_test.rb \
 	test/generate_image_tool_test.rb \
 	test/knowledge_base_test.rb \
+	test/embedding_cache_test.rb \
+	test/knowledge_review_test.rb \
+	test/knowledge_cluster_test.rb \
+	test/knowledge_subjects_test.rb \
 	test/chat_context_serialize_test.rb \
 	test/convert_to_wav_tool_test.rb \
 	test/cover_audio_tool_test.rb \

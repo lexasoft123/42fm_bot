@@ -122,6 +122,7 @@ How-to recipes (add a command, patterns, settings, migrations): `docs/architectu
 | Background tasks | `lib/task_runner.rb` + `lib/task_handlers/*.rb` + `models/background_task.rb` |
 | Suno (compose / add-vocals / cover / cover-art / WAV) | `lib/suno_client.rb` + `lib/task_handlers/suno_*.rb` + `lib/agent/tools/{suno,add_vocals,cover_audio,cover_art,convert_to_wav}.rb` — see `.claude/rules/suno.md` |
 | Image generation (FLUX / Atlas / CloseRouter; agent picks model per request) | `lib/image_gen/*.rb` (incl. `catalog.rb`) + `lib/model_provider_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/agent/tools/image_gen.rb` — see `.claude/rules/image-gen.md` |
+| Knowledge base / embeddings / dedup | `lib/knowledge_base.rb` + `lib/knowledge_base/{cluster,review}.rb` + `lib/embedding_cache.rb` + `models/knowledge{,_subject}.rb` + `rake knowledge:*` — see `.claude/rules/knowledge.md` |
 | Shared handler context | `lib/chat_context.rb` — `ChatContext` module (chat messages + knowledge for task handlers) |
 | Agent scratchpad / events / cron | `lib/agent/scratchpad.rb` + `lib/cron_scheduler.rb` + `lib/task_handlers/agent_event_*.rb` — see `.claude/rules/agent-runtime.md` |
 | Admin menu / access requests / chat labels | `lib/admin_menu/*.rb` + `lib/access_request.rb` + `models/chat.rb` — see `.claude/rules/admin-menu.md` |
@@ -132,7 +133,7 @@ How-to recipes (add a command, patterns, settings, migrations): `docs/architectu
 
 ## Services
 
-`Radio` (Liquidsoap TCP, lazy connect), `Song` (music library with FTS5 + Levenshtein fuzzy matching), `MusicScanner` (populates songs DB from file tags), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`/`.call_raw`), `Agent::Runner` (agentic tool-use loop over GptMaster), `Agent::ToolRegistry` (tool definitions for agent mode), `TaskRunner` (generic DB-backed background task poller + handler registry), `SunoClient` (Suno AI song generation API, V5 model), `ImageGen::FluxAdapter` (FLUX 2 via api.bfl.ai), `ImageGen::AtlasAdapter` (Atlas Cloud, default model Wan 2.7), `ImageGen::CloseRouterImgAdapter` (CloseRouter Nano Banana Pro — synchronous), `ModelProviderClient` (generic Bearer+JSON HTTP client), `ChatContext` (shared chat context + knowledge lookup for task handlers), `EmbeddingService` (OpenAI-compatible embeddings), `KnowledgeBase` (semantic RAG — store/search/auto-extract/compact facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope`, `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice`
+`Radio` (Liquidsoap TCP, lazy connect), `Song` (music library with FTS5 + Levenshtein fuzzy matching), `MusicScanner` (populates songs DB from file tags), `GptMaster` (Anthropic/OpenAI-compatible, `.chat`/`.ask`/`.call_raw`), `Agent::Runner` (agentic tool-use loop over GptMaster), `Agent::ToolRegistry` (tool definitions for agent mode), `TaskRunner` (generic DB-backed background task poller + handler registry), `SunoClient` (Suno AI song generation API, V5 model), `ImageGen::FluxAdapter` (FLUX 2 via api.bfl.ai), `ImageGen::AtlasAdapter` (Atlas Cloud, default model Wan 2.7), `ImageGen::CloseRouterImgAdapter` (CloseRouter Nano Banana Pro — synchronous), `ModelProviderClient` (generic Bearer+JSON HTTP client), `ChatContext` (shared chat context + knowledge lookup for task handlers), `EmbeddingService` (OpenAI-compatible embeddings), `EmbeddingCache` (per-chat normalized float32 matrix; keeps the knowledge read path off the DB), `KnowledgeBase` (semantic RAG — store/search/auto-extract), `KnowledgeBase::Cluster` + `KnowledgeBase::Review` (dedup: candidate generation over two similarity spaces, then an LLM judge — the only path that deletes facts), `Polly` (AWS TTS), `TtsService` (wraps Polly + URL), `Gogolmogol` (Google Search), `Horoscope`, `Weather` (OpenWeatherMap), `ReplyMaster` (YAML replies), `Dice`
 
 Details on each: `docs/architecture.md` § Service Modules.
 
@@ -146,7 +147,8 @@ Columns and semantics: `docs/architecture.md#database-schema`.
 | `users` | Telegram users: name, role (`new`/`member`/`admin`), last track order |
 | `messages` | Full chat history (user + bot rows), reply/thread/attachment/reaction metadata |
 | `phrases` | User-submitted catchphrases |
-| `knowledge` | Semantic RAG facts with embeddings, per chat |
+| `knowledge` | Semantic RAG facts with embeddings, per chat (soft-deleted via `deleted_at`) |
+| `knowledge_subjects` | Many-to-many: which participants each fact is about |
 | `knowledge_compact_log` | One row per knowledge-compaction run |
 | `background_tasks` | Generic async task queue (suno/image_gen/agent_event/...) |
 | `songs` | Music library metadata from file tags |
