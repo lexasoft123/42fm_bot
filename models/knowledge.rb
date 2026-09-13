@@ -47,9 +47,11 @@ class Knowledge < ActiveRecord::Base
     JSON.parse(embedding)
   end
 
-  # Writes go to the blob. While `knowledge.dual_write_legacy` is on (the
-  # shipped default) the legacy JSON column is written too, so that reverting
-  # the code leaves every post-deploy fact still readable by the old path.
+  # Writes go to the blob. The legacy JSON column is written too only while
+  # `knowledge.dual_write_legacy` is on. It was the rollback path for migration
+  # 023 and shipped on; it is OFF by default since the blob path ran clean in
+  # prod for three weeks (2026-09). `rake knowledge:unpack_embeddings` rebuilds
+  # the JSON from blobs if the old read path is ever needed again.
   # Never assign packed bytes to `embedding` — AR raises
   # Encoding::UndefinedConversionError binding ASCII-8BIT to a text column.
   # An empty or nil vector stores nothing rather than an empty blob: an empty
@@ -96,7 +98,8 @@ class Knowledge < ActiveRecord::Base
 
   def self.dual_write_legacy?
     cfg = (Settings.knowledge rescue nil)
-    cfg.nil? || cfg.fetch('dual_write_legacy', true)
+    return false unless cfg.respond_to?(:fetch)
+    cfg.fetch('dual_write_legacy', false)
   end
 
   # Single choke point for EmbeddingCache invalidation. Covers every writer:

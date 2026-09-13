@@ -5,6 +5,7 @@ require 'set'
 require_relative 'embedding_cache'
 require_relative 'knowledge_base/cluster'
 require_relative 'knowledge_base/review'
+require_relative 'knowledge_base/batch_dedup'
 
 class KnowledgeBase
   COMPACT_MUTEX = Mutex.new
@@ -26,9 +27,13 @@ class KnowledgeBase
   PROMPT
 
   class << self
+    # `embedding:` defaults to computing the vector here, which is an HTTP call.
+    # A caller that invokes `add` inside a transaction MUST embed first and pass
+    # the result in: see the note in `extract_and_store`.
     def add(topic:, content:, chat_id:, source: 'manual', subjects: nil,
-            subject_source: 'extract', merged_from: nil, reviewed_at: nil)
-      vec = EmbeddingService.embed(content)
+            subject_source: 'extract', merged_from: nil, reviewed_at: nil,
+            embedding: :compute)
+      vec = embedding == :compute ? EmbeddingService.embed(content) : embedding
       k = Knowledge.new(topic: topic, content: content, chat_id: chat_id, source: source)
       # `vec` may be [] when the embeddings API returns a malformed 200, and []
       # is truthy -- guard on emptiness, not truthiness.
@@ -91,41 +96,87 @@ class KnowledgeBase
       entry = EmbeddingCache.fetch(chat_id)
       return empty_review_stats if entry.ids.empty?
 
-      # Resumability: facts judged within ttl_days are excluded from candidate
-      # generation, so a nightly run doesn't re-pay for the same refusals. This
-      # is also what stops a just-merged fact being immediately re-merged.
-      ttl = rcfg.fetch('ttl_days', 30)
-      recently_judged = Knowledge.live.where(chat_id: chat_id)
-                                 .where('reviewed_at IS NOT NULL AND reviewed_at > ?', Time.now - ttl * 86_400)
-                                 .pluck(:id).to_set
-      clusters = Cluster.build(entry, subject_buckets(chat_id), cluster_params(cfg), skip: recently_judged)
-      stats = Review.run(
-        chat_id: chat_id, clusters: clusters, logger: compact_logger,
-        config: Review::Config.new(
-          max_delete_per_day: rcfg.fetch('max_delete_per_day', 5),
-          max_delete_pct:     rcfg.fetch('max_delete_pct', 2),
-          max_merge_per_run:  rcfg.fetch('max_merge_per_run', 40),
-          min_age_days:       rcfg.fetch('min_age_days', 3),
-          max_chunks:         max_chunks || rcfg['max_chunks_per_run'],
-          dry_run:            dry_run
+      ttl     = rcfg.fetch('ttl_days', 30)
+      min_age = rcfg.fetch('min_age_days', 3)
+      clusters = Cluster.build(entry, subject_buckets(chat_id), cluster_params(cfg),
+                               skip: unavailable_for_review(chat_id, ttl: ttl, min_age: min_age))
+      stats = Review.new_stats
+      # An explicit flag rather than `$!`: `$!` also holds an exception a CALLER
+      # is still handling, so review! invoked from inside someone's rescue or
+      # ensure would look "failed" even after a clean run.
+      completed = false
+      begin
+        Review.run(
+          chat_id: chat_id, clusters: clusters, logger: compact_logger, stats: stats,
+          config: Review::Config.new(
+            max_delete_per_day: rcfg.fetch('max_delete_per_day', 5),
+            max_delete_pct:     rcfg.fetch('max_delete_pct', 2),
+            max_merge_per_run:  rcfg.fetch('max_merge_per_run', 40),
+            min_age_days:       min_age,
+            max_chunks:         max_chunks || rcfg['max_chunks_per_run'],
+            dry_run:            dry_run
+          )
         )
-      )
-      # Every fact we actually judged is stamped, so the next run moves on.
-      stamp_reviewed(chat_id, clusters) unless dry_run
+        completed = true
+      ensure
+        # Even if the run raises part-way, merges already applied must still be
+        # charged to the 24h deletion budget, which is computed from this log.
+        # Note the side effect: a failed run leaves a log row too, so
+        # maybe_trigger_review's cooldown applies before it re-enqueues.
+        record_review_run(chat_id, cfg, stats, dry_run, run_failed: !completed)
+      end
+      stats
+    end
+
+    # Writes the run's log row, then stamps what was judged. The log row goes
+    # first because it is what charges applied merges to the deletion budget.
+    #
+    # Stamp ONLY the facts the judge ruled on. Stamping every candidate -- the
+    # first version -- marked facts from clusters never sent (the run stopped on
+    # max_chunks, or on budget before judging anything) and locked them out of
+    # review for ttl_days unseen: 1,250 facts stamped on day one against ~650
+    # actually judged.
+    def record_review_run(chat_id, cfg, stats, dry_run, run_failed:)
+      judged = stats.delete(:judged_ids) || []
       # A dry run must not leave a log row that the budget would later read as
-      # spend, so it is recorded with dry_run: true and excluded from the sum.
+      # spend, so it is recorded with dry_run: true and zero removals.
       KnowledgeCompactLog.create!(
         chat_id: chat_id, run_type: 'review', dry_run: dry_run,
         merged: stats[:merged], removed: dry_run ? 0 : stats[:removed],
         deleted: dry_run ? 0 : stats[:deleted], chunks: stats[:chunks],
         kept: Knowledge.live.where(chat_id: chat_id).count,
-        threshold: cfg.fetch('subject_threshold', 0.55), created_at: Time.now
+        threshold: cfg.fetch('subject_threshold', 0.42), created_at: Time.now
       )
-      stats
+      stamp_reviewed(chat_id, judged) unless dry_run
+    rescue => e
+      compact_logger.error "review: could not record run for chat=#{chat_id}: #{e.class}: #{e.message}"
+      # If the run itself already failed, let THAT exception propagate rather
+      # than masking it with this one. Otherwise surface the failure.
+      raise unless run_failed
     end
 
-    def stamp_reviewed(chat_id, clusters)
-      ids = clusters.flatten.uniq
+    # Facts that must not be candidates in this run. None of them is stamped:
+    # being unavailable is not the same as having been judged.
+    #
+    # * Judged within ttl_days -- resumability; don't re-pay for a refusal.
+    # * Younger than min_age_days -- an ELIGIBILITY rule, applied before the
+    #   judge rather than to its verdict. The first version dropped young facts'
+    #   merges after the judge approved them and then stamped them anyway, so
+    #   every new fact got exactly one look, while too young to act on, and was
+    #   locked out for 30 days: all 14 merges the judge proposed in the 24 days
+    #   after launch were discarded this way. Excluded here, an unstamped young
+    #   fact simply becomes a candidate once it is old enough.
+    # * Manual facts -- immune to review; excluding them up front stops them
+    #   occupying cluster slots only to be stripped out again before judging.
+    def unavailable_for_review(chat_id, ttl:, min_age:)
+      Knowledge.live.where(chat_id: chat_id)
+               .where('(reviewed_at IS NOT NULL AND reviewed_at > :judged) OR created_at > :young OR source = :manual',
+                      judged: Time.now - ttl * 86_400, young: Time.now - min_age * 86_400, manual: 'manual')
+               .pluck(:id).to_set
+    end
+
+    def stamp_reviewed(chat_id, ids)
+      ids = Array(ids).uniq
       return if ids.empty?
       # update_all deliberately: this touches no vector, so the cache does not
       # need invalidating once per stamped row.
@@ -148,17 +199,16 @@ class KnowledgeBase
         threshold:            cfg.fetch('compact_threshold', 0.66),
         min_pairwise:         cfg.fetch('compact_min_pairwise', 0.62),
         max_cluster:          cfg.fetch('max_cluster', 8),
-        subject_threshold:    cfg.fetch('subject_threshold', 0.55),
-        subject_min_pairwise: cfg.fetch('subject_min_pairwise', 0.50),
+        # Fallbacks match the shipped settings.common.yml values.
+        subject_threshold:    cfg.fetch('subject_threshold', 0.42),
+        subject_min_pairwise: cfg.fetch('subject_min_pairwise', 0.38),
         subject_min_facts:    cfg.fetch('subject_min_facts', 20),
         subject_min_residual: cfg.fetch('subject_min_residual', 0.0)
       )
     end
 
     def empty_review_stats
-      { merged: 0, removed: 0, deleted: 0, chunks: 0,
-        would_merge: 0, would_remove: 0, parse_failures: 0, skipped: 0,
-        cap_reached: false }
+      Review.new_stats.except(:judged_ids)
     end
 
     def extract_and_store(messages, chat_id:)
@@ -173,33 +223,51 @@ class KnowledgeBase
       return if raw.nil? || raw.strip.empty? || raw == 'жпт не жпт'
       json_str = raw.gsub(/\A```(?:json)?\n?|\n?```\z/, '').strip
       facts    = JSON.parse(json_str)
+      return unless facts.is_a?(Array)
 
-      # No write-time dedup gate. The old `similar_exists?` rejected only at
-      # >0.92 cosine; measured against the whole prod main chat the maximum
-      # similarity between ANY two of its 6,133 facts is 0.6994, so the gate
-      # had never once fired -- while costing a full per-chat table scan plus
-      # an embeddings API call for every extracted fact. Deduplication happens
-      # in compaction/review, at thresholds where duplicates actually exist.
-      # One transaction for the batch: each `add` would otherwise fire its own
-      # after_commit -> EmbeddingCache.invalidate, so a search interleaved with
-      # extraction could pay 3-7 separate cold rebuilds instead of one.
       # Only uids that actually appear as message authors in this batch may
       # become subjects: a hallucinated uid must not create a phantom subject.
       known_uids = messages.filter_map { |m| m.try(:uid)&.to_i }.to_set
 
-      stored = 0
+      # EVERYTHING that touches the network happens here, before the
+      # transaction below. Transactions on this stack are DEFERRED (the sqlite3
+      # gem's default; AR 7.2 passes no mode), so SQLite takes the write lock at
+      # the transaction's FIRST WRITE and holds it until COMMIT. The first
+      # version embedded each fact inside the loop, so after the first INSERT
+      # the lock was held across embeds 2..N -- several seconds per batch at
+      # p50 1.4s per call through the proxy. Every other writer (the listen loop
+      # saving incoming messages, ApiUsage.record, agent tools) waited out the
+      # 5s busy_timeout and failed: 48 BusyExceptions and 27 unsaved chat
+      # messages in the first 24 days after this was introduced.
+      prepared = facts.filter_map do |fact|
+        next unless fact.is_a?(Hash) && fact['topic'] && fact['content']
+        # A malformed or missing `subjects` must never cost us the fact -- this
+        # is the most frequently run LLM call in the system.
+        subjects = (Array(fact['subjects']).map(&:to_i) & known_uids.to_a rescue [])
+        { topic: fact['topic'].to_s, content: fact['content'].to_s, subjects: subjects,
+          embedding: EmbeddingService.embed(fact['content'].to_s) }
+      end
+
+      # The extractor often states one conversation twice within a single
+      # batch. Collapse those before anything is persisted -- no tombstones,
+      # no deletion budget, and no minimum-age wait. Also network, so also here.
+      prepared, collapsed = BatchDedup.run(
+        prepared, chat_id: chat_id, logger: compact_logger,
+        threshold: (Settings.knowledge || {}).fetch('batch_dedup_threshold', BatchDedup::DEFAULT_THRESHOLD)
+      )
+
+      # One transaction for the WRITES ONLY: each save would otherwise fire its
+      # own after_commit -> EmbeddingCache.invalidate. Nothing in this block may
+      # block -- test/knowledge_subjects_test.rb asserts no embedding call runs
+      # inside it.
       ActiveRecord::Base.transaction do
-        facts.each do |fact|
-          next unless fact['topic'] && fact['content']
-          # A malformed or missing `subjects` must never cost us the fact --
-          # this is the most frequently run LLM call in the system.
-          subjects = (Array(fact['subjects']).map(&:to_i) & known_uids.to_a rescue [])
-          add(topic: fact['topic'], content: fact['content'], chat_id: chat_id,
-              source: 'auto', subjects: subjects)
-          stored += 1
+        prepared.each do |f|
+          add(topic: f[:topic], content: f[:content], chat_id: chat_id, source: 'auto',
+              subjects: f[:subjects], embedding: f[:embedding])
         end
       end
-      LOGGER.debug "[chat=#{chat_id}] #{name}.extract_and_store: #{stored} new facts from #{messages.size} messages"
+      LOGGER.debug "[chat=#{chat_id}] #{name}.extract_and_store: #{prepared.size} new facts from " \
+                   "#{messages.size} messages (#{collapsed} in-batch duplicate(s) collapsed)"
       maybe_trigger_review(chat_id: chat_id)
     rescue => e
       LOGGER.error "[chat=#{chat_id}] #{name}.extract_and_store: #{e.message}"

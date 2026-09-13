@@ -20,9 +20,11 @@ class KnowledgeBase
   # Subtracting the bucket centroid cancels that shared direction. Measured on
   # prod, G2 finds 252 duplicate pairs that G1 cannot see at any safe threshold
   # (reaching them globally means dropping to ~0.58, which yields 5,475 pairs at
-  # ~0% precision and a 3,113-fact giant component). The 0.55 threshold was
-  # calibrated by sampling: 0.42 clusters whole biographies, 0.50 measures ~37%
-  # precision, 0.55 ~80%, and the residual space has no pairs above ~0.65.
+  # ~0% precision and a 3,113-fact giant component). The shipped threshold is
+  # 0.42. Eyeballed raw clusters there look poor (whole biographies grouped),
+  # but the judge is the precision filter: clusters that exist only at 0.42
+  # gave the same ~20% judge hit rate as 0.55 with correct merges, and 0.55
+  # cut candidates from 414 to 30. Nothing exists above ~0.65 in this space.
   #
   # The spaces must never be mixed inside one clustering pass. Those 252 pairs
   # sit at RAW cosine 0.58-0.66, so any raw-space admission test at 0.66
@@ -95,6 +97,12 @@ class KnowledgeBase
       # letting `claimed` lock a fact into whichever came first would make the
       # choice depend on SQLite row order.
       proposals = []
+      # Facts already unavailable before G2 runs (the caller's `skip`: judged
+      # recently, too young, or manual). Seeding each bucket's local claim set
+      # with them keeps them out of proposals entirely. Without it a proposal
+      # like [old1, old2, young3] was discarded WHOLE at acceptance, losing a
+      # perfectly good [old1, old2] pair.
+      unavailable = claimed.dup
       buckets.each do |_uid, fact_ids|
         idx = fact_ids.filter_map { |id| pos[id] }.uniq.sort
         next if idx.size < params.subject_min_facts
@@ -113,9 +121,9 @@ class KnowledgeBase
 
         res  = res[keep, true] / Numo::SFloat.maximum(norms[keep].reshape(keep.size, 1), 1e-12)
         ids  = keep.map { |i| entry.ids[idx[i]] }
-        # Local `claimed` so each bucket proposes independently.
+        # Local claim set so each bucket proposes independently of the others.
         seed_and_absorb(res, ids, params.subject_threshold,
-                        params.subject_min_pairwise, params.max_cluster, {}).each do |cluster|
+                        params.subject_min_pairwise, params.max_cluster, unavailable.dup).each do |cluster|
           proposals << [cohesion(res, ids, cluster), cluster]
         end
       end

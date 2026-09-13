@@ -1,6 +1,6 @@
 # ADR-005: Person-Bucketed Dedup with an LLM Judge
 
-**Status:** Accepted
+**Status:** Accepted — amended 2026-09-13 after three weeks in production (see "What happened in production")
 **Date:** 2026-08-20
 
 > ADR-004 is reserved for the deferred work on capping/retiring facts and extraction cadence.
@@ -144,6 +144,71 @@ TaskRunner worker; subject coverage needs periodic re-curation.
 **Risks:** a bad alias produces plausible-looking wrong clusters — mitigated by explicit per-uid
 regexes, sampled review, and the judge refusing; LLM over-deletion — mitigated by soft delete, the
 per-chat daily budget counting merge-sourced deletions, manual-fact immunity, and a dry-run mode.
+
+## What happened in production (amendment, 2026-09-13)
+
+A review 24 days after launch found the sweep had merged **41 facts on its first day and zero
+afterwards**, and that the deploy had introduced a lock regression. Nothing in the decision above was
+wrong; two implementation details defeated it, and a third bug came along in the same deploy.
+
+**The sweep stalled for two compounding reasons.**
+
+1. *Every candidate was stamped reviewed, judged or not.* On day one 1,250 facts were stamped against
+   ~650 actually sent to the judge — the run stopped at `max_chunks`, and budget-blocked runs stamped
+   everything they would have looked at. The rest were locked out for `ttl_days` unseen.
+2. *Minimum age was enforced after the verdict, not before.* A young fact's approved merge was
+   discarded, and the fact was stamped anyway. Each new fact therefore got exactly one look, while too
+   young to act on, followed by a 30-day lockout. Reading the judge's raw answers from `gpt.log`:
+   **it proposed 14 merges in those 24 days, and all 14 were discarded this way** — 10 of them with
+   both facts zero days old. Reviews triggered straight after extraction made it worse.
+
+The symptom was not an error. The sweep ran four to six times a day, paid for 188 judge calls
+($0.036), and changed nothing — invisible without reading its output.
+
+**Most remaining duplicates are born together.** The 14 discarded merges were mostly the extractor
+restating one conversation twice *within a single batch* (ids 8258/8259, 8472/8473). The age guard's
+rationale — a new fact hasn't been corroborated yet — does not apply to siblings at all. They are now
+collapsed at extraction time, before saving (`BatchDedup`), under the same judge contract. Calibrated
+on 922 prod facts: judge-approved sibling duplicates sit at cosine 0.554–0.743, ordinary siblings p95
+0.50; a 0.50 threshold nominates all of them for ~88 judge calls a month.
+
+**The lock regression.** `extract_and_store` wrapped its batch in a transaction and embedded each fact
+inside it. Transactions here are DEFERRED — SQLite takes the write lock at the first write and holds it
+until COMMIT — so after each batch's first INSERT the lock was held across the remaining embeds, several
+seconds of HTTP per batch. (An earlier draft of this amendment said `BEGIN IMMEDIATE`; that is Rails 8's
+default, not this stack's. The rule is unchanged, the mechanism was misstated.) Result: **48 `SQLite3::BusyException`s in 24 days** against 2 in all
+prior history, every one within 10–30 s of a `knowledge_extract` call; **27 incoming chat messages
+never saved**; the listen loop frozen up to 10 s each time. The code reviewer flagged exactly this
+before launch. The fix was applied with a scripted string replacement that did not match and silently
+did nothing, and the test written to guard it recorded transaction state without asserting it. Both
+passed.
+
+**Fixes, all regression-tested against the shipped code (each new test fails on 56706cf):**
+
+- No network call inside any transaction: embed first, then a short write-only transaction
+  (`extract_and_store`, `apply_merge`). Guard tests assert `open_transactions == baseline` during every
+  embed *and* carry a negative control proving the detector sees a real transaction.
+- Stamp only facts the judge actually ruled on (`judged_ids`): not unreached clusters, not unparseable
+  answers, not a cluster whose verdict a cap cut off.
+- Eligibility before the judge: young, recently-judged and manual facts never enter a cluster and are
+  never stamped. G2's per-bucket proposals are seeded with that set, so one unavailable member no
+  longer discards an otherwise good cluster.
+- `rake knowledge:reset_reviewed` to clear the mis-stamps (merged facts keep theirs).
+- Found by the code review of these fixes: a merge larger than the whole daily cap (clusters go to 8,
+  the default cap is 5) would have left its cluster unstamped at the head of the queue forever — the
+  same "runs, pays, merges nothing" stall from a new cause. It is now ruled out as `oversized`. Also:
+  `apply_merge` no longer tombstones sources behind a merged fact it couldn't embed; batch dedup honours
+  the judge's `duplicate` deletes; the run log is written in an `ensure`.
+- Also fixed in passing: a top-level JSON array verdict raised out of the run; the cache rebuild read
+  the legacy JSON column for every row (~171 MB, p50 765 ms per rebuild); dual-write turned off after
+  three clean weeks on the blob path.
+
+**The read path worked as designed but was not the latency win it looked like.** Lookup fell from
+1,152 ms to p50 10 ms, yet `get_relevant_knowledge` still takes ~1.4 s: the query's own embeddings call
+through the proxy is 97% of it. That is the next lever, and outside this ADR.
+
+**Lesson worth more than any of the fixes:** a finding marked "applied" was never verified in the
+code, and a guard test was never shown to fail. Both are now checked explicitly.
 
 ## Rollback
 

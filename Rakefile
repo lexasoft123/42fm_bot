@@ -404,6 +404,29 @@ namespace :knowledge do
     puts "NOTE: restart the bot; then it is safe to revert the code."
   end
 
+  desc "Clear reviewed_at so facts become review candidates again (CHAT_ID=, DRY_RUN=1)"
+  task :reset_reviewed do
+    require './config/boot'
+    AppConfigurator.new.configure
+
+    # Use after changing candidate thresholds or the judge prompt -- or, once,
+    # to undo the first review version, which stamped every candidate whether
+    # or not the judge ever saw it and stamped age-blocked facts too, locking
+    # them out for ttl_days. Merged facts keep their stamp: it is set at
+    # creation so a fresh merge is not immediately re-merged. Costs nothing but
+    # re-judging (~$0.0002 per cluster); deletes nothing.
+    dry   = ENV['DRY_RUN'] == '1'
+    scope = Knowledge.live.where.not(reviewed_at: nil).where(merged_from: nil)
+    scope = scope.where(chat_id: ENV['CHAT_ID'].to_i) if ENV['CHAT_ID']
+    scope.group(:chat_id).count.each { |cid, n| puts "chat #{cid}: #{n} stamped fact(s)" }
+    if dry
+      puts "(dry run -- nothing cleared)"
+    else
+      n = scope.update_all(reviewed_at: nil)
+      puts "knowledge:reset_reviewed: cleared reviewed_at on #{n} fact(s)"
+    end
+  end
+
   desc "Deprecated alias for knowledge:review"
   task :compact do
     puts "knowledge:compact was replaced by knowledge:review -- compaction and the"

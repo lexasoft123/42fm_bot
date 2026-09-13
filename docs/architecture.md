@@ -234,11 +234,11 @@ Required keys: `telegram`, `auth`, `proxy`, `chat_gpt`, `voice_messages`, `aws`,
 | `phrases` | `user_id`, `content` (unique) — user-submitted catchphrases |
 | `knowledge` | `deleted_at` + `deleted_reason` (soft delete — `admin`/`merged`/`duplicate`/…; all read paths filter via `scope :live`), `reviewed_at`, `merged_from` (JSON array of source ids), `topic`, `content`, `embedding_blob` (packed float32 BLOB — `Array#pack('f*')`, ~6 KB/row, the read path), `embedding` (legacy JSON float array, ~29 KB/row — still dual-written while `knowledge.dual_write_legacy` is on, read only as a fallback), `source` (`manual`/`auto`), `chat_id` (bigint, indexed) |
 | `knowledge_subjects` | `knowledge_id` (FK, **ON DELETE CASCADE**), `uid` (Telegram user id, indexed), `source` (`extract`/`backfill`) — many-to-many: which participants a fact is *about*. Drives per-person centroid removal in dedup, and is the prerequisite for the per-person retirement in ADR-004 |
-| `knowledge_compact_log` | `chat_id`, `merged`, `removed`, `deleted`, `kept`, `chunks`, `threshold`, `run_type`, `dry_run`, `created_at` — one row per review run; the daily deletion budget is `sum(removed + deleted)` over today's non-dry rows |
+| `knowledge_compact_log` | `chat_id`, `merged`, `removed`, `deleted`, `kept`, `chunks`, `threshold`, `run_type`, `dry_run`, `created_at` — one row per review run; `removed` is the run's TOTAL soft-deletes and `deleted` the subset from direct deletes, so the daily deletion budget is `sum(removed)` over the last 24h (summing both would charge a direct delete twice) |
 | `background_tasks` | `task_type`, `status` (`pending`/`done`/`failed`), `chat_id`, `external_id`, `params` (JSON), `result` (JSON), `attempts`, `max_attempts` |
 | `songs` | `title`, `artist`, `album`, `genre`, `year` (int), `filepath` (unique, relative to music root), `duration` (int, seconds), `category` (top-level dir) |
 | `songs_fts` | FTS5 virtual table indexing `title`, `artist`, `album`, `genre`, `category` — content table mode (`content='songs'`, `content_rowid='id'`), `unicode61 remove_diacritics 1` tokenizer, auto-synced via INSERT/UPDATE/DELETE triggers |
-| `api_usage` | `chat_id` (nullable), `user_uid` (nullable — null for knowledge extraction/compaction), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_review`/`suno_compose`/`suno_tags`/`image_prompt`), `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per API response; `ApiUsage.record` is fire-and-forget (rescues errors so telemetry never breaks replies) |
+| `api_usage` | `chat_id` (nullable), `user_uid` (nullable — null for knowledge extraction/compaction), `model`, `purpose` (`agent`/`main_chat`/`translate`/`knowledge_extract`/`knowledge_review`/`knowledge_batch_dedup`/`suno_compose`/`suno_tags`/`image_prompt`), `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_write_tokens`, `cost_cents` (decimal 10,4), `created_at` — one row per API response; `ApiUsage.record` is fire-and-forget (rescues errors so telemetry never breaks replies) |
 | `chat_states` | `chat_id` (PK, bigint), `scratchpad` (JSON: `intentions`/`notes`/`expectations` arrays of `{id, content, created_at}` + the rules-war `rules` array `{id: r-NNN, content, set_by, set_by_name, target, expires_at, challenges_survived, court?}` + top-level `challenge_log` timestamps), `updated_at`. Per-chat agent working memory; written via the `remember`/`forget` agent tools and the rules-game tools, read into `{SCRATCHPAD}` on every agent turn. Hard cap 6000 chars with FIFO eviction (rules exempt — see "Rules-war game"). See ADR-003. |
 
 **Relationships:**
@@ -300,7 +300,7 @@ Media sends (sticker/image/voice) thread the originating `message_thread_id` so 
 Calls an OpenAI-compatible embeddings API (`embeddings.api_url`) to produce float vectors for text. Returns `nil` on failure. Used by `KnowledgeBase`.
 
 ### EmbeddingCache — `lib/embedding_cache.rb`
-One L2-normalized `Numo::SFloat` matrix per chat (plus the parallel array of `Knowledge` ids), so scoring a query is a single BLAS matvec with **zero DB reads**. Before this, `search` read and `JSON.parse`d the whole per-chat table on every agent turn — 171 MB / ~1650 ms for the prod main chat (6,133 facts), inside `bot.listen`'s single-threaded loop. Measured after: ~2 ms per turn, 35.9 MB resident.
+One L2-normalized `Numo::SFloat` matrix per chat (plus the parallel array of `Knowledge` ids), so scoring a query is a single BLAS matvec with **zero DB reads**. Before this, `search` read and `JSON.parse`d the whole per-chat table on every agent turn — 171 MB / ~1650 ms for the prod main chat (6,133 facts), inside `bot.listen`'s single-threaded loop. Measured in prod over the following three weeks (1,010 calls on the main chat): **lookup p50 10 ms / p99 25 ms** on a cache hit (93% of calls), 35.9 MB resident. Note that `get_relevant_knowledge` still takes **~1.4 s p50**: the query's own embeddings call (through the SOCKS proxy) is 97% of it — see the `embed_ms` field of the `kb_search` log line.
 
 - `fetch(chat_id)` → `Entry(ids, matrix, dim)`, never `nil`, lazily built
 - `invalidate(chat_id)` / `invalidate_all` / `reset_for_test!` / `stats`
@@ -309,16 +309,22 @@ Two invariants that are easy to break:
 - **`fetch` never blocks.** The per-chat build lock is taken with `try_lock`, never `synchronize`; a thread that loses the race builds its own copy rather than waiting. `fetch` is reached from the listen loop, the extraction `Thread`, TaskRunner workers and CronScheduler, and a cold build on the legacy path takes ~1.7 s.
 - **Invalidation is an `after_commit` callback on `Knowledge`**, not per-call-site discipline — a stale cache means silently wrong search results. `update_all`/`delete_all`/raw SQL bypass it; the only such call site is the offline backfill, which changes storage format but not vector values.
 
+A rebuild reads the legacy JSON `embedding` column **only for rows that have no blob** (a second, restricted query). It originally plucked both columns for every row, so while dual-write kept the JSON populated each rebuild allocated ~171 MB of strings it never parsed — p50 765 ms per rebuild in prod. That removes the Ruby cost but not all the I/O: `embedding_blob` sits *after* `embedding` in the row, so SQLite still reads through the JSON bytes to reach the blob until `rake knowledge:drop_legacy_embeddings` nulls them (measured on a synthetic table: 80 ms old query, 45 ms new, 16 ms once the JSON is gone).
+
 Build-time hardening: rows whose embedding length differs from the chat's modal length are excluded and warned about (`Numo`'s `cast` silently zero-pads ragged rows, so a change of embeddings model would otherwise corrupt every score), and norms are clamped so a stored zero-norm vector scores 0.0 instead of producing `NaN` (which made `sort_by` raise).
 
 ### KnowledgeBase — `lib/knowledge_base.rb`
 Semantic RAG store:
-- `KnowledgeBase.add(topic:, content:, chat_id:, source:, subjects:, merged_from:, reviewed_at:)` — embed + store a fact, with its subject uids
+- `KnowledgeBase.add(topic:, content:, chat_id:, source:, subjects:, merged_from:, reviewed_at:, embedding:)` — embed + store a fact, with its subject uids. `embedding:` defaults to computing the vector (an HTTP call); **any caller inside a transaction must embed first and pass it in**
 - `KnowledgeBase.search(query, chat_id:, top_k:, offset:)` — embed query, score it against the cached matrix, then load only the top-K rows. Emits a `kb_search: … embed_ms= score_ms= total_ms= cache=hit|miss` line to `bot.log`
-- `KnowledgeBase.extract_and_store(messages, chat_id:)` — uses `GptMaster.ask` with a structured prompt to extract 3–7 facts from recent chat messages, stores them as `source: 'auto'` with the `subjects` uids the model returned (validated against the uids actually present in the batch); calls `maybe_trigger_review` after each batch. Embedding happens **before** the write transaction — `add` embeds inline, and holding a SQLite write lock across several HTTP round-trips would stall the listen loop's own inserts
+- `KnowledgeBase.extract_and_store(messages, chat_id:)` — uses `GptMaster.ask` with a structured prompt to extract 3–7 facts from recent chat messages, stores them as `source: 'auto'` with the `subjects` uids the model returned (validated against the uids actually present in the batch); calls `maybe_trigger_review` after each batch. All network work — each fact's embedding, then `BatchDedup` — runs **before** the one short write transaction (see "No network calls inside a transaction" below)
 - `KnowledgeBase.review!(chat_id:, dry_run:, max_chunks:)` — the dedup entry point: builds candidate clusters, has the LLM judge each one, applies what survives validation and the daily budget. **The only path that deletes a fact.** Logs every before/after to `log/knowledge_compact.log` and one summary row to `knowledge_compact_log`
 
-**There is no write-time dedup gate.** The old `similar_exists?` rejected a new fact only above 0.92 cosine; measured across all 18,803,778 pairs of the prod main chat the maximum similarity between any two facts is **0.6994**, so it had never once fired — while costing a full per-chat table scan plus an embeddings API call for each of the 3–7 facts in every extraction batch. It was deleted. Deduplication happens in the review sweep, at thresholds where duplicates actually exist.
+**No network calls inside a transaction.** Transactions on this stack are DEFERRED (the sqlite3 gem's default; AR 7.2 passes no mode), so SQLite takes the write lock at the transaction's *first write* and holds it until COMMIT. The first version of `extract_and_store` embedded each fact inside its batch transaction, so after the first INSERT it held the lock across embeds 2..N of every batch; every other writer waited out the 5 s `busy_timeout` and failed — **48 `SQLite3::BusyException`s in 24 days, 27 of them incoming chat messages that were never saved**, and `bot.listen` frozen up to 10 s each time. `apply_merge` had the same shape. Both now embed first; `test/knowledge_subjects_test.rb` and `test/knowledge_review_test.rb` assert no embeddings call runs at a raised transaction depth.
+
+**Same-batch duplicates are collapsed at extraction** (`KnowledgeBase::BatchDedup`, `lib/knowledge_base/batch_dedup.rb`). The extractor pulls 3–7 facts from one conversation and often states the same thing twice (e.g. ids 8258/8259). Batch facts whose pairwise cosine is ≥ `knowledge.batch_dedup_threshold` (0.50) go to the same judge contract as the sweep; approved merges replace their sources **before anything is saved** — no tombstones, no deletion budget, no `min_age_days` wait. A `delete` with reason `duplicate` is honoured too (the shared prompt calls a verbatim restatement a delete), but only when the fact carrying its content is *known* to survive — the one named in `of` (directly or folded into a merge), or the other member of a two-fact group. "Some other member survives" is not enough: groups chain similar pairs, so in `[A, B, C]` B's survival says nothing about A's or C's content. The survivor inherits the dropped fact's subjects. Other delete reasons are logged and ignored. Any failure (unparseable verdict, merged text that can't be embedded) keeps the original facts. Calibrated on 922 prod facts: judge-approved same-batch duplicates sit at 0.554–0.743, ordinary siblings p95 0.50; ~88 judge calls a month.
+
+There is no *threshold* gate against the existing base. The old `similar_exists?` rejected a new fact only above 0.92 cosine; measured across all 18,803,778 pairs of the prod main chat the maximum similarity between any two facts is **0.6994**, so it had never once fired — while costing a full per-chat table scan plus an embeddings API call per fact. It was deleted. Duplicates across batches are the review sweep's job.
 
 Auto-extraction is triggered by `MessageResponder#maybe_extract_knowledge` every `knowledge.extract_every` user messages per chat, runs in a background `Thread`.
 
@@ -331,13 +337,15 @@ Auto-extraction is triggered by `MessageResponder#maybe_extract_knowledge` every
 | | Space | Threshold | Catches |
 |---|---|---|---|
 | **G1** | raw normalized cosine | `compact_threshold` 0.66 | cross-person duplicates |
-| **G2** | per-person centroid-removed residual | `subject_threshold` 0.55 | same-person, same-incident families |
+| **G2** | per-person centroid-removed residual | `subject_threshold` 0.42 | same-person, same-incident families |
 
 G2 exists because person identity dominates the embedding: two facts about the same participant score ~0.60 largely *because* both are about them, which is why no global threshold can separate "same fact restated" from "same person, new fact". Subtracting the bucket centroid (from `knowledge_subjects`) cancels that shared direction. G2 emits first and claims its facts; G1 then runs over the remainder, so no fact lands in two clusters and no merge can operate on a row another merge already deleted.
 
 Both use **seed-and-absorb** (leader clustering): every member is within the threshold of the *seed*, so clusters have a bounded radius and cannot chain — the union-find this replaced produced a 1,385-fact connected component at 0.62. The size cap (`max_cluster` 8) is native to the algorithm, which is what keeps the merge prompt bounded.
 
-`Review` sends each cluster to a cheap LLM (`knowledge_review` setting) whose contract lets it **refuse**: measured candidate precision is only ~67–80%, so refusing is the normal case, and the old `MERGE_PROMPT` — which asserted the cluster *was* duplicated — reliably fused distinct facts. Every answer is validated in code: hallucinated ids dropped, `manual` facts immune, merges of <2 ids dropped, facts younger than `min_age_days` skipped, merge beating delete for the same id, and everything over the daily budget logged but not applied.
+`Review` sends each cluster to a cheap LLM (`knowledge_review` setting) whose contract lets it **refuse**: measured candidate precision is only ~67–80%, so refusing is the normal case, and the old `MERGE_PROMPT` — which asserted the cluster *was* duplicated — reliably fused distinct facts. Every answer is validated in code. Shared with `BatchDedup` (`Review.request_verdict` / `Review.valid_merges`): non-object verdicts treated as unparseable, hallucinated ids dropped, merges of <2 ids dropped, overlapping groups first-wins. In the sweep's `apply`: merge beating delete for the same id, everything over the daily budget logged but not applied, a merge **larger than the whole daily cap** ruled out as `oversized` rather than left to block the queue forever, and a merge whose text can't be embedded writing nothing at all (its sources are not tombstoned behind an unsearchable fact). `review!` writes its log row in an `ensure`, so merges applied before a mid-run exception are still charged to the budget.
+
+**Candidate eligibility** is decided *before* the judge, by `KnowledgeBase.unavailable_for_review`: facts judged within `review.ttl_days`, facts younger than `review.min_age_days`, and `manual` facts are pre-claimed so they never enter a cluster — and are **not stamped**. The first version instead dropped a young fact's merge after the judge approved it, then stamped it reviewed anyway, so each new fact got one look while too young to act on and was locked out for 30 days: all 14 merges the judge proposed in the 24 days after launch died that way.
 
 Deletion is **soft** (`deleted_at`/`deleted_reason`) because the deleting actor is a language model. The daily budget is per chat, counts merge-sourced deletions (a 3-fact merge spends 3), and is shared across every run that day. `бот верни <id>` restores.
 
@@ -345,7 +353,7 @@ Thresholds were calibrated by sampling real clusters — see `rake knowledge:clu
 
 The sweep is triggered three ways: `maybe_trigger_review` after an extraction batch once the fact count crosses `knowledge.compact_at` (with the same adaptive factor and cooldown as before), `CronScheduler#maybe_fire_knowledge_review` once per chat per local day, and `бот ревизия знаний` on demand. All three enqueue a `knowledge_review` background task — it is never run inline. Chats below `knowledge.review.review_min_facts` are skipped entirely.
 
-**Resumability:** facts judged within `knowledge.review.ttl_days` are excluded from candidate generation, so a nightly run doesn't re-pay for verdicts it already has. A dry run deliberately does **not** stamp `reviewed_at`, or it would silently consume the queue.
+**Resumability:** facts judged within `knowledge.review.ttl_days` are excluded from candidate generation, so a nightly run doesn't re-pay for verdicts it already has. Only facts the judge **actually ruled on** are stamped `reviewed_at` (`Review.run` reports them as `judged_ids`): not clusters the run never reached (stopped on `max_chunks` or budget), not unparseable answers, and not a cluster whose verdict was cut off by a cap. The first version stamped every candidate — 1,250 facts on day one against ~650 judged. A dry run stamps nothing. `rake knowledge:reset_reviewed` clears stamps (merged facts keep theirs) after changing thresholds or the prompt.
 
 ### Agent Scratchpad — `lib/agent/scratchpad.rb` + `models/chat_state.rb`
 Per-chat working memory distinct from the knowledge base — knowledge = facts about the world, scratchpad = agent's own intentions/expectations/notes. Stored in `chat_states.scratchpad` (JSON), one row per chat. Three categories: `intentions`, `notes`, `expectations`. Hard cap 6000 chars (~1500 tokens) with FIFO eviction from the largest category. Rendered as `{SCRATCHPAD}` placeholder in `agent_prompt`. Agent manages it via `remember`/`forget` tools (`lib/agent/tools/scratchpad.rb`). See ADR-003 for the full architecture rationale.
@@ -892,12 +900,13 @@ chat_gpt:
 knowledge:
   top_k: 3            # facts to inject per GPT call
   extract_every: 50   # auto-extract after every N user messages per chat
-  dual_write_legacy: true  # also write the legacy JSON embedding column (rollback path for 023)
+  dual_write_legacy: false # also write the legacy JSON embedding column (was the rollback path for 023; off since 2026-09)
+  batch_dedup_threshold: 0.50  # same-batch duplicates at or above this cosine go to the judge before saving; null disables
   compact_at: 500          # queue a review once the fact count reaches this
   compact_threshold: 0.66  # G1: raw cosine. Measured max pairwise similarity is 0.6994
   compact_min_pairwise: 0.62
-  subject_threshold: 0.55  # G2: per-person centroid-removed residual space
-  subject_min_pairwise: 0.50
+  subject_threshold: 0.42  # G2: per-person centroid-removed residual space
+  subject_min_pairwise: 0.38
   subject_min_facts: 20    # below this a bucket centroid is noise
   subject_min_residual: 0.0
   max_cluster: 8
@@ -907,7 +916,7 @@ knowledge:
     review_min_facts: 200      # skip small chats entirely
     ttl_days: 30               # don't re-judge a fact within this window
     max_chunks_per_run: 60
-    min_age_days: 3
+    min_age_days: 3            # younger facts are not candidates yet (left unstamped)
     max_delete_per_day: 5      # ramp step 1; -> 40 (above the ~34/day inflow) at steady state
     max_delete_pct: 2
     max_merge_per_run: 40
@@ -1039,6 +1048,7 @@ Only once `verify_embeddings` passes and the cache has run clean for a few days:
 | `knowledge:cluster_preview [CHAT_ID=] [SUBJECT_THRESHOLD=] [THRESHOLD=] [SHOW=8]` | Run both candidate generators with **no LLM calls and no writes**. Prints cluster counts, a size histogram, the residual-norm distribution (for choosing `subject_min_residual`) and random samples. Calibrate every threshold here |
 | `knowledge:review [CHAT_ID=] [DRY_RUN=1] [MAX_CHUNKS=]` | Run the dedup sweep. `DRY_RUN=1` judges and reports `would_merge`/`would_remove` without writing. **Restart the bot afterwards** — `after_commit` cache invalidation only fires in the writing process |
 | `knowledge:purge_deleted` | Hard-delete tombstones older than `review.purge_after_days`, protecting sources of merges still inside the rollback window |
+| `knowledge:reset_reviewed [CHAT_ID=] [DRY_RUN=1]` | Clear `reviewed_at` so facts become review candidates again (merged facts keep their stamp). Deletes nothing; costs only re-judging. Use after changing thresholds or the judge prompt |
 | `knowledge:rollback_merges SINCE=...` | Undo review merges: hard-delete the merged facts and restore their sources. Run **before** reverting Deploy 2 code |
 | `knowledge:compact` | Removed — exits 1 pointing at `knowledge:review` |
 

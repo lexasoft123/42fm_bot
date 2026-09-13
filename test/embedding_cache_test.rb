@@ -119,6 +119,39 @@ class EmbeddingCacheTest < BotTest
 
   # Numo's `cast` silently zero-pads ragged rows, which would corrupt every
   # score with no error if the embeddings model ever changed dimension.
+  # REGRESSION: the rebuild plucked the legacy JSON column for EVERY row. While
+  # dual-write kept it populated, each rebuild read ~171 MB of JSON it never
+  # parsed (p50 765 ms on the prod main chat). The JSON column may only be read
+  # by a query restricted to rows that have no blob.
+  def test_rebuild_reads_legacy_json_only_for_rows_without_a_blob
+    # The legacy-only row is created FIRST, so it has the lower id but comes
+    # back from the second query -- `blobs + legacy` is out of id order and the
+    # re-sort is actually exercised. (Created second, the order assertion below
+    # passed even with the sort removed.)
+    legacy = Knowledge.create!(topic: 't', content: 'legacy', chat_id: CHAT, source: 'manual',
+                               embedding: [0.0, 1.0].to_json, embedding_blob: nil)
+    packed = make([1.0, 0.0], content: 'packed')
+    packed.update_columns(embedding: [1.0, 0.0].to_json)   # dual-written row: both columns
+    assert_operator legacy.id, :<, packed.id
+    EmbeddingCache.reset_for_test!
+
+    sql = []
+    sub = ActiveSupport::Notifications.subscribe('sql.active_record') { |*, p| sql << p[:sql] }
+    entry = begin
+      EmbeddingCache.fetch(CHAT)
+    ensure
+      ActiveSupport::Notifications.unsubscribe(sub)
+    end
+
+    json_reads = sql.select { |s| s =~ /"knowledge"\."embedding"(?!_)/ }
+    refute_empty json_reads, 'fixture has a legacy-only row, so the JSON column must be read for it'
+    json_reads.each do |s|
+      assert_match(/embedding_blob IS NULL/, s, "JSON column read without restricting to blob-less rows:\n#{s}")
+    end
+    assert_equal [legacy.id, packed.id], entry.ids,
+                 'both rows load, in id order across the two queries (search tie-breaks on position)'
+  end
+
   def test_non_modal_dimension_rows_are_excluded
     keep = 3.times.map { |i| make([1.0, i.to_f], content: "k#{i}") }
     odd  = make([1.0, 2.0, 3.0, 4.0], content: 'odd')

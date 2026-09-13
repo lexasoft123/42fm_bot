@@ -192,6 +192,31 @@ class KnowledgeClusterTest < BotTest
     assert_empty C.build(entry, buckets, params(threshold: 0.9, min_pairwise: 0.9), skip: [a.id, b.id])
   end
 
+  # REGRESSION: G2 proposed per bucket with an EMPTY claim set, and only
+  # filtered at acceptance -- so a proposal [a, b, c] with c unavailable (too
+  # young, recently judged, manual) was thrown away whole, losing a good [a, b].
+  # Called on subject_clusters directly: via `build`, G1 would find [a, b] in
+  # raw space and mask the loss.
+  def test_an_unavailable_fact_does_not_discard_the_rest_of_a_subject_cluster
+    a  = make([3.0,  1.0, 0.00], content: 'a',  uid: 7)
+    b  = make([3.0,  1.0, 0.05], content: 'b',  uid: 7)
+    c  = make([3.0,  1.0, 0.10], content: 'c',  uid: 7)
+    p1 = make([3.0, -1.0, 0.00], content: 'p1', uid: 7)
+    p2 = make([3.0, -1.0, 0.05], content: 'p2', uid: 7)
+    entry   = EmbeddingCache.fetch(CHAT)
+    buckets = KnowledgeBase.send(:subject_buckets, CHAT)
+    tight   = params(subject_threshold: 0.9, subject_min_pairwise: 0.9)
+
+    everything = C.subject_clusters(entry, buckets, tight, {}).map(&:sort)
+    assert_includes everything, [a.id, b.id, c.id].sort, 'fixture must cluster a, b, c together'
+
+    with_c_unavailable = C.subject_clusters(entry, buckets, tight, { c.id => true }).map(&:sort)
+    assert_includes with_c_unavailable, [a.id, b.id].sort,
+                    'the remaining pair must still be proposed when one member is unavailable'
+    refute with_c_unavailable.flatten.include?(c.id)
+    assert_includes with_c_unavailable, [p1.id, p2.id].sort
+  end
+
   # A fact in two buckets must be judged in the bucket where its cluster is
   # strongest, not in whichever one the DB happened to return first.
   def test_multi_bucket_fact_goes_to_its_strongest_cluster

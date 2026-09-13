@@ -115,17 +115,21 @@ class EmbeddingCache
     private
 
     def build(chat_id)
-      rows = Knowledge.live.where(chat_id: chat_id)
-                      .where("#{Knowledge::BLOB_PRESENT} OR embedding IS NOT NULL")
-                      .order(:id)
-                      .pluck(:id, :embedding_blob, :embedding)
+      live = Knowledge.live.where(chat_id: chat_id)
+      # Two queries, so the legacy JSON column is read ONLY for rows that have
+      # no blob. Plucking both columns for every row made each rebuild read
+      # ~171 MB of JSON it never parsed while dual-write kept both populated:
+      # p50 765 ms per rebuild on the main chat, 66 rebuilds in three weeks.
+      blobs  = live.where(Knowledge::BLOB_PRESENT).pluck(:id, :embedding_blob)
+      legacy = live.where(Knowledge::BLOB_MISSING).where.not(embedding: nil)
+                   .pluck(:id, :embedding)
+                   .filter_map { |id, json| (b = legacy_pack(json)) && [id, b] }
+      # Re-establish id order across the two queries: `search` breaks score
+      # ties by position in this array.
+      rows = (blobs + legacy).sort_by(&:first)
       return EMPTY if rows.empty?
 
-      packed = rows.filter_map do |id, blob, json|
-        b = (blob && !blob.empty?) ? blob : legacy_pack(json)
-        next nil unless b && b.bytesize.positive? && (b.bytesize % 4).zero?
-        [id, b]
-      end
+      packed = rows.select { |_, b| b && b.bytesize.positive? && (b.bytesize % 4).zero? }
       return EMPTY if packed.empty?
 
       # Numo::*Float.cast silently ZERO-PADS ragged rows, so a change of

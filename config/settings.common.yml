@@ -217,13 +217,20 @@ horoscope:
 knowledge:
   top_k: 3
   extract_every: 50
-  # Keep writing the legacy JSON `embedding` column alongside the packed
-  # float32 `embedding_blob`. This is the rollback path for migration 023: with
-  # it off, facts created after the deploy exist only in the new format, so
-  # reverting the code would silently make them unsearchable. Flip to false
-  # only after `rake knowledge:verify_embeddings` passes and the cache has run
-  # clean in prod; then `rake knowledge:drop_legacy_embeddings` + VACUUM.
-  dual_write_legacy: true
+  # Also write the legacy JSON `embedding` column alongside the packed float32
+  # `embedding_blob`. This was the rollback path for migration 023 and shipped
+  # ON; it is OFF since the blob path ran clean in prod for three weeks
+  # (verify_embeddings passed 2026-08-20). With it off, `rake
+  # knowledge:drop_legacy_embeddings` clears the ~29 KB/row of JSON; `rake
+  # knowledge:unpack_embeddings` rebuilds it from blobs if ever needed.
+  dual_write_legacy: false
+  # Collapse duplicate facts WITHIN one extraction batch before they are saved
+  # (KnowledgeBase::BatchDedup). Pairs at or above this raw cosine are sent to
+  # the review judge, which decides. Calibrated on 922 prod facts: the judge-
+  # approved same-batch duplicates sit at 0.554-0.743, ordinary siblings p95
+  # 0.50. ~88 judge calls/month on the main chat. Remove the key to use the
+  # default; set it to null to disable.
+  batch_dedup_threshold: 0.50
   compact_at: 500
   compact_cooldown_hours: 6
   # --- candidate generation (see .claude/rules/knowledge.md) ---
@@ -267,6 +274,9 @@ knowledge:
     max_chunks_per_run: 60  # bounds one run's LLM calls and worker time
     utc_offset: 3
     review_min_facts: 200   # skip small chats: they'd pay the cost for ~no yield
+    # Facts younger than this are not CANDIDATES yet (they are left unstamped
+    # and join the pool once old enough). Same-batch duplicates don't wait for
+    # this -- BatchDedup handles them at extraction time.
     min_age_days: 3
     max_delete_per_day: 5   # ramp step 1; raise to 40 (> the ~34/day inflow) at steady state
     max_delete_pct: 2

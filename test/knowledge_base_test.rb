@@ -158,13 +158,15 @@ class KnowledgeBaseTest < BotTest
     assert_equal [1.0, 0.0], k.reload.embedding_vector
   end
 
-  # Dual-write is the rollback path for migration 023: reverting the code must
-  # leave post-deploy facts still readable via the legacy JSON column.
-  def test_write_populates_both_columns_while_dual_write_is_on
-    k = make_record(content: 'a', vec: [1.0, 0.0]).reload
-    refute_nil k.embedding_blob
-    refute_nil k.embedding
-    assert_equal [1.0, 0.0], JSON.parse(k.embedding)
+  # Dual-write was the rollback path for migration 023. It is off by default now
+  # but must still work when opted into, e.g. ahead of a deliberate revert.
+  def test_write_populates_both_columns_when_dual_write_is_opted_into
+    with_dual_write(true) do
+      k = make_record(content: 'a', vec: [1.0, 0.0]).reload
+      refute_nil k.embedding_blob
+      refute_nil k.embedding
+      assert_equal [1.0, 0.0], JSON.parse(k.embedding)
+    end
   end
 
   # A blob-only row (post-cutover, or mid-backfill) must be fully searchable.
@@ -196,24 +198,17 @@ class KnowledgeBaseTest < BotTest
     assert_equal [], KnowledgeBase.search('q', chat_id: CHAT)
   end
 
-  # The cutover branch: once `dual_write_legacy` is off, only the blob is
-  # written. This is the irreversible step (drop_legacy_embeddings follows it),
-  # and the shared test Settings stub makes it default to ON, so without an
-  # explicit stub this branch would never execute in the suite.
-  def test_cutover_writes_blob_only_and_stays_searchable
-    Knowledge.singleton_class.send(:alias_method, :__dwl, :dual_write_legacy?)
-    Knowledge.singleton_class.send(:define_method, :dual_write_legacy?) { false }
-    begin
-      k = make_record(content: 'a', vec: [1.0, 0.0]).reload
-      refute_nil k.embedding_blob
-      assert_nil k.embedding, 'legacy column must stay empty after cutover'
-      EmbeddingCache.reset_for_test!
-      stub_embed('q', [1.0, 0.0])
-      assert_equal [k.id], KnowledgeBase.search('q', chat_id: CHAT, top_k: 5).map(&:id)
-    ensure
-      Knowledge.singleton_class.send(:alias_method, :dual_write_legacy?, :__dwl)
-      Knowledge.singleton_class.send(:remove_method, :__dwl)
-    end
+  # Post-cutover default: with no setting, only the blob is written and the
+  # fact stays fully searchable. Deliberately NOT stubbed -- this pins the
+  # default itself, which is what `drop_legacy_embeddings` relies on.
+  def test_default_writes_blob_only_and_stays_searchable
+    refute Knowledge.dual_write_legacy?, 'dual-write must default to off'
+    k = make_record(content: 'a', vec: [1.0, 0.0]).reload
+    refute_nil k.embedding_blob
+    assert_nil k.embedding, 'legacy column must stay empty by default'
+    EmbeddingCache.reset_for_test!
+    stub_embed('q', [1.0, 0.0])
+    assert_equal [k.id], KnowledgeBase.search('q', chat_id: CHAT, top_k: 5).map(&:id)
   end
 
   # An empty vector must store NOTHING. An empty blob reads back as "no
@@ -247,7 +242,7 @@ class KnowledgeBaseTest < BotTest
                                embedding: [1.0, 0.0].to_json, embedding_blob: nil)
     empty  = Knowledge.create!(topic: 't', content: 'e', chat_id: CHAT, source: 'manual',
                                embedding: [1.0, 0.0].to_json, embedding_blob: '')
-    both   = make_record(content: 'b', vec: [1.0, 0.0])
+    both   = with_dual_write(true) { make_record(content: 'b', vec: [1.0, 0.0]) }
 
     unpacked = Knowledge.unpacked_embeddings.pluck(:id)
     packed   = Knowledge.packed_embeddings.pluck(:id)
@@ -258,6 +253,15 @@ class KnowledgeBaseTest < BotTest
   end
 
   private
+
+  def with_dual_write(value)
+    Knowledge.singleton_class.send(:alias_method, :__dwl, :dual_write_legacy?)
+    Knowledge.singleton_class.send(:define_method, :dual_write_legacy?) { value }
+    yield
+  ensure
+    Knowledge.singleton_class.send(:alias_method, :dual_write_legacy?, :__dwl)
+    Knowledge.singleton_class.send(:remove_method, :__dwl)
+  end
 
   # Reference cosine — used only in `test_search_blas_ranking_matches_pure_ruby_cosine`
   # to verify BLAS equivalence. Don't reuse this in production paths.
