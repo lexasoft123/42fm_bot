@@ -1,4 +1,5 @@
 require_relative '_suno_language_rule'
+require_relative '../../pending_audio_request'
 
 Agent::ToolRegistry.register(
   name: 'compose_song',
@@ -32,6 +33,7 @@ Agent::ToolRegistry.register(
     # mark_failed_and_notify works for legacy direct-command tasks too.
     inline_lyrics = args['lyrics'].to_s.strip.presence
     inline_topic  = args['theme'].to_s.strip.presence
+    PendingAudioRequest.clear_for(ctx) # a task is being created — the follow-up is moot
     BackgroundTask.create!(
       task_type: 'suno_generate',
       chat_id: ctx[:chat_id],

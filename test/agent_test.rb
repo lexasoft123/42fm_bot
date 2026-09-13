@@ -880,6 +880,19 @@ class RunnerTest < BotTest
     assert_nil first_call[:system_prompt]
   end
 
+  # PendingAudioRequest needs the request text, message id and chat kind in
+  # tool ctx; implied-source tools need user_initiated and the forum topic.
+  def test_tool_ctx_carries_followup_and_provenance_keys
+    runner = build_runner(text: 'сделай кавер', user: @user, message_id: 55, private_chat: true,
+                          user_initiated: false, forum_thread_id: 12)
+    tctx = runner.instance_variable_get(:@tool_ctx)
+    assert_equal 'сделай кавер', tctx[:request_text]
+    assert_equal 55, tctx[:message_id]
+    assert_equal true, tctx[:private_chat]
+    assert_equal false, tctx[:user_initiated]
+    assert_equal 12, tctx[:forum_thread_id]
+  end
+
   # Audio on the message itself: "attached" wording, all Suno options listed.
   def test_audio_hint_for_attached_audio
     audio = { file_id: 'F', title: 'Демо', duration: 178, mime_type: 'audio/mpeg', source: :message }

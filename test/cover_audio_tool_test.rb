@@ -14,8 +14,10 @@ end
 require_relative '../lib/agent/tool_registry'
 require_relative '../lib/agent/tool_result'
 require_relative '../lib/rate_limiter'
+require_relative '../lib/telegram_file'
 require_relative '../lib/agent/tools/cover_art'   # provides SONG_TASK_TYPES
 require_relative '../lib/agent/tools/cover_audio'
+require_relative '../lib/agent/tools/add_vocals'
 
 # Tests for the cover_audio tool's source-lyrics resolution chain — the
 # handler-side fallback that copies lyrics from a previously-generated
@@ -156,5 +158,100 @@ class CoverAudioToolTest < BotTest
 
     cover = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio').last
     assert_equal '', cover.params_hash['lyrics']
+  end
+  # --- retry_of_task_id: re-run a failed cover with the same source ---
+
+  def make_failed_cover(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'failed')
+    BackgroundTask.create!(task_type: task_type, chat_id: chat_id, max_attempts: 60, status: status,
+                           params: { upload_url: 'https://api.telegram.org/file/botX/music/file_1667.mp3',
+                                     upload_file_id: 'FID-1667', style: 'rhythm and blues', title: 'Остаться собой',
+                                     lyrics: "[Verse]\nСколько печальных историй", topic: '', instrumental: false,
+                                     user_uid: 1 }.to_json)
+  end
+
+  def call_retry(args)
+    ctx = { chat_id: CHAT, user: @user, reply_to_message_id: nil, audio: nil }
+    @tool.handler.call(args, ctx)
+  end
+
+  def test_retry_of_failed_cover_copies_source_and_params
+    src = make_failed_cover
+    call_retry({ 'retry_of_task_id' => src.id, 'style' => '', 'title' => '', 'lyrics' => '', 'topic' => '', 'upload_url' => '' })
+    cover = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'pending').last
+    p = cover.params_hash
+    assert_equal 'https://api.telegram.org/file/botX/music/file_1667.mp3', p['upload_url']
+    assert_equal 'FID-1667', p['upload_file_id'], 'file_id carried over so the handler can refresh the link'
+    assert_equal 'rhythm and blues', p['style']
+    assert_equal 'Остаться собой', p['title']
+    assert_match(/Сколько печальных историй/, p['lyrics'])
+    assert_equal src.id, p['retry_of_task_id']
+  end
+
+  def test_retry_explicit_args_override_source_params
+    src = make_failed_cover
+    call_retry({ 'retry_of_task_id' => src.id, 'style' => 'chicago blues', 'title' => '' })
+    p = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'pending').last.params_hash
+    assert_equal 'chicago blues', p['style']
+    assert_equal 'Остаться собой', p['title']
+  end
+
+  def test_retry_rejects_other_chat_non_failed_and_non_cover_tasks
+    [make_failed_cover(chat_id: -999), make_failed_cover(status: 'done'),
+     make_failed_cover(task_type: 'suno_add_vocals')].each do |src|
+      result = call_retry({ 'retry_of_task_id' => src.id })
+      assert_kind_of String, result
+      assert_match(/повторять нечего/, result, "task #{src.id} (#{src.chat_id}/#{src.status}/#{src.task_type}) must be rejected")
+    end
+    assert_equal 0, BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'pending').count
+  end
+
+  def test_attached_audio_file_id_is_saved_for_link_refresh
+    TelegramFile.singleton_class.send(:alias_method, :__public_url_cov, :public_url)
+    TelegramFile.singleton_class.send(:define_method, :public_url) { |_api, _fid, chat_id: nil| 'https://api.telegram.org/file/botX/a.mp3' }
+    ctx = { chat_id: CHAT, user: @user, reply_to_message_id: nil, api: Object.new,
+            audio: { file_id: 'NEW-FID', title: 'Демо' }, audio_source: :message }
+    @tool.handler.call({ 'style' => 'jazz', 'title' => 'Демо (jazz)', 'upload_url' => '' }, ctx)
+    p = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio').last.params_hash
+    assert_equal 'NEW-FID', p['upload_file_id']
+    assert_equal 'https://api.telegram.org/file/botX/a.mp3', p['upload_url']
+  ensure
+    TelegramFile.singleton_class.send(:alias_method, :public_url, :__public_url_cov) rescue nil
+    TelegramFile.singleton_class.send(:remove_method, :__public_url_cov) rescue nil
+  end
+  # Review #2: a failed task stays 'failed' forever — a second retry of the
+  # same task (user "повтори" + a cron intention from a rate-limited retry)
+  # must be refused, or Suno bills both.
+  def test_second_retry_of_same_failed_task_is_refused_while_first_is_pending_or_done
+    src = make_failed_cover
+    call_retry({ 'retry_of_task_id' => src.id })
+    first = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'pending').last
+    refute_nil first
+
+    result = call_retry({ 'retry_of_task_id' => src.id })
+    assert_match(/уже в работе \(task ##{first.id}\)/, result)
+    first.update_columns(status: 'done')
+    result = call_retry({ 'retry_of_task_id' => src.id })
+    assert_match(/уже сделан \(task ##{first.id}\)/, result)
+    assert_equal 1, BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio').where.not(id: src.id).count
+  end
+
+  # Negative control: if the earlier retry itself failed, retrying again is fine.
+  def test_retry_allowed_again_after_previous_retry_failed
+    src = make_failed_cover
+    call_retry({ 'retry_of_task_id' => src.id })
+    BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'pending').last.update_columns(status: 'failed')
+    call_retry({ 'retry_of_task_id' => src.id })
+    assert_equal 1, BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'pending').count
+  end
+
+  def test_add_vocals_second_retry_of_same_failed_task_is_refused
+    src = make_failed_cover(task_type: 'suno_add_vocals')
+    tool = Agent::ToolRegistry.find('add_vocals')
+    ctx = { chat_id: CHAT, user: @user, reply_to_message_id: nil, audio: nil }
+    tool.handler.call({ 'retry_of_task_id' => src.id }, ctx)
+    assert_equal 1, BackgroundTask.where(chat_id: CHAT, task_type: 'suno_add_vocals', status: 'pending').count
+    result = tool.handler.call({ 'retry_of_task_id' => src.id }, ctx)
+    assert_match(/уже в работе/, result)
+    assert_equal 1, BackgroundTask.where(chat_id: CHAT, task_type: 'suno_add_vocals', status: 'pending').count
   end
 end

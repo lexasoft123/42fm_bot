@@ -162,7 +162,9 @@ class SunoClientTest < Minitest::Test
     assert_equal 'https://example.com/noop', req[:body]['callBackUrl']
   end
 
-  def test_add_vocals_omits_negative_tags_when_empty
+  # add-vocals documents negativeTags as REQUIRED (unlike generate /
+  # upload-cover); prod submits without it came back HTTP 200 with no taskId.
+  def test_add_vocals_always_sends_negative_tags_even_when_empty
     captured = []
     with_stubbed_post(captured: captured) do
       SunoClient.new.add_vocals(
@@ -170,8 +172,9 @@ class SunoClientTest < Minitest::Test
         prompt: 'x', title: 'x', style: 'x'
       )
     end
-    refute_includes captured.last[:body].keys, 'negativeTags',
-                    'negativeTags must be dropped from add_vocals POST body when empty'
+    assert_includes captured.last[:body].keys, 'negativeTags',
+                    'negativeTags is required by add-vocals and must always be sent'
+    assert_equal '', captured.last[:body]['negativeTags']
   end
 
   def test_cover_audio_omits_negative_tags_when_empty
@@ -600,5 +603,30 @@ class SunoClientTest < Minitest::Test
     end
     assert_match transient, c.send(:submit_error, '/p', 503, 'upstream down')
     assert_match transient, c.send(:submit_error, '/p', 500, '')
+  end
+  # GENERATE_AUDIO_FAILED / CREATE_TASK_FAILED are no longer a bare :retry —
+  # the handler decides by task type, and needs Suno's reason to report it.
+  def test_poll_once_generation_failure_returns_hash_with_reason
+    %w[CREATE_TASK_FAILED GENERATE_AUDIO_FAILED].each do |status|
+      body = { 'data' => { 'status' => status, 'errorCode' => 500,
+                           'errorMessage' => "cannot read #{TOKEN_URL}" } }
+      result = with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+      assert_equal true, result[:generation_failed], "status=#{status}"
+      assert_nil result[:failed], 'generation failure is not the permanent :failed shape'
+      assert_match(/cannot read/, result[:error])
+      refute_match(/SECRETTOKEN/, result[:error])
+    end
+  end
+
+  def test_poll_once_generation_failure_without_message_names_status
+    body = { 'data' => { 'status' => 'GENERATE_AUDIO_FAILED' } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+    assert_match(/GENERATE_AUDIO_FAILED/, result[:error])
+  end
+
+  # :retry is reserved for SUCCESS without clips — a different glitch.
+  def test_poll_once_success_without_clips_is_retry
+    body = { 'data' => { 'status' => 'SUCCESS', 'response' => { 'sunoData' => [] } } }
+    assert_equal :retry, with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
   end
 end

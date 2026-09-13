@@ -1472,3 +1472,114 @@ class SunoSendAudioDeliveryTest < BotTest
     assert_equal 0, api.calls.count { |c| c[0] == :sendMessage }
   end
 end
+
+# ==========================================================================
+# PendingAudioFollowupTest — prod 2026-08-24: a user asked for an arrangement
+# of "этой песни" and sent the file a minute later; captionless audio never
+# reaches the agent, so the request was answered with a stale source. In a
+# DM, a captionless audio that a Suno tool asked for (PendingAudioRequest)
+# now replays the stored request with that file attached.
+# ==========================================================================
+class PendingAudioFollowupTest < BotTest
+  include ProdTestHelpers
+  include Fixtures::Users
+
+  CHAT = 900_001
+
+  def setup
+    super
+    stub_settings!
+    require_relative '../lib/message_responder'
+    @user = member_user
+    PendingAudioRequest.reset!
+    @executed = []
+    executed = @executed
+    fake = Class.new do
+      define_method(:initialize) { |ctx| @ctx = ctx }
+      define_method(:execute) { executed << @ctx; CommandResult.text('ok') }
+    end
+    Commands::GptChat.singleton_class.send(:alias_method, :__new_followup, :new)
+    Commands::GptChat.singleton_class.send(:define_method, :new) { |ctx| fake.new(ctx) }
+  end
+
+  def teardown
+    Commands::GptChat.singleton_class.send(:alias_method, :new, :__new_followup) rescue nil
+    Commands::GptChat.singleton_class.send(:remove_method, :__new_followup) rescue nil
+    PendingAudioRequest.reset!
+    super
+  end
+
+  def audio_msg(chat_type: 'private', uid: nil, voice: false, document: false, edit_date: nil, caption: nil)
+    OpenStruct.new(
+      text: nil, caption: caption, message_id: 31, reply_to_message: nil, message_thread_id: nil,
+      edit_date: edit_date, date: Time.now.to_i, forward_origin: nil, photo: nil,
+      audio: (voice || document ? nil : OpenStruct.new(file_id: 'AUD', mime_type: 'audio/mpeg', duration: 178, title: 'Демо', performer: nil)),
+      voice: (voice ? OpenStruct.new(file_id: 'VOI', mime_type: 'audio/ogg', duration: 3) : nil),
+      document: (document ? OpenStruct.new(file_id: 'DOC', mime_type: 'audio/mpeg', file_name: 'demo.mp3') : nil),
+      chat: OpenStruct.new(id: CHAT, type: chat_type, title: nil),
+      from: OpenStruct.new(id: uid || @user.uid, username: @user.name, first_name: 'T', last_name: nil)
+    )
+  end
+
+  def respond(msg)
+    r = MessageResponder.new(bot: OpenStruct.new(api: Object.new), message: msg, radio: nil)
+    delivered = []
+    r.define_singleton_method(:deliver) { |result| delivered << result }
+    r.define_singleton_method(:process_voice_message) { nil }
+    r.respond
+    delivered
+  end
+
+  def pend(uid: nil)
+    PendingAudioRequest.register(chat_id: CHAT, uid: uid || @user.uid, text: 'сделай аранжировку этой песни в стиле блюз',
+                                 message_id: 30, tool: 'cover_audio')
+  end
+
+  def test_captionless_dm_audio_replays_pending_request_with_this_file
+    pend
+    delivered = respond(audio_msg)
+    assert_equal 1, @executed.size
+    assert_equal 'сделай аранжировку этой песни в стиле блюз', @executed.first.cmd
+    assert_equal 31, @executed.first.message.message_id, 'the new audio message is the source'
+    assert_equal 1, delivered.size
+    assert_nil PendingAudioRequest.take(CHAT, @user.uid), 'entry is consumed'
+  end
+
+  def test_audio_document_also_fires
+    pend
+    respond(audio_msg(document: true))
+    assert_equal 1, @executed.size
+  end
+
+  def test_no_pending_entry_means_no_reply
+    respond(audio_msg)
+    assert_empty @executed
+  end
+
+  def test_voice_note_does_not_fire_and_keeps_entry
+    pend
+    respond(audio_msg(voice: true))
+    assert_empty @executed
+    refute_nil PendingAudioRequest.take(CHAT, @user.uid)
+  end
+
+  def test_group_chat_does_not_fire
+    pend
+    respond(audio_msg(chat_type: 'supergroup'))
+    assert_empty @executed
+  end
+
+  def test_edited_message_does_not_fire
+    pend
+    respond(audio_msg(edit_date: Time.now.to_i))
+    assert_empty @executed
+  end
+
+  def test_other_users_entry_is_not_consumed
+    other = User.create!(uid: 5150, name: 'other', role: 'member')
+    pend(uid: other.uid)
+    respond(audio_msg)
+    assert_empty @executed
+    refute_nil PendingAudioRequest.take(CHAT, other.uid)
+  end
+end

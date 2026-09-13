@@ -1,5 +1,6 @@
 require_relative '../../suno_client'
 require_relative '../../audio_attachment'
+require_relative '../../pending_audio_request'
 
 # Agent mode → Suno separation `type`.
 SEPARATE_VOCALS_MODES = {
@@ -188,7 +189,12 @@ Agent::ToolRegistry.register(
     # the limit check): a rate-limited deferral must record WHICH track, so
     # the cron retry — which has no audio/reply context — re-selects it.
     source = SeparateVocalsTool.resolve_source(args, ctx)
+    role = ctx[:user]&.role
     unless source
+      unless RateLimiter.exceeded?(ctx[:chat_id], 'suno', role: role)
+        offer = PendingAudioRequest.offer(ctx, tool: 'separate_vocals')
+        next offer if offer
+      end
       next Agent::ToolResult.deferred(
         user_text:    'Не вижу, какой трек разделять: ответь (reply) на песню или прикрепи аудиофайл.',
         intent:       'разделить трек на дорожки, как только пользователь укажет трек',
@@ -196,7 +202,6 @@ Agent::ToolRegistry.register(
       )
     end
 
-    role = ctx[:user]&.role
     if RateLimiter.exceeded?(ctx[:chat_id], 'suno', role: role)
       mins = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno', role: role)
       next Agent::ToolResult.deferred(
@@ -221,6 +226,7 @@ Agent::ToolRegistry.register(
       params[:audio_url] = url
     end
 
+    PendingAudioRequest.clear_for(ctx) # a task is being created — the follow-up is moot
     BackgroundTask.create!(
       task_type: 'suno_separate_vocals',
       chat_id: ctx[:chat_id],

@@ -1,6 +1,7 @@
 require 'base64'
 require_relative '../telegram_file'
 require_relative '../audio_attachment'
+require_relative '../pending_audio_request'
 
 module Commands
   class GptChat < Base
@@ -15,6 +16,10 @@ module Commands
     def execute
       m = cmd&.match(PATTERN)
       text = m ? m[:text] : cmd
+
+      # Any new request cancels a pending "send the audio next" follow-up —
+      # a track shared after "бот погода" must not replay an old cover request.
+      PendingAudioRequest.clear(chat_id, user.uid) if user
 
       # Phrase harvesting stays gated on explicit addressing (prefix or
       # reply-to-bot) — bare DM small talk («ты молодец») must not feed
@@ -31,7 +36,8 @@ module Commands
         image: replied_image, phrase: phrase, audio: audio,
         reply_to_message_id: message.reply_to_message&.message_id,
         message_id: message.message_id,
-        forum_thread_id: (message.message_thread_id if AudioAttachment.forum?(message))
+        forum_thread_id: (message.message_thread_id if AudioAttachment.forum?(message)),
+        private_chat: message.chat&.type == 'private'
       ).run
       CommandResult.text(reply, reply_to_message_id: message.message_id)
     end

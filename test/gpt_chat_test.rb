@@ -160,6 +160,23 @@ class GptChatExecuteTest < BotTest
     assert_equal 'привет', Agent::Runner.last_kwargs[:text]
   end
 
+  # A new request cancels a pending "send the audio next" follow-up, so a
+  # track shared after an unrelated question doesn't replay an old request.
+  def test_new_request_clears_pending_audio_followup
+    PendingAudioRequest.register(chat_id: -100123, uid: @user.uid, text: 'сделай кавер', message_id: 1, tool: 'cover_audio')
+    command('бот погода').execute
+    assert_nil PendingAudioRequest.take(-100123, @user.uid)
+  ensure
+    PendingAudioRequest.reset!
+  end
+
+  def test_private_chat_flag_reaches_runner
+    command('привет', type: 'private').execute
+    assert_equal true, Agent::Runner.last_kwargs[:private_chat]
+    command('бот привет', type: 'supergroup').execute
+    assert_equal false, Agent::Runner.last_kwargs[:private_chat]
+  end
+
   def test_bare_private_text_goes_to_agent_verbatim
     command('привет').execute
     assert_equal 'привет', Agent::Runner.last_kwargs[:text]

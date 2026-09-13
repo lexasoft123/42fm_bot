@@ -1,5 +1,6 @@
 require_relative 'agent_event_emitter'
 require_relative '../media_download'
+require_relative '../telegram_file'
 
 class SunoTaskHandler
   include ChatContext
@@ -8,6 +9,9 @@ class SunoTaskHandler
 
   MAX_PROMPT_FAILURES = 3
   MAX_SUBMIT_FAILURES = 3
+
+  # Tasks whose source is a user-supplied upload (not composed from scratch).
+  UPLOAD_TASK_TYPES = %w[suno_cover_audio suno_add_vocals].freeze
 
   def call(task, api)
     if task.external_id.nil?
@@ -31,7 +35,7 @@ class SunoTaskHandler
     p = task.params_hash
     begin
       suno_task_id = SunoClient.new.add_vocals(
-        upload_url:    p['upload_url'],
+        upload_url:    fresh_upload_url(task, api, p),
         prompt:        p['theme'].to_s,
         title:         p['title'],
         style:         p['style'].to_s,
@@ -56,7 +60,7 @@ class SunoTaskHandler
     custom_mode, prompt = resolve_cover_prompt(p)
     begin
       suno_task_id = SunoClient.new.cover_audio(
-        upload_url:    p['upload_url'],
+        upload_url:    fresh_upload_url(task, api, p),
         style:         p['style'].to_s,
         title:         p['title'],
         prompt:        prompt,
@@ -71,6 +75,16 @@ class SunoTaskHandler
     LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted cover_audio #{suno_task_id} mode=#{custom_mode ? 'custom' : 'auto'}"
     ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: suno_task_id) }
     :pending
+  end
+
+  # Telegram file links (getFile) are only guaranteed for about an hour, and an
+  # upload task can be submitted much later (a retry_of_task_id retry from the
+  # cron path). When the tool saved the file_id, resolve a fresh link at
+  # submit time; otherwise (agent-supplied URL, legacy rows) use the stored one.
+  def fresh_upload_url(task, api, params)
+    file_id = params['upload_file_id'].to_s
+    return params['upload_url'] if file_id.empty?
+    TelegramFile.public_url(api, file_id, chat_id: task.chat_id) || params['upload_url']
   end
 
   # Returns [custom_mode, prompt] for Suno's upload-cover endpoint.
@@ -209,29 +223,23 @@ class SunoTaskHandler
     when :pending
       :pending
     when :retry
-      p = task.params_hash
-      retries = (p['generation_retries'] || 0) + 1
-      p['generation_retries'] = retries
-      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno transient failure for #{task.external_id} (retry #{retries}/#{MAX_GENERATION_RETRIES})"
-      if retries <= MAX_GENERATION_RETRIES
-        # Clear external_id so next handler call re-submits with cached lyrics/tags.
-        ActiveRecord::Base.connection_pool.with_connection do
-          task.update!(external_id: nil, params: p.to_json)
-        end
-        return :pending
-      end
-      mark_failed_and_notify(task, api, 'suno_failed_after_retries')
-      :failed
+      # SUCCESS without clips — a worker hiccup; a fresh job fixes it for
+      # every task type.
+      resubmit_or_fail(task, api)
     when :failed
       mark_failed_and_notify(task, api, 'suno_failed')
       :failed
     when Hash
-      # Failure-with-detail from poll_once (see SunoClient#format_suno_error).
-      # The detail makes it into the agent_event summary so the agent knows
-      # WHY (copyright, content flagged, etc.) rather than just generic
-      # "suno_failed", and can pick a meaningful next move.
-      mark_failed_and_notify(task, api, 'suno_failed', error_detail: result[:error])
-      :failed
+      if result[:generation_failed]
+        handle_generation_failure(task, api, result[:error])
+      else
+        # Failure-with-detail from poll_once (see SunoClient#format_suno_error).
+        # The detail makes it into the agent_event summary so the agent knows
+        # WHY (copyright, content flagged, etc.) rather than just generic
+        # "suno_failed", and can pick a meaningful next move.
+        mark_failed_and_notify(task, api, 'suno_failed', error_detail: result[:error])
+        :failed
+      end
     when Array
       LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result.size} clips"
       ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
@@ -245,6 +253,42 @@ class SunoTaskHandler
       end
       :done
     end
+  end
+
+  # Suno reported CREATE_TASK_FAILED / GENERATE_AUDIO_FAILED. A song composed
+  # from scratch usually goes through on a fresh job, so resubmit. An uploaded
+  # source does not: prod 2026-07-20..09-13, 22 of 38 cover/add-vocals tasks
+  # failed, and resubmits of the same file failed in a row (one file: 12
+  # submits across 3 tasks) — while the same recording went through weeks
+  # later. Blind resubmits only burned the user's minutes and ended in the
+  # agent silently composing a NEW song instead of the cover. Fail now with
+  # the reason; the cover_failed / add_vocals_failed event tells the agent to
+  # offer a later retry (retry_of_task_id) instead.
+  def handle_generation_failure(task, api, detail)
+    if UPLOAD_TASK_TYPES.include?(task.task_type)
+      mark_failed_and_notify(task, api, 'suno_source_rejected', error_detail: detail)
+      return :failed
+    end
+    resubmit_or_fail(task, api, detail)
+  end
+
+  # Clears external_id so the next handler call re-submits (with cached
+  # lyrics/tags), capped at MAX_GENERATION_RETRIES. Each fresh job also gets a
+  # fresh poll budget: all jobs used to share the task's single max_attempts
+  # budget, so a late resubmit timed out mid-generation (prod task 3715).
+  def resubmit_or_fail(task, api, detail = nil)
+    p = task.params_hash
+    retries = (p['generation_retries'] || 0) + 1
+    p['generation_retries'] = retries
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno transient failure for #{task.external_id} (retry #{retries}/#{MAX_GENERATION_RETRIES})#{detail ? " — #{detail}" : ''}"
+    if retries <= MAX_GENERATION_RETRIES
+      ActiveRecord::Base.connection_pool.with_connection do
+        task.update!(external_id: nil, attempts: 0, params: p.to_json)
+      end
+      return :pending
+    end
+    mark_failed_and_notify(task, api, 'suno_failed_after_retries', error_detail: detail)
+    :failed
   end
 
   # If the originating tool call set with_cover_art=true, enqueue a chained
@@ -293,21 +337,56 @@ class SunoTaskHandler
   # distinguish copyright reject vs content flag vs worker hiccup vs
   # rate-limit, and pick a meaningful next move (rephrase, suggest
   # different source, retry later, etc.) rather than blind-retry.
+  FAILURE_NOTICES = {
+    'suno_cover_audio' => 'Не удалось сделать кавер',
+    'suno_add_vocals'  => 'Не удалось добавить вокал',
+  }.freeze
+
+  # The chat notice, agent_event type and summary depend on the task type:
+  # an upload task that failed is a failed COVER / ADD-VOCALS, and describing
+  # it to the agent as "a song failed" nudged it into composing a new song
+  # from scratch instead (prod 2026-08-24). The directive about what to offer
+  # lives in AgentEventHandler::EVENT_DESCRIPTIONS, not in the summary, which
+  # is cut at 600 chars.
   def mark_failed_and_notify(task, api, reason, error_detail: nil)
     LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno generation #{reason} for #{task.external_id}#{error_detail ? " (#{error_detail})" : ''}"
     ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(reason) }
-    text = "Не удалось сгенерировать песню"
+    text = FAILURE_NOTICES.fetch(task.task_type, 'Не удалось сгенерировать песню')
     begin
       resp = api.sendMessage(chat_id: task.chat_id, text: text)
       Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)
     rescue => e
       LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
     end
+    emit_agent_event(task, failure_event_type(task, reason), summary: failure_summary(task, reason, error_detail))
+  end
+
+  def failure_event_type(task, reason)
+    case task.task_type
+    when 'suno_cover_audio' then 'cover_failed'
+    when 'suno_add_vocals'  then 'add_vocals_failed'
+    else reason.to_s.include?('after_retries') ? 'song_failed_after_retries' : 'song_failed'
+    end
+  end
+
+  def failure_summary(task, reason, error_detail)
     p = task.params_hash
-    event_type = reason.to_s.include?('after_retries') ? 'song_failed_after_retries' : 'song_failed'
-    summary = "Тема: #{(p['topic'] || p['request']).to_s[0..150]} | Жанр: #{p['genre']} | Артист: #{p['artist']} | Причина: #{reason}"
-    summary += " | #{error_detail}" if error_detail && !error_detail.to_s.empty?
-    emit_agent_event(task, event_type, summary: summary)
+    parts =
+      if UPLOAD_TASK_TYPES.include?(task.task_type)
+        what = task.task_type == 'suno_cover_audio' ? 'Кавер' : 'Вокал к треку'
+        meta = ["task ##{task.id}"]
+        meta << "режим #{resolve_cover_prompt(p).first ? 'custom (свой текст)' : 'auto'}" if task.task_type == 'suno_cover_audio'
+        meta << 'instrumental' if p['instrumental'] == true
+        head = ["#{what} «#{p['title']}» (#{meta.join(', ')})"]
+        head << "Стиль: #{p['style'].to_s[0..120]}" unless p['style'].to_s.strip.empty?
+        head
+      else
+        topic = [p['topic'], p['request'], p['theme'], p['title']].map { |v| v.to_s.strip }.find { |v| !v.empty? }.to_s
+        ["Тема: #{topic[0..150]}", "Жанр: #{p['genre']}", "Артист: #{p['artist']}"]
+      end
+    parts << "Причина: #{reason}"
+    parts << error_detail.to_s if error_detail && !error_detail.to_s.empty?
+    parts.join(' | ')
   end
 
   def resolve_tags(genre, artist, title = '', chat_id: nil, user_uid: nil)

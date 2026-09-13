@@ -44,6 +44,7 @@ TEST_FILES := \
 	test/suno_wav_convert_handler_test.rb \
 	test/separate_vocals_tool_test.rb \
 	test/suno_separate_vocals_handler_test.rb \
+	test/pending_audio_request_test.rb \
 	test/gogolmogol_test.rb \
 	test/google_search_tool_test.rb \
 	test/radio_degradation_test.rb \

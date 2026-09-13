@@ -13,6 +13,7 @@ require './lib/horoscope'
 require './lib/gpt_master'
 require './lib/embedding_service'
 require './lib/knowledge_base'
+require './lib/pending_audio_request'
 require './lib/agent/tool_registry'
 require './lib/agent/runner'
 Dir['./lib/agent/tools/*.rb'].each { |f| require f }
@@ -93,7 +94,7 @@ class MessageResponder
     process_voice_message if message.voice && !super_admin_awaiting_input?
 
     text = message.text || message.caption
-    return unless text
+    return run_pending_audio_followup unless text
 
     cmd = UnicodeUtils.downcase(text)
 
@@ -120,6 +121,23 @@ class MessageResponder
   end
 
   private
+
+  # DM only: a Suno tool asked for the missing audio (PendingAudioRequest) and
+  # this captionless audio / audio-document is it — replay the stored request
+  # through GptChat with this message's file as the source. Voice notes don't
+  # count (process_voice_message owns them); anything else keeps the
+  # "no text → no reply" behavior.
+  def run_pending_audio_followup
+    return unless message.chat&.type == 'private' && @user
+    return unless message.audio || message.document&.mime_type&.start_with?('audio/')
+    entry = PendingAudioRequest.take(@chat_id, @user.uid)
+    return unless entry
+
+    LOGGER.info "[chat=#{@chat_id}] #{self.class.name}#respond: audio follow-up for pending #{entry[:tool]} request"
+    ctx = CommandContext.new(bot: @bot, message: @message, user: @user, chat_id: @chat_id,
+                             radio: @radio, reply_master: @reply_master, cmd: entry[:text])
+    deliver(Commands::GptChat.new(ctx).execute)
+  end
 
   def dispatch(ctx)
     Commands::REGISTRY.each do |klass|

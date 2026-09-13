@@ -611,4 +611,124 @@ class SunoHandlerChainTest < BotTest
     assert_equal 1, fresh.params_hash['submit_failures']
     assert_equal 0, BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').count
   end
+  # --- Generation failures are task-type aware (prod 2026-07-20..09-13) ---
+
+  class NoticeApi
+    attr_reader :texts
+    def initialize; @texts = []; end
+    def sendMessage(chat_id:, text:); @texts << text; OpenStruct.new(result: OpenStruct.new(message_id: 999)); end
+  end
+
+  def with_poll(result)
+    stub = Object.new
+    stub.define_singleton_method(:poll_once) { |_id| result }
+    SunoClient.singleton_class.send(:alias_method, :__new_gen, :new)
+    SunoClient.singleton_class.send(:define_method, :new) { stub }
+    yield
+  ensure
+    SunoClient.singleton_class.send(:alias_method, :new, :__new_gen) rescue nil
+    SunoClient.singleton_class.send(:remove_method, :__new_gen) rescue nil
+  end
+
+  def make_polling_task(type, **params)
+    BackgroundTask.create!(task_type: type, chat_id: CHAT, max_attempts: 60, external_id: 'suno-job-1',
+                           attempts: 42, params: { title: 'Остаться собой', user_uid: 1 }.merge(params).to_json)
+  end
+
+  GEN_FAIL = { generation_failed: true, error: 'Suno: GENERATE_AUDIO_FAILED' }.freeze
+
+  def last_event
+    BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').last&.params_hash
+  end
+
+  def test_cover_generation_failure_fails_now_without_resubmit
+    task = make_polling_task('suno_cover_audio', style: 'rhythm and blues', topic: 'про себя', lyrics: '')
+    api = NoticeApi.new
+    result = with_poll(GEN_FAIL) { @handler.send(:poll_and_deliver, task, api) }
+    assert_equal :failed, result
+    fresh = BackgroundTask.find(task.id)
+    assert_equal 'failed', fresh.status
+    assert_equal 'suno_source_rejected', fresh.result_hash['error']
+    assert_nil fresh.params_hash['generation_retries'], 'an uploaded source is never blind-resubmitted'
+    assert_equal ['Не удалось сделать кавер'], api.texts
+    ev = last_event
+    assert_equal 'cover_failed', ev['event_type']
+    assert_match(/Кавер «Остаться собой» \(task ##{task.id}, режим auto/, ev['summary'])
+    assert_match(/Стиль: rhythm and blues/, ev['summary'])
+    assert_match(/GENERATE_AUDIO_FAILED/, ev['summary'])
+  end
+
+  def test_add_vocals_generation_failure_uses_its_own_notice_and_event
+    task = make_polling_task('suno_add_vocals', theme: 'про море', style: 'soul')
+    api = NoticeApi.new
+    with_poll(GEN_FAIL) { @handler.send(:poll_and_deliver, task, api) }
+    assert_equal ['Не удалось добавить вокал'], api.texts
+    assert_equal 'add_vocals_failed', last_event['event_type']
+  end
+
+  # Negative control: a song composed from scratch still resubmits — with or
+  # without a reason from Suno — and each fresh job gets a fresh poll budget.
+  def test_song_generation_failure_resubmits_with_fresh_poll_budget
+    task = make_polling_task('suno_generate', topic: 'про шефа', genre: 'pop', artist: '')
+    [GEN_FAIL, { generation_failed: true, error: 'Suno [500]: worker crashed' }].each do |failure|
+      result = with_poll(failure) { @handler.send(:poll_and_deliver, BackgroundTask.find(task.id), silent_api) }
+      assert_equal :pending, result
+    end
+    fresh = BackgroundTask.find(task.id)
+    assert_nil fresh.external_id, 'external_id cleared so the next call resubmits'
+    assert_equal 2, fresh.params_hash['generation_retries']
+    assert_equal 0, fresh.attempts, 'resubmit resets the poll budget (prod task 3715 timed out mid-resubmit)'
+    assert_nil last_event
+  end
+
+  def test_song_generation_failure_at_cap_fails_with_detail
+    task = make_polling_task('suno_generate', topic: 'про шефа', generation_retries: SunoTaskHandler::MAX_GENERATION_RETRIES)
+    with_poll({ generation_failed: true, error: 'Suno [500]: worker crashed' }) do
+      @handler.send(:poll_and_deliver, task, silent_api)
+    end
+    ev = last_event
+    assert_equal 'song_failed_after_retries', ev['event_type']
+    assert_match(/worker crashed/, ev['summary'])
+  end
+
+  # :retry (SUCCESS without clips) is a different glitch — resubmits even for covers.
+  def test_empty_success_retry_resubmits_uploads_too
+    task = make_polling_task('suno_cover_audio', style: 'jazz')
+    assert_equal :pending, with_poll(:retry) { @handler.send(:poll_and_deliver, task, silent_api) }
+    assert_nil BackgroundTask.find(task.id).external_id
+  end
+
+  # Driven through TaskRunner#process_one: a resubmit near the attempt cap
+  # must not time the task out.
+  def test_resubmit_near_attempt_cap_survives_task_runner_accounting
+    task = make_polling_task('suno_generate', topic: 'x')
+    task.update_columns(attempts: 59, max_attempts: 60)
+    runner = TaskRunner.new(silent_api)
+    with_poll(GEN_FAIL) { runner.process_one(BackgroundTask.find(task.id)) }
+    fresh = BackgroundTask.find(task.id)
+    assert_equal 'pending', fresh.status, 'the fresh job must get its own poll budget, not inherit 59/60'
+    assert_equal 1, fresh.attempts
+  end
+
+  def test_song_summary_topic_falls_back_past_empty_strings
+    task = BackgroundTask.create!(task_type: 'suno_generate', chat_id: CHAT, max_attempts: 60,
+                                  params: { topic: '', request: nil, title: 'Про кота', genre: 'rock' }.to_json)
+    @handler.send(:mark_failed_and_notify, task, silent_api, 'suno_failed')
+    assert_match(/Тема: Про кота/, last_event['summary'])
+  end
+
+  def test_fresh_upload_url_prefers_file_id_and_falls_back
+    TelegramFile.singleton_class.send(:alias_method, :__public_url_fresh, :public_url)
+    returned = 'https://api.telegram.org/file/botX/music/new.mp3'
+    TelegramFile.singleton_class.send(:define_method, :public_url) { |_api, _fid, chat_id: nil| returned }
+    task = make_polling_task('suno_cover_audio', upload_url: 'https://old/expired.mp3', upload_file_id: 'FID')
+    assert_equal 'https://api.telegram.org/file/botX/music/new.mp3', @handler.send(:fresh_upload_url, task, nil, task.params_hash)
+    returned = nil
+    assert_equal 'https://old/expired.mp3', @handler.send(:fresh_upload_url, task, nil, task.params_hash)
+    legacy = make_polling_task('suno_cover_audio', upload_url: 'https://agent/link.mp3')
+    assert_equal 'https://agent/link.mp3', @handler.send(:fresh_upload_url, legacy, nil, legacy.params_hash)
+  ensure
+    TelegramFile.singleton_class.send(:alias_method, :public_url, :__public_url_fresh) rescue nil
+    TelegramFile.singleton_class.send(:remove_method, :__public_url_fresh) rescue nil
+  end
 end

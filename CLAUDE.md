@@ -120,7 +120,7 @@ How-to recipes (add a command, patterns, settings, migrations): `docs/architectu
 | Music search / song DB | `models/song.rb` + `lib/music_scanner.rb` + `rake music:scan` |
 | Agent mode tools | `lib/agent/tools/*.rb` + `lib/agent/tool_registry.rb` + `lib/agent/runner.rb` |
 | Background tasks | `lib/task_runner.rb` + `lib/task_handlers/*.rb` + `models/background_task.rb` |
-| Suno (compose / add-vocals / cover / cover-art / WAV / vocal-stem separation) | `lib/suno_client.rb` + `lib/task_handlers/suno_*.rb` + `lib/agent/tools/{suno,add_vocals,cover_audio,cover_art,convert_to_wav,separate_vocals}.rb` + `lib/audio_attachment.rb` (which audio a request refers to) — see `.claude/rules/suno.md` |
+| Suno (compose / add-vocals / cover / cover-art / WAV / vocal-stem separation) | `lib/suno_client.rb` + `lib/task_handlers/suno_*.rb` + `lib/agent/tools/{suno,add_vocals,cover_audio,cover_art,convert_to_wav,separate_vocals}.rb` + `lib/audio_attachment.rb` (which audio a request refers to) + `lib/pending_audio_request.rb` (DM "send the audio next" follow-up) — see `.claude/rules/suno.md` |
 | Image generation (FLUX / Atlas / CloseRouter; agent picks model per request) | `lib/image_gen/*.rb` (incl. `catalog.rb`) + `lib/model_provider_client.rb` + `lib/task_handlers/image_gen_handler.rb` + `lib/agent/tools/image_gen.rb` — see `.claude/rules/image-gen.md` |
 | Knowledge base / embeddings / dedup | `lib/knowledge_base.rb` + `lib/knowledge_base/{cluster,review,batch_dedup}.rb` + `lib/embedding_cache.rb` + `models/knowledge{,_subject}.rb` + `rake knowledge:*` — see `.claude/rules/knowledge.md` |
 | Shared handler context | `lib/chat_context.rb` — `ChatContext` module (chat messages + knowledge for task handlers) |

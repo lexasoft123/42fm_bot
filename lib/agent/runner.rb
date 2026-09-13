@@ -13,7 +13,7 @@ module Agent
     # backs up `bot.listen`'s single-threaded queue.
     SLOW_ITERATION_MS = 5_000
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil, user_initiated: true, forum_thread_id: nil)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil, user_initiated: true, forum_thread_id: nil, private_chat: false)
       @text       = text
       @context    = context
       @knowledge  = knowledge
@@ -50,6 +50,11 @@ module Agent
                      # must stay inside the forum topic the request came from.
                      user_initiated: user_initiated,
                      forum_thread_id: forum_thread_id,
+                     # For PendingAudioRequest: replay this request when the
+                     # user's next DM message is the missing audio file.
+                     private_chat: private_chat,
+                     request_text: text,
+                     message_id: message_id,
                      reply_to_message_id: reply_to_message_id,
                      can_view_image: can_view_image? }
     end

@@ -105,9 +105,8 @@ class SunoClient
   end
 
   # Submit song generation request. Returns task_id string.
-  # `negative_tags` is omitted from the POST body when empty (consistent
-  # with add_vocals/cover_audio — all three drop optional fields rather
-  # than send empty-string).
+  # `negative_tags` is omitted from the POST body when empty (as in
+  # cover_audio; add_vocals is the exception — the field is required there).
   def submit(title:, lyrics:, tags:, negative_tags: '', instrumental: false)
     body = { customMode: true, prompt: lyrics, style: tags, title: title,
              model: @model, instrumental: instrumental,
@@ -121,11 +120,14 @@ class SunoClient
   # Per https://docs.sunoapi.org/suno-api/add-vocals the required fields are
   # uploadUrl/prompt/title/style/negativeTags/callBackUrl — customMode and
   # instrumental are NOT applicable (this endpoint always layers vocals over
-  # the input, no opt-out), so we omit them deliberately.
+  # the input, no opt-out), so we omit them deliberately. Unlike the other
+  # submits, `negativeTags` is always sent (empty string when there are none):
+  # it is required here, and prod add-vocals submits kept coming back as
+  # HTTP 200 without a taskId (tasks 1044/1246/3789).
   def add_vocals(upload_url:, prompt:, title:, style:, negative_tags: '', vocal_gender: nil)
     body = { uploadUrl: upload_url, prompt: prompt, title: title, style: style,
+             negativeTags: negative_tags.to_s,
              model: @model, callBackUrl: 'https://example.com/noop' }
-    body[:negativeTags] = negative_tags unless negative_tags.to_s.empty?
     body[:vocalGender]  = vocal_gender  if vocal_gender
     post_for_task_id('/api/v1/generate/add-vocals', **body)
   end
@@ -356,7 +358,10 @@ class SunoClient
     end
   end
 
-  # Single non-blocking poll. Returns :pending, :failed, or { audio_url:, title:, duration: }
+  # Single non-blocking poll. Returns :pending, Array<{ audio_url:, title:,
+  # duration:, lyrics: }> on success, :retry for a SUCCESS without clips,
+  # { generation_failed: true, error: } for CREATE_TASK_FAILED /
+  # GENERATE_AUDIO_FAILED, or { failed: true, error: } for permanent failures.
   def poll_once(task_id)
     t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     resp = HTTParty.get("#{@base_url}/api/v1/generate/record-info",
@@ -381,7 +386,16 @@ class SunoClient
           lyrics: song['prompt'] }
       end
     when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED'
-      :retry # Suno-side transient — worker died; re-submitting usually works
+      # Suno-side generation failure. Whether resubmitting is worth it depends
+      # on the task type, so the handler decides
+      # (SunoTaskHandler#handle_generation_failure): a song composed from
+      # scratch usually goes through on a fresh job; an uploaded source
+      # (cover / add-vocals) fails again on immediate resubmits. The reason
+      # used to be dropped here — log it and pass it on.
+      err_code = data['errorCode']
+      err_msg  = data['errorMessage'].to_s.strip
+      LOGGER.warn "#{self.class.name}#poll_once #{data['status']}: code=#{err_code.inspect} msg=#{redact_urls(err_msg).inspect}"
+      { generation_failed: true, error: format_suno_error(err_code, err_msg.empty? ? data['status'] : err_msg) }
     when 'SENSITIVE_WORD_ERROR'
       # Permanent — content flagged. Suno's `status` is the categorical
       # bucket but its actual `errorMessage` is what the agent needs:
