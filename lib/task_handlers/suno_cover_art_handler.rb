@@ -30,6 +30,12 @@ class SunoCoverArtHandler
     begin
       cover_task_id = SunoClient.new.cover_art(suno_task_id: source_task_id)
     rescue => e
+      # Permanent Suno rejection: fail now with the detail rather than
+      # re-raising into TaskRunner's raw "Ошибка: …" (no agent_event).
+      if TaskRunner.permanent_error?(e)
+        mark_failed_and_notify(task, api, 'cover_art_submit_rejected', error_detail: e.message)
+        return :failed
+      end
       attempts = (p['submit_failures'] || 0) + 1
       p['submit_failures'] = attempts
       ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }

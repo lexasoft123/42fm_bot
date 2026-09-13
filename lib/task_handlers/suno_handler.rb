@@ -175,6 +175,15 @@ class SunoTaskHandler
   # Increment a step-failure counter; if cap reached, fail+notify; otherwise re-raise so
   # TaskRunner retries on the next poll cycle.
   def bail_or_retry(task, api, params, counter, max, reason, raise_on_retry:)
+    # Permanent rejection (Suno 400/401/404/413/429 — see
+    # SunoClient#submit_error): retrying can't help, and re-raising would let
+    # TaskRunner fail the task with a raw "Ошибка: …" and no agent_event.
+    # Fail here with the (URL-redacted) detail instead.
+    if TaskRunner.permanent_error?(raise_on_retry)
+      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter} permanent rejection, not retrying: #{reason}"
+      mark_failed_and_notify(task, api, counter.sub(/_failures\z/, '_rejected'), error_detail: reason.to_s)
+      return :failed
+    end
     params[counter] = (params[counter] || 0) + 1
     ActiveRecord::Base.connection_pool.with_connection { task.update!(params: params.to_json) }
     if params[counter] >= max

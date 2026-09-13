@@ -9,6 +9,7 @@ unless Settings.respond_to?(:suno)
 end
 
 require_relative '../lib/suno_client'
+require_relative '../lib/task_runner' # submit_error must match its error regexes
 
 # Tests for the three new SunoClient submit methods. We don't hit the
 # network — HTTParty.post is stubbed to return a canned 200 response.
@@ -444,5 +445,160 @@ class SunoClientTest < Minitest::Test
     assert_equal 1, result.size
     assert_equal "[Verse 1]\nDoom doom dada doom\n[Chorus]\nLa la la", result.first[:lyrics]
     assert_equal 'https://cdn/clip-1.mp3', result.first[:audio_url]
+  end
+  # --- Vocal / stem separation ---
+
+  def test_separate_vocals_with_audio_url_sends_only_audio_url
+    captured = []
+    with_stubbed_post(captured: captured) do
+      SunoClient.new.separate_vocals(type: 'separate_vocal', audio_url: 'https://example.com/in.mp3')
+    end
+    req = captured.last
+    assert_match %r{/api/v1/vocal-removal/generate\z}, req[:url]
+    assert_equal 'separate_vocal', req[:body]['type']
+    assert_equal 'https://example.com/in.mp3', req[:body]['audioUrl']
+    refute_includes req[:body].keys, 'taskId',  'audioUrl and taskId/audioId are mutually exclusive'
+    refute_includes req[:body].keys, 'audioId', 'audioUrl and taskId/audioId are mutually exclusive'
+    refute_includes req[:body].keys, 'stemName'
+    assert_equal 'https://example.com/noop', req[:body]['callBackUrl']
+  end
+
+  def test_separate_vocals_with_suno_clip_sends_task_and_audio_id
+    captured = []
+    with_stubbed_post(captured: captured) do
+      SunoClient.new.separate_vocals(type: 'split_stem', task_id: 'task-1', audio_id: 'aud-1')
+    end
+    body = captured.last[:body]
+    assert_equal 'split_stem', body['type']
+    assert_equal 'task-1', body['taskId']
+    assert_equal 'aud-1',  body['audioId']
+    refute_includes body.keys, 'audioUrl'
+  end
+
+  def test_separate_vocals_advanced_sends_stem_name_other_types_do_not
+    captured = []
+    with_stubbed_post(captured: captured) do
+      SunoClient.new.separate_vocals(type: 'split_stem_advanced', audio_url: 'https://x/a.mp3', stem_name: 'Drum Kit')
+      SunoClient.new.separate_vocals(type: 'separate_vocal', audio_url: 'https://x/a.mp3', stem_name: 'Drum Kit')
+    end
+    assert_equal 'Drum Kit', captured[0][:body]['stemName']
+    refute_includes captured[1][:body].keys, 'stemName', 'stemName only applies to split_stem_advanced'
+  end
+
+  def test_separate_vocals_rejects_unknown_type_and_missing_source
+    assert_raises(ArgumentError) { SunoClient.new.separate_vocals(type: 'karaoke', audio_url: 'https://x/a.mp3') }
+    assert_raises(ArgumentError) { SunoClient.new.separate_vocals(type: 'separate_vocal', task_id: 't') }
+  end
+
+  def test_poll_separation_once_uses_vocal_removal_endpoint
+    captured = []
+    with_stubbed_get(captured: captured, body: { 'data' => { 'successFlag' => 'PENDING' } }) do
+      assert_equal :pending, SunoClient.new.poll_separation_once('sep-1')
+    end
+    assert_match %r{/api/v1/vocal-removal/record-info\z}, captured.last[:url]
+    assert_equal 'sep-1', captured.last[:query][:taskId]
+  end
+
+  def test_poll_separation_once_separate_vocal_returns_vocals_and_instrumental
+    body = { 'data' => { 'successFlag' => 'SUCCESS', 'response' => {
+      'vocalUrl' => 'https://cdn/v.mp3', 'instrumentalUrl' => 'https://cdn/i.mp3',
+      'drumsUrl' => nil, 'originUrl' => 'https://cdn/src.mp3' } } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_separation_once('sep-1') }
+    assert_equal [{ name: 'Vocals', url: 'https://cdn/v.mp3' },
+                  { name: 'Instrumental', url: 'https://cdn/i.mp3' }], result[:stems]
+  end
+
+  def test_poll_separation_once_split_stem_returns_every_present_stem_in_order
+    response = SunoClient::STEM_FIELDS.keys.each_with_object({}) { |f, h| h[f] = "https://cdn/#{f}.mp3" }
+    response['instrumentalUrl'] = nil # docs: null for split_stem
+    body = { 'data' => { 'successFlag' => 'SUCCESS', 'response' => response } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_separation_once('sep-1') }
+    assert_equal SunoClient::STEM_FIELDS.size - 1, result[:stems].size
+    assert_equal 'Vocals', result[:stems].first[:name]
+    refute(result[:stems].any? { |st| st[:name] == 'Instrumental' })
+  end
+
+  def test_poll_separation_once_falls_back_to_origin_data_skipping_source_track
+    body = { 'data' => { 'successFlag' => 'SUCCESS', 'response' => {
+      'originUrl' => 'https://cdn/src.mp3',
+      'originData' => [
+        { 'audio_url' => 'https://cdn/src.mp3', 'stem_type_group_name' => 'Original' },
+        { 'audio_url' => 'https://cdn/drums.mp3', 'stem_type_group_name' => 'Drum Kit' },
+      ] } } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_separation_once('sep-1') }
+    assert_equal [{ name: 'Drum Kit', url: 'https://cdn/drums.mp3' }], result[:stems]
+  end
+
+  def test_poll_separation_once_success_without_urls_is_a_failure_not_a_retry
+    body = { 'data' => { 'successFlag' => 'SUCCESS', 'response' => { 'vocalUrl' => nil } } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_separation_once('sep-1') }
+    assert_equal true, result[:failed], 'a resubmit is billed again — never :retry on empty SUCCESS'
+  end
+
+  def test_poll_separation_once_failure_flags_return_redacted_detail
+    %w[CREATE_TASK_FAILED GENERATE_AUDIO_FAILED CALLBACK_EXCEPTION].each do |flag|
+      body = { 'data' => { 'successFlag' => flag, 'errorCode' => 400,
+                           'errorMessage' => 'cannot fetch https://api.telegram.org/file/bot1:SECRET/a.mp3' } }
+      result = with_stubbed_get(body: body) { SunoClient.new.poll_separation_once('sep-1') }
+      assert_equal true, result[:failed], "flag=#{flag}"
+      refute_match(/SECRET/, result[:error])
+      assert_match(/cannot fetch/, result[:error])
+    end
+  end
+
+  def test_poll_separation_once_failure_flag_without_message_names_the_flag
+    body = { 'data' => { 'successFlag' => 'GENERATE_AUDIO_FAILED' } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_separation_once('sep-1') }
+    assert_match(/GENERATE_AUDIO_FAILED/, result[:error])
+  end
+
+  def test_poll_separation_once_callback_exception_with_stems_is_success
+    body = { 'data' => { 'successFlag' => 'CALLBACK_EXCEPTION', 'response' => {
+      'vocalUrl' => 'https://cdn/v.mp3', 'instrumentalUrl' => 'https://cdn/i.mp3' } } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_separation_once('sep-1') }
+    assert_equal 2, result[:stems].size, 'callback delivery failure to our placeholder URL is not a separation failure'
+  end
+
+  # --- Submit error messages: token-safe on BOTH branches ---
+
+  TOKEN_URL = 'https://api.telegram.org/file/bot123:SECRETTOKEN/music/file_1.mp3'.freeze
+
+  def test_post_non_200_redacts_urls_from_body
+    err = assert_raises(RuntimeError) do
+      with_stubbed_post(code: 400, body: "bad uploadUrl #{TOKEN_URL}") do
+        SunoClient.new.separate_vocals(type: 'separate_vocal', audio_url: TOKEN_URL)
+      end
+    end
+    refute_match(/SECRETTOKEN/, err.message)
+    assert_match(/<url-redacted>/, err.message)
+  end
+
+  def test_post_200_without_task_id_surfaces_body_code_and_msg_redacted
+    err = assert_raises(RuntimeError) do
+      with_stubbed_post(body: { 'code' => 400, 'msg' => "negativeTags is required for #{TOKEN_URL}" }) do
+        SunoClient.new.add_vocals(upload_url: TOKEN_URL, prompt: 'p', title: 't', style: 's')
+      end
+    end
+    assert_match(/No taskId/, err.message)
+    assert_match(/negativeTags is required/, err.message)
+    assert_match(/ 400 /, err.message)
+    refute_match(/SECRETTOKEN/, err.message)
+  end
+
+  def test_submit_error_code_rendering_matches_task_runner_classification
+    c = SunoClient.new
+    permanent = TaskRunner::PERMANENT_ERROR_RE
+    transient = TaskRunner::TRANSIENT_ERROR_RE
+    [400, 401, 404, 413, 429].each do |code|
+      assert_match permanent, c.send(:submit_error, '/p', code, ''), "#{code} must classify as permanent"
+      assert_match permanent, c.send(:submit_error, '/p', code, 'detail'), "#{code} must classify as permanent"
+    end
+    [405, 430, 455].each do |code|
+      msg = c.send(:submit_error, '/p', code, 'try later')
+      refute_match permanent, msg, "#{code} (rate/maintenance) must NOT classify as permanent"
+      assert_match(/code=#{code}/, msg)
+    end
+    assert_match transient, c.send(:submit_error, '/p', 503, 'upstream down')
+    assert_match transient, c.send(:submit_error, '/p', 500, '')
   end
 end

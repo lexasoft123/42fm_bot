@@ -13,7 +13,7 @@ module Agent
     # backs up `bot.listen`'s single-threaded queue.
     SLOW_ITERATION_MS = 5_000
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil, user_initiated: true)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil, user_initiated: true, forum_thread_id: nil)
       @text       = text
       @context    = context
       @knowledge  = knowledge
@@ -44,6 +44,12 @@ module Agent
       LOGGER.warn "[chat=#{chat_id}] Agent::Runner initialized without Telegram api — tools that send media will fail" unless api
       @tool_ctx  = { radio: radio, chat_id: chat_id, user: user, api: api,
                      image: image, audio: audio,
+                     audio_source: audio && audio[:source],
+                     # Tools that pick an IMPLIED source (no reply/attachment)
+                     # must not do so on synthetic agent_event/cron turns, and
+                     # must stay inside the forum topic the request came from.
+                     user_initiated: user_initiated,
+                     forum_thread_id: forum_thread_id,
                      reply_to_message_id: reply_to_message_id,
                      can_view_image: can_view_image? }
     end
@@ -237,11 +243,17 @@ module Agent
     end
 
     # When the user attaches audio, hint the model so it picks add_vocals /
-    # cover_audio when the caption is ambiguous. Includes title/duration when
-    # Telegram provided them so the agent has something to caption with.
-    # When a title is present, also tell the agent EXPLICITLY to use it —
-    # otherwise it tends to invent one from prior chat context (e.g. yesterday's
-    # cover) and the user gets a track named after the wrong song.
+    # cover_audio / separate_vocals when the caption is ambiguous. Includes
+    # title/duration when Telegram provided them so the agent has something
+    # to caption with. When a title is present, also tell the agent
+    # EXPLICITLY to use it — otherwise it tends to invent one from prior chat
+    # context (e.g. yesterday's cover) and the user gets a track named after
+    # the wrong song.
+    #
+    # A :lookback match (AudioAttachment — an earlier upload, not on this
+    # message) is worded as "someone posted this N min ago": prod 2026-08-24
+    # a stale lookback file was treated as "the attached song" and the wrong
+    # song got covered.
     def audio_hint
       bits = []
       bits << "title=#{@audio[:title].inspect}" if @audio[:title]
@@ -249,8 +261,24 @@ module Agent
       bits << "duration=#{@audio[:duration]}s" if @audio[:duration]
       bits << "mime=#{@audio[:mime_type]}" if @audio[:mime_type]
       desc = bits.empty? ? '' : " (#{bits.join(', ')})"
+      options = 'подпеть (add_vocals), сделать кавер (cover_audio), убрать вокал/разделить на дорожки (separate_vocals), или другое'
+      if @audio[:source] == :lookback
+        who = audio_uploader_display
+        return "[К этому сообщению аудио НЕ прикреплено. В чате #{@audio[:age_min]} мин назад #{who} прислал(а) аудиофайл#{desc}. " \
+               "Используй его, только если запрос явно про этот трек; если запрос не про него или непонятно — спроси, о каком треке речь. " \
+               "Варианты: #{options}.]"
+      end
       use_title = @audio[:title] ? " Используй title (и performer если есть) как основу для названия выходного трека — НЕ выдумывай имя из контекста чата." : ''
-      "[К сообщению прикреплён аудиофайл#{desc}.#{use_title} Если непонятно, что с ним делать — спроси: подпеть (add_vocals), сделать кавер (cover_audio), или другое.]"
+      "[К сообщению прикреплён аудиофайл#{desc}.#{use_title} Если непонятно, что с ним делать — спроси: #{options}.]"
+    end
+
+    def audio_uploader_display
+      u = @audio[:uploader_uid] && User.find_by(uid: @audio[:uploader_uid])
+      return 'кто-то' unless u
+      ChatContext.display_name(name: u.name, first_name: u.first_name, last_name: u.last_name)
+    rescue => e
+      alog :warn, "audio_uploader_display failed: #{e.class}: #{e.message}"
+      'кто-то'
     end
 
     def build_initial_messages(user_content)

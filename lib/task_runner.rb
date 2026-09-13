@@ -5,6 +5,19 @@ class TaskRunner
   POLL_INTERVAL = 15
   MAX_WORKERS   = 2
 
+  # Classification of an exception raised out of a handler (#process_one):
+  # transient → retried without spending an attempt; permanent → task failed
+  # now with a raw "Ошибка: …" chat notice. Handlers that would rather fail a
+  # permanent error themselves (own notice + agent_event) check
+  # `TaskRunner.permanent_error?` before re-raising; SunoClient#submit_error
+  # renders HTTP/body codes so these match.
+  TRANSIENT_ERROR_RE = /\s5\d{2}[\s{]/
+  PERMANENT_ERROR_RE = /\s4\d{2}[\s{]/
+
+  def self.permanent_error?(error)
+    error.message.to_s.match?(PERMANENT_ERROR_RE)
+  end
+
   @handlers = {}
   @thread = nil
   @mutex = Mutex.new
@@ -109,14 +122,14 @@ class TaskRunner
       nil # handler already updated state
     end
   rescue => e
-    transient = e.message.match?(/\s5\d{2}[\s{]/) ||
+    transient = e.message.match?(TRANSIENT_ERROR_RE) ||
                 e.is_a?(Net::OpenTimeout) || e.is_a?(Net::ReadTimeout) ||
                 e.is_a?(Errno::ECONNRESET) || e.is_a?(Errno::ECONNREFUSED) ||
                 e.is_a?(OpenSSL::SSL::SSLError) || e.is_a?(SocketError)
     LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name} task #{task.id} transient: #{e.class}: #{e.message}" if transient
     LOGGER.error "[chat=#{task.chat_id}] #{self.class.name} task #{task.id}: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}" unless transient
     task.increment_attempts! unless transient
-    permanent = e.message.match?(/\s4\d{2}[\s{]/)
+    permanent = e.message.match?(PERMANENT_ERROR_RE)
     if task.reload.timed_out? || permanent
       task.mark_failed!(e.message)
       notify_chat(task.chat_id, "Ошибка: #{e.message.truncate(200)}")

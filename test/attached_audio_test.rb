@@ -1,58 +1,18 @@
 require_relative 'test_helper'
 LOGGER = Logger.new(IO::NULL) unless defined?(LOGGER)
 
-# attached_audio now returns metadata only (no URL, no getFile call) — the
-# Telegram URL is resolved lazily inside Suno tool handlers via TelegramFile.
-# We still test via a small harness because Commands::GptChat's full
-# constructor pulls the whole bot stack; the harness body must stay
-# byte-identical to the real method (track via a single source: see
-# `attached_audio_method_source` constant if you ever want to assert
-# string-equality between the two).
+require_relative '../lib/audio_attachment'
+
+# Exercises the REAL AudioAttachment module (previously this file tested a
+# byte-copied harness of Commands::GptChat's private methods, which silently
+# drifted). The adapter only supplies message/chat_id the way GptChat does.
 class AttachedAudioHarness
-  attr_accessor :message, :chat_id
+  attr_accessor :message, :chat_id, :now
 
-  # Mirror of Commands::GptChat::AUDIO_LOOKBACK. Keep in sync (intentional
-  # duplication: harness avoids requiring the full GptChat dep tree).
-  AUDIO_LOOKBACK = 20
-
-  def initialize(message:, chat_id: nil); @message = message; @chat_id = chat_id; end
+  def initialize(message:, chat_id: nil, now: Time.now); @message = message; @chat_id = chat_id; @now = now; end
 
   def attached_audio
-    audio_metadata_from(message) ||
-      (message.reply_to_message && audio_metadata_from(message.reply_to_message)) ||
-      recent_chat_audio
-  end
-
-  def audio_metadata_from(msg)
-    src = msg.audio
-    src ||= msg.voice
-    src ||= (msg.document if msg.document&.mime_type&.start_with?('audio/'))
-    return nil unless src
-
-    title = (src.respond_to?(:title) ? src.title : nil)
-    title = File.basename(src.file_name.to_s, '.*').strip if (title.nil? || title.empty?) && src.respond_to?(:file_name) && !src.file_name.to_s.empty?
-    {
-      file_id:   src.file_id,
-      mime_type: src.respond_to?(:mime_type) ? src.mime_type : nil,
-      duration:  src.respond_to?(:duration)  ? src.duration  : nil,
-      title:     title.to_s.empty? ? nil : title,
-      performer: src.respond_to?(:performer) ? src.performer : nil,
-    }
-  end
-
-  def recent_chat_audio
-    return nil unless chat_id
-    row = Message.where(chat_id: chat_id, role: 'user',
-                        message_thread_id: message.message_thread_id)
-                 .order(id: :desc)
-                 .limit(AUDIO_LOOKBACK)
-                 .find { |m| m.attachment_file_id }
-    return nil unless row
-    { file_id:   row.attachment_file_id,
-      mime_type: row.attachment_mime_type,
-      duration:  row.attachment_duration,
-      title:     row.attachment_title,
-      performer: row.attachment_performer }
+    AudioAttachment.resolve(message, chat_id: chat_id, now: now)
   end
 end
 
@@ -77,6 +37,7 @@ class AttachedAudioTest < Minitest::Test
     assert_equal 'Song', result[:title]
     assert_equal 'Artist', result[:performer]
     refute result.key?(:url), 'attached_audio must NOT pre-resolve URL — that is lazy'
+    assert_equal :message, result[:source]
   end
 
   def test_voice_attachment_works_even_without_title_performer
@@ -161,6 +122,7 @@ class AttachedAudioTest < Minitest::Test
     refute_nil result
     assert_equal 'OLD-AUD', result[:file_id]
     assert_equal 'Old', result[:title]
+    assert_equal :reply, result[:source]
   end
 
   def test_current_message_audio_takes_precedence_over_reply_target
@@ -189,7 +151,7 @@ class RecentChatAudioLookbackTest < BotTest
   def msg(**attrs)
     defaults = { audio: nil, voice: nil, document: nil, video: nil,
                  video_note: nil, animation: nil, reply_to_message: nil,
-                 message_thread_id: nil }
+                 message_thread_id: nil, chat: nil }
     Struct.new(*defaults.keys).new(*defaults.merge(attrs).values_at(*defaults.keys))
   end
 
@@ -205,6 +167,7 @@ class RecentChatAudioLookbackTest < BotTest
     refute_nil result
     assert_equal 'NEW_AUD', result[:file_id], 'must return the most recent attachment, not the absolute most recent message'
     assert_equal 'audio/wav', result[:mime_type]
+    assert_equal :lookback, result[:source]
   end
 
   def test_lookback_returns_nil_when_no_recent_attachments
@@ -244,23 +207,60 @@ class RecentChatAudioLookbackTest < BotTest
     assert_equal 'QUOTED', result[:file_id], 'reply-target audio takes precedence over lookback'
   end
 
-  # Forum-topic isolation: a "сделай кавер" asked in topic A must not
-  # match an audio uploaded in topic B (or in the General/no-thread space).
-  # Mirrors how get_chat_context already scopes the agent's context.
-  def test_lookback_filters_by_message_thread_id
+  ForumChat = Struct.new(:is_forum)
+
+  # Forum-topic isolation: in a real forum chat, a "сделай кавер" asked in
+  # topic A must not match an audio uploaded in topic B.
+  def test_lookback_filters_by_message_thread_id_in_forum_chat
     make_msg_row(message_id: 1, attachment_file_id: 'TOPIC_B', attachment_mime_type: 'audio/mpeg',
                  message_thread_id: 999)
-    # Asking in topic 100 — should NOT match the topic-999 audio.
-    result = AttachedAudioHarness.new(message: msg(message_thread_id: 100), chat_id: CHAT).attached_audio
-    assert_nil result, 'audio from a different topic must not be matched'
+    result = AttachedAudioHarness.new(message: msg(message_thread_id: 100, chat: ForumChat.new(true)),
+                                      chat_id: CHAT).attached_audio
+    assert_nil result, 'audio from a different forum topic must not be matched'
   end
 
-  def test_lookback_finds_audio_in_same_thread
+  def test_lookback_finds_audio_in_same_thread_in_forum_chat
     make_msg_row(message_id: 1, attachment_file_id: 'TOPIC_100', attachment_mime_type: 'audio/mpeg',
                  message_thread_id: 100)
-    result = AttachedAudioHarness.new(message: msg(message_thread_id: 100), chat_id: CHAT).attached_audio
+    result = AttachedAudioHarness.new(message: msg(message_thread_id: 100, chat: ForumChat.new(true)),
+                                      chat_id: CHAT).attached_audio
     refute_nil result
     assert_equal 'TOPIC_100', result[:file_id]
+  end
+
+  # Non-forum supergroup: message_thread_id is just the root of a reply
+  # chain (commit 54e0499). Audio posted as a plain message (thread nil)
+  # must still be found by a request sent as a reply inside some chain.
+  def test_lookback_ignores_thread_id_in_non_forum_chat
+    make_msg_row(message_id: 1, attachment_file_id: 'PLAIN', attachment_mime_type: 'audio/mpeg',
+                 message_thread_id: nil)
+    [nil, ForumChat.new(false)].each do |chat|
+      result = AttachedAudioHarness.new(message: msg(message_thread_id: 555, chat: chat),
+                                        chat_id: CHAT).attached_audio
+      refute_nil result, "non-forum chat (#{chat.inspect}) must not filter by thread"
+      assert_equal 'PLAIN', result[:file_id]
+    end
+  end
+
+  # Prod 2026-08-24: a 12-day-old upload inside the 20-row window of a quiet
+  # DM got covered instead of the song the user meant.
+  def test_lookback_ignores_attachments_older_than_max_age
+    now = Time.now
+    make_msg_row(message_id: 1, attachment_file_id: 'STALE', attachment_mime_type: 'audio/mpeg',
+                 created_at: now - (AudioAttachment::LOOKBACK_MAX_AGE_MIN + 1) * 60)
+    assert_nil AttachedAudioHarness.new(message: msg, chat_id: CHAT, now: now).attached_audio,
+               'attachment older than LOOKBACK_MAX_AGE_MIN must be ignored'
+  end
+
+  def test_lookback_within_max_age_reports_age_and_uploader
+    now = Time.now
+    make_msg_row(message_id: 1, attachment_file_id: 'FRESH', attachment_mime_type: 'audio/mpeg',
+                 user_uid: 4242, created_at: now - 12 * 60)
+    result = AttachedAudioHarness.new(message: msg, chat_id: CHAT, now: now).attached_audio
+    refute_nil result
+    assert_equal 'FRESH', result[:file_id]
+    assert_equal 12, result[:age_min]
+    assert_equal 4242, result[:uploader_uid]
   end
 
   # Latent-safety: the column is currently only written by save_message for

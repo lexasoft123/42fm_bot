@@ -564,4 +564,51 @@ class SunoHandlerChainTest < BotTest
     SunoClient.singleton_class.send(:alias_method, :new, :__new) rescue nil
     SunoClient.singleton_class.send(:remove_method, :__new)      rescue nil
   end
+  # --- Permanent submit rejections (SunoClient#submit_error renders 400/401/
+  # 404/413/429 bare) must fail in the handler with an agent_event — NOT be
+  # re-raised into TaskRunner, whose permanent regex would post a raw
+  # "Ошибка: …" and skip the agent_event (prod add-vocals 1044/1246/3789).
+
+  def with_raising_client(method, message)
+    stub = Object.new
+    stub.define_singleton_method(method) { |**_| raise message }
+    SunoClient.singleton_class.send(:alias_method, :__new_perm, :new)
+    SunoClient.singleton_class.send(:define_method, :new) { stub }
+    yield
+  ensure
+    SunoClient.singleton_class.send(:alias_method, :new, :__new_perm) rescue nil
+    SunoClient.singleton_class.send(:remove_method, :__new_perm) rescue nil
+  end
+
+  def make_add_vocals_task
+    BackgroundTask.create!(task_type: 'suno_add_vocals', chat_id: CHAT, max_attempts: 60,
+                           params: { upload_url: 'https://example.com/in.mp3', theme: 'про море',
+                                     title: 'Море', style: 'soul', user_uid: 1 }.to_json)
+  end
+
+  def test_permanent_submit_rejection_fails_now_with_agent_event
+    task = make_add_vocals_task
+    msg = 'Suno /api/v1/generate/add-vocals failed: 400 No taskId in response: negativeTags is required'
+    result = with_raising_client(:add_vocals, msg) { @handler.send(:submit_add_vocals, task, silent_api) }
+    assert_equal :failed, result
+    fresh = BackgroundTask.find(task.id)
+    assert_equal 'failed', fresh.status
+    assert_equal 'submit_rejected', fresh.result_hash['error']
+    event = BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').last
+    refute_nil event, 'permanent rejection must emit agent_event'
+    assert_match(/negativeTags is required/, event.params_hash['summary'])
+  end
+
+  # Negative control: a retryable code keeps the old re-raise + counter path.
+  def test_retryable_submit_error_still_reraises_and_counts
+    task = make_add_vocals_task
+    msg = 'Suno /api/v1/generate/add-vocals failed: code=430 call frequency too high'
+    assert_raises(RuntimeError) do
+      with_raising_client(:add_vocals, msg) { @handler.send(:submit_add_vocals, task, silent_api) }
+    end
+    fresh = BackgroundTask.find(task.id)
+    assert_equal 'pending', fresh.status
+    assert_equal 1, fresh.params_hash['submit_failures']
+    assert_equal 0, BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').count
+  end
 end

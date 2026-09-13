@@ -61,6 +61,43 @@ class SunoClient
     'свинг'      => 'swing, big band, brass, jazz, upbeat, 1940s, danceable',
   }.freeze
 
+  # Vocal / stem separation (POST /api/v1/vocal-removal/generate).
+  #   separate_vocal      → vocals + instrumental            (10 credits)
+  #   split_stem          → up to 12 instrument stems         (50 credits)
+  #   split_stem_advanced → one named instrument (stemName)   (20 credits)
+  SEPARATION_TYPES = %w[separate_vocal split_stem split_stem_advanced].freeze
+
+  # `stemName` enum for split_stem_advanced, verbatim from
+  # docs.sunoapi.org/suno-api/separate-vocals-from-music.
+  STEM_NAMES = [
+    'Lead Vocal', 'Drum Kit', 'Kick', 'Snare', 'Risers', 'Bass', 'Backing Vocals', 'Piano',
+    'Electric Guitar', 'Percussion', 'String Section', 'Synth', 'Acoustic Guitar', 'Sound Effects',
+    'Synth Pad', 'Synth Bass', 'Guitar', 'Brass Section', 'Organ', 'Electronic Drum Kit',
+    'Lead Electric Guitar', 'Synth Keys', 'Rhythm Electric Guitar', 'Electric Piano', 'Upright Bass',
+    'Keyboards', 'Distorted Electric Guitar', 'Synth Strings', 'Synth Lead', 'Woodwinds',
+    'Rhythm Acoustic Guitar', 'Flute', 'Harp', 'Tambourine', 'Trumpet', 'Arpeggiator', 'Accordion',
+    'Fiddle', 'Pedal Steel Guitar', 'Synth Voice', 'Violin', 'Digital Piano', 'Synth Brass', 'Mandolin',
+    'Choir', 'Banjo', 'Bells', 'Clarinet', 'Tenor Saxophone', 'Trombone', 'Shaker', 'French Horn',
+    'Glockenspiel', 'Electric Bass', 'Cello', 'Timpani', 'Harmonica', 'Marimba', 'Vibraphone',
+    'Lap Steel Guitar', 'Saxophone', 'Orchestra', 'Horns', 'Cymbals', 'Hand Clap', 'Oboe', 'Celesta',
+    'Congas', 'Drone', 'Alto Saxophone', 'Double Bass', 'Ukulele', 'Harpsichord', 'Baritone Saxophone',
+    'Xylophone', 'Tuba', 'Bass Guitar', 'Whistle', 'Lead Guitar', 'Rhodes', '808', 'Bongos', 'Bassoon',
+    'Cowbell', 'Viola', 'Sitar', 'Steel Drums', 'Piccolo', 'Theremin', 'Bagpipes', 'Hi-Hat', 'Music Box',
+    'Melodica', 'Tabla', 'Koto', 'Djembe', 'Taiko', 'Didgeridoo'
+  ].freeze
+
+  # record-info `response` field → human stem name, in delivery order.
+  STEM_FIELDS = {
+    'vocalUrl' => 'Vocals', 'instrumentalUrl' => 'Instrumental', 'backingVocalsUrl' => 'Backing Vocals',
+    'drumsUrl' => 'Drums', 'bassUrl' => 'Bass', 'guitarUrl' => 'Guitar', 'keyboardUrl' => 'Keyboard',
+    'percussionUrl' => 'Percussion', 'stringsUrl' => 'Strings', 'synthUrl' => 'Synth', 'fxUrl' => 'FX',
+    'brassUrl' => 'Brass', 'woodwindsUrl' => 'Woodwinds'
+  }.freeze
+
+  # Body/HTTP codes on submit that retrying can't fix: bad params, auth,
+  # wrong path, input too long, out of credits. See #submit_error.
+  PERMANENT_SUBMIT_CODES = [400, 401, 404, 413, 429].freeze
+
   def initialize
     @base_url = Settings.suno['api_url']
     @api_key  = Settings.suno['api_key']
@@ -163,6 +200,73 @@ class SunoClient
     :pending
   end
 
+  # Submit a vocal/stem separation. Source is EITHER a Suno-generated clip
+  # (`task_id` + `audio_id`) OR an arbitrary audio URL (`audio_url`, ≤20 MB)
+  # — the API rejects both at once. `stem_name` only applies to
+  # split_stem_advanced. Each call is billed; there is no server-side cache.
+  def separate_vocals(type:, audio_url: nil, task_id: nil, audio_id: nil, stem_name: nil)
+    raise ArgumentError, "unknown separation type: #{type.inspect}" unless SEPARATION_TYPES.include?(type)
+    body = { type: type, callBackUrl: 'https://example.com/noop' }
+    if audio_url.to_s.empty?
+      raise ArgumentError, 'separate_vocals needs audio_url or task_id+audio_id' if task_id.to_s.empty? || audio_id.to_s.empty?
+      body[:taskId]  = task_id
+      body[:audioId] = audio_id
+    else
+      body[:audioUrl] = audio_url
+    end
+    body[:stemName] = stem_name if type == 'split_stem_advanced' && !stem_name.to_s.empty?
+    post_for_task_id('/api/v1/vocal-removal/generate', **body)
+  end
+
+  # Poll once for a separation task. Returns :pending,
+  # { stems: [{ name:, url: }, ...] } or { failed: true, error: '...' }.
+  # Response shape (docs get-vocal-separation-details):
+  #
+  #   { data: { successFlag: 'PENDING' | 'SUCCESS' | 'CREATE_TASK_FAILED'
+  #             | 'GENERATE_AUDIO_FAILED' | 'CALLBACK_EXCEPTION',
+  #             response: { vocalUrl, instrumentalUrl, drumsUrl, ..., originUrl,
+  #                         originData: [{ audio_url, stem_type_group_name }] },
+  #             errorCode, errorMessage } }
+  #
+  # Never returns :retry — a resubmit is billed again, so an empty SUCCESS is
+  # reported as a failure instead of silently re-running.
+  def poll_separation_once(task_id)
+    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    resp = HTTParty.get("#{@base_url}/api/v1/vocal-removal/record-info",
+      query: { taskId: task_id }, headers: headers, timeout: 30)
+    took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
+    return :pending unless resp.code == 200
+    data = resp.parsed_response['data']
+    return :pending unless data
+    LOGGER.debug "#{self.class.name}#poll_separation_once took=#{took_ms}ms successFlag=#{data['successFlag'].inspect}"
+
+    flag  = data['successFlag']
+    stems = extract_stems(data['response'])
+    # CALLBACK_EXCEPTION only means Suno couldn't reach our placeholder
+    # callBackUrl — if the stems exist, the separation itself succeeded.
+    return { stems: stems } if !stems.empty? && %w[SUCCESS CALLBACK_EXCEPTION].include?(flag)
+
+    err_code = data['errorCode']
+    err_msg  = data['errorMessage']
+    case flag
+    when 'SUCCESS'
+      LOGGER.warn "#{self.class.name}#poll_separation_once SUCCESS without stem urls: response keys=#{(data['response'] || {}).keys.inspect rescue '?'}"
+      { failed: true, error: 'Suno: разделение завершилось, но ссылок на дорожки нет' }
+    when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED', 'CALLBACK_EXCEPTION'
+      LOGGER.warn "#{self.class.name}#poll_separation_once Suno error: flag=#{flag} code=#{err_code} msg=#{err_msg.inspect}"
+      { failed: true, error: format_suno_error(err_code, err_msg.to_s.strip.empty? ? flag : err_msg) }
+    else
+      if (err_code && err_code.to_i != 0) || (err_msg && !err_msg.to_s.empty?)
+        LOGGER.warn "#{self.class.name}#poll_separation_once Suno error: code=#{err_code} msg=#{err_msg.inspect}"
+        return { failed: true, error: format_suno_error(err_code, err_msg) }
+      end
+      :pending
+    end
+  rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
+    LOGGER.warn "#{self.class.name} poll_separation_once: #{e.class}: #{e.message}"
+    :pending
+  end
+
   # Helper: fetch the per-clip `id` array for a completed Suno song task.
   # Used by the WAV-convert handler — `convert_to_wav` requires `audioId`,
   # but we don't currently persist clip ids when a song completes
@@ -234,8 +338,12 @@ class SunoClient
   # poll_* methods, but those are on a single host and not in DB / LLM
   # context.
   URL_REDACT_RE = %r{https?://\S+}.freeze
+  def redact_urls(text)
+    text.to_s.gsub(URL_REDACT_RE, '<url-redacted>')
+  end
+
   def format_suno_error(err_code, err_msg)
-    msg = err_msg.to_s.gsub(URL_REDACT_RE, '<url-redacted>').strip
+    msg = redact_urls(err_msg).strip
     code = err_code.to_s.strip
     if !msg.empty? && !code.empty? && code != '0'
       "Suno [#{code}]: #{msg}"
@@ -335,12 +443,64 @@ class SunoClient
 
   private
 
+  # Submit errors are raised (the handlers' submit rescue counts them) and
+  # can end up in three places: the agent_event summary (DB + LLM context)
+  # via bail_or_retry, TaskRunner's "Ошибка: …" chat notice, and logs. Suno
+  # bodies can echo the uploadUrl/audioUrl back — the Telegram file URL with
+  # the bot token — so the message never carries a raw body. See #submit_error.
   def post_for_task_id(path, **body)
     t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     resp = HTTParty.post("#{@base_url}#{path}", body: body.to_json, headers: headers, timeout: 30)
     LOGGER.debug "#{self.class.name}#post #{path} took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms code=#{resp.code}"
-    raise "Suno #{path} failed: #{resp.code} #{resp.body}" unless resp.code == 200
-    resp.parsed_response.dig('data', 'taskId') || raise("No taskId in response from #{path}")
+    raise submit_error(path, resp.code, resp.body) unless resp.code == 200
+
+    parsed = resp.parsed_response
+    parsed = nil unless parsed.is_a?(Hash)
+    task_id = parsed&.dig('data', 'taskId')
+    return task_id if task_id
+
+    # HTTP 200 with no taskId: Suno puts the real status in the body
+    # (`{code: 400, msg: "..."}`) — prod add-vocals tasks 1044/1246/3789 died
+    # as a bare "No taskId" because this was dropped.
+    raise submit_error(path, parsed && parsed['code'], "No taskId in response#{parsed && parsed['msg'] ? ": #{parsed['msg']}" : ''}")
+  end
+
+  # Message format is load-bearing: TaskRunner#process_one classifies a raised
+  # error by regex — `\s5\d{2}[\s{]` transient, `\s4\d{2}[\s{]` permanent.
+  # Permanent codes and 5xx are rendered " <code> " so those regexes see them;
+  # other codes (405 rate limit, 430 call frequency, 455 maintenance) are
+  # rendered "code=<n>" so they are NOT marked permanent and the handler's
+  # submit-failure cap decides. URLs are redacted and the detail is capped.
+  def submit_error(path, code, detail)
+    n = code.to_s[/\A\d+\z/] && code.to_i
+    code_part = if n.nil? then nil
+                elsif PERMANENT_SUBMIT_CODES.include?(n) || n >= 500 then n.to_s
+                else "code=#{n}"
+                end
+    text = redact_urls(detail).gsub(/\s+/, ' ').strip[0, 300]
+    msg = ["Suno #{path} failed:", code_part, text].compact.reject(&:empty?).join(' ')
+    text.empty? && code_part ? "#{msg} " : msg # the code must be followed by whitespace for the regexes
+  end
+
+  # Pull stem URLs out of a separation record-info `response`. Named fields
+  # first (separate_vocal / split_stem); fall back to `originData` (the only
+  # place split_stem_advanced results may appear — shape undocumented),
+  # skipping the entry that is just the source track (`originUrl`).
+  def extract_stems(response)
+    return [] unless response.is_a?(Hash)
+    stems = STEM_FIELDS.filter_map do |field, name|
+      url = response[field]
+      { name: name, url: url } unless url.to_s.empty?
+    end
+    return stems unless stems.empty?
+
+    origin = response['originUrl'].to_s
+    Array(response['originData']).filter_map do |d|
+      next unless d.is_a?(Hash)
+      url = d['audio_url'] || d['audioUrl']
+      next if url.to_s.empty? || url == origin
+      { name: (d['stem_type_group_name'] || 'Stem').to_s, url: url }
+    end
   end
 
   def headers

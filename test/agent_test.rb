@@ -879,6 +879,31 @@ class RunnerTest < BotTest
     first_call = FakeGptMaster.calls.first
     assert_nil first_call[:system_prompt]
   end
+
+  # Audio on the message itself: "attached" wording, all Suno options listed.
+  def test_audio_hint_for_attached_audio
+    audio = { file_id: 'F', title: 'Демо', duration: 178, mime_type: 'audio/mpeg', source: :message }
+    runner = build_runner(text: 'сделай кавер', user: @user, audio: audio)
+    hint = runner.send(:audio_hint)
+    assert_match(/К сообщению прикреплён аудиофайл/, hint)
+    assert_match(/separate_vocals/, hint)
+    assert_equal :message, runner.instance_variable_get(:@tool_ctx)[:audio_source]
+  end
+
+  # Prod 2026-08-24: a lookback upload was presented as "attached" and the
+  # wrong song got covered. Lookback audio must read as "someone posted this
+  # N min ago", never as attached to the request.
+  def test_audio_hint_for_lookback_audio_names_age_and_uploader_and_says_not_attached
+    uploader = User.create!(uid: 4242, name: 'katya', first_name: 'Екатерина')
+    audio = { file_id: 'F', title: 'Демо', source: :lookback, age_min: 12, uploader_uid: uploader.uid }
+    runner = build_runner(text: 'сделай кавер', user: @user, audio: audio)
+    hint = runner.send(:audio_hint)
+    refute_match(/К сообщению прикреплён/, hint)
+    assert_match(/НЕ прикреплено/, hint)
+    assert_match(/12 мин назад/, hint)
+    assert_match(/katya|Екатерина/, hint)
+    assert_equal :lookback, runner.instance_variable_get(:@tool_ctx)[:audio_source]
+  end
 end
 
 # ==========================================================================

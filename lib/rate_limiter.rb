@@ -1,9 +1,10 @@
 module RateLimiter
   # All Suno-family task types share the 'suno' bucket so the cap applies
-  # whether the agent calls compose_song, add_vocals, cover_audio, or cover_art.
+  # whether the agent calls compose_song, add_vocals, cover_audio, cover_art,
+  # or separate_vocals.
   TASK_TYPES = {
     'image' => %w[image_generate],
-    'suno'  => %w[suno_generate suno_add_vocals suno_cover_audio suno_cover_art]
+    'suno'  => %w[suno_generate suno_add_vocals suno_cover_audio suno_cover_art suno_separate_vocals]
   }.freeze
 
   RATE_LIMIT_REPLIES = {

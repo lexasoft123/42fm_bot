@@ -274,7 +274,7 @@ class MessageResponder
 
   # Title fallback chain for the persisted column: Audio.title (ID3) →
   # Document.file_name minus extension. Mirrors the in-memory computation
-  # in Commands::GptChat#audio_metadata_from so chat context and runtime
+  # in AudioAttachment.metadata_from so chat context and runtime
   # decision-making see the same value.
   def attachment_title_from(src)
     return nil unless src

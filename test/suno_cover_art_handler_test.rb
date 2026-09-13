@@ -102,4 +102,36 @@ class SunoCoverArtHandlerTest < BotTest
     assert_match(/Image content blocked/,   summary,
                  'Suno error detail must reach the agent_event summary verbatim')
   end
+  def with_raising_cover_art(message)
+    stub = Object.new
+    stub.define_singleton_method(:cover_art) { |**_| raise message }
+    SunoClient.singleton_class.send(:alias_method, :__new_perm, :new)
+    SunoClient.singleton_class.send(:define_method, :new) { stub }
+    yield
+  ensure
+    SunoClient.singleton_class.send(:alias_method, :new, :__new_perm) rescue nil
+    SunoClient.singleton_class.send(:remove_method, :__new_perm) rescue nil
+  end
+
+  # Permanent Suno rejection → handler fails with agent_event instead of
+  # re-raising into TaskRunner's raw "Ошибка: …" notice.
+  def test_permanent_submit_rejection_fails_now_with_agent_event
+    task = make_task(external_id: nil)
+    result = with_raising_cover_art('Suno /api/v1/suno/cover/generate failed: 400 cover already generated') do
+      @handler.send(:submit, task, @api)
+    end
+    assert_equal :failed, result
+    assert_equal 'cover_art_submit_rejected', BackgroundTask.find(task.id).result_hash['error']
+    event = BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').last
+    refute_nil event
+    assert_match(/cover already generated/, event.params_hash['summary'])
+  end
+
+  def test_retryable_submit_error_still_reraises
+    task = make_task(external_id: nil)
+    assert_raises(RuntimeError) do
+      with_raising_cover_art('Suno /api/v1/suno/cover/generate failed: 503 upstream') { @handler.send(:submit, task, @api) }
+    end
+    assert_equal 1, BackgroundTask.find(task.id).params_hash['submit_failures']
+  end
 end

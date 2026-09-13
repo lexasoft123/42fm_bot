@@ -89,4 +89,23 @@ class SunoWavConvertHandlerTest < BotTest
     assert_match(/unexpected poll Hash/,         event.params_hash['summary'])
     assert_match(/nothing useful|unexpected/,    event.params_hash['summary'])
   end
+  def test_permanent_submit_rejection_fails_now_with_agent_event
+    task = BackgroundTask.create!(
+      task_type: 'suno_wav_convert', chat_id: CHAT, max_attempts: 60,
+      params: { source_task_id: 'src-1', source_title: 'X', clip_index: 1, audio_id: 'aud-1', user_uid: 1 }.to_json
+    )
+    stub = Object.new
+    stub.define_singleton_method(:convert_to_wav) { |**_| raise 'Suno /api/v1/wav/generate failed: 429 insufficient credits' }
+    SunoClient.singleton_class.send(:alias_method, :__new_perm, :new)
+    SunoClient.singleton_class.send(:define_method, :new) { stub }
+    result = @handler.send(:submit, task, @api)
+    assert_equal :failed, result
+    assert_equal 'wav_submit_rejected', BackgroundTask.find(task.id).result_hash['error']
+    event = BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').last
+    refute_nil event
+    assert_match(/insufficient credits/, event.params_hash['summary'])
+  ensure
+    SunoClient.singleton_class.send(:alias_method, :new, :__new_perm) rescue nil
+    SunoClient.singleton_class.send(:remove_method, :__new_perm) rescue nil
+  end
 end
