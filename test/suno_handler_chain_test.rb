@@ -195,7 +195,7 @@ class SunoHandlerChainTest < BotTest
     assert_equal 'New Title', prompt
   end
 
-  # Suno V5 caps custom-mode prompt at ≤5000 chars. Long lyrics from a
+  # Suno (V5_5/V6) caps custom-mode prompt at ≤5000 chars. Long lyrics from a
   # paste-heavy agent (e.g. concatenated multi-song lyrics) must be
   # truncated rather than being rejected by Suno + burning retries.
   def test_resolve_cover_prompt_truncates_lyrics_to_5000_chars
@@ -260,7 +260,7 @@ class SunoHandlerChainTest < BotTest
       params: { upload_url: 'https://example.com/in.mp3',
                 style: 'jazz', title: 'Minus Track',
                 lyrics: "[Verse 1]\nshould not be sung",
-                topic: '', instrumental: true,
+                topic: '', instrumental: true, model: 'V6',
                 user_uid: 1 }.to_json
     )
     api = OpenStruct.new
@@ -271,6 +271,7 @@ class SunoHandlerChainTest < BotTest
     assert_equal 'Minus Track', kw[:prompt],     'instrumental must replace lyrics with title'
     assert_equal true,          kw[:instrumental]
     assert_equal 'jazz',        kw[:style]
+    assert_equal 'V6',          kw[:model], 'the task\'s model reaches SunoClient'
   ensure
     SunoClient.singleton_class.send(:alias_method, :new, :__new) rescue nil
     SunoClient.singleton_class.send(:remove_method, :__new)      rescue nil

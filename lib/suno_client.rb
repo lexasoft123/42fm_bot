@@ -98,18 +98,48 @@ class SunoClient
   # wrong path, input too long, out of credits. See #submit_error.
   PERMANENT_SUBMIT_CODES = [400, 401, 404, 413, 429].freeze
 
+  # Used only when settings carry no `suno.model`. The old 'V4' fallback had
+  # tighter limits (lyrics 3000 / style 200 / title 80) than our prompts assume.
+  DEFAULT_MODEL = 'V6_WILD'
+
   def initialize
     @base_url = Settings.suno['api_url']
     @api_key  = Settings.suno['api_key']
-    @model    = Settings.suno['model'] || 'V4'
+    @model    = Settings.suno['model'] || DEFAULT_MODEL
+  end
+
+  # Models the agent may choose per request: `suno.models` plus the configured
+  # default. Read at call time (Settings loads after the tools are required).
+  def self.allowed_models
+    default = Settings.suno['model'] || DEFAULT_MODEL
+    (Array(Settings.suno['models']).map(&:to_s).reject(&:empty?) + [default]).uniq
+  end
+
+  # Exact allowed enum value for a requested model (case-insensitive), or nil.
+  def self.match_model(requested)
+    req = requested.to_s.strip
+    return nil if req.empty?
+    allowed_models.find { |m| m.casecmp?(req) }
+  end
+
+  # Per-request model → the exact enum value to send. Blank → default; an
+  # unknown value (model typo, a model since removed from settings, a task
+  # created before a settings change) → default with a WARN, never a 400.
+  def resolve_model(requested)
+    req = requested.to_s.strip
+    return @model if req.empty?
+    match = self.class.match_model(req)
+    return match if match
+    LOGGER.warn "#{self.class.name}: model #{req.inspect} is not in suno.models #{self.class.allowed_models.inspect} — using #{@model}"
+    @model
   end
 
   # Submit song generation request. Returns task_id string.
   # `negative_tags` is omitted from the POST body when empty (as in
   # cover_audio; add_vocals is the exception — the field is required there).
-  def submit(title:, lyrics:, tags:, negative_tags: '', instrumental: false)
+  def submit(title:, lyrics:, tags:, negative_tags: '', instrumental: false, model: nil)
     body = { customMode: true, prompt: lyrics, style: tags, title: title,
-             model: @model, instrumental: instrumental,
+             model: resolve_model(model), instrumental: instrumental,
              callBackUrl: 'https://example.com/noop' }
     body[:negativeTags] = negative_tags unless negative_tags.to_s.empty?
     post_for_task_id('/api/v1/generate', **body)
@@ -124,10 +154,10 @@ class SunoClient
   # submits, `negativeTags` is always sent (empty string when there are none):
   # it is required here, and prod add-vocals submits kept coming back as
   # HTTP 200 without a taskId (tasks 1044/1246/3789).
-  def add_vocals(upload_url:, prompt:, title:, style:, negative_tags: '', vocal_gender: nil)
+  def add_vocals(upload_url:, prompt:, title:, style:, negative_tags: '', vocal_gender: nil, model: nil)
     body = { uploadUrl: upload_url, prompt: prompt, title: title, style: style,
              negativeTags: negative_tags.to_s,
-             model: @model, callBackUrl: 'https://example.com/noop' }
+             model: resolve_model(model), callBackUrl: 'https://example.com/noop' }
     body[:vocalGender]  = vocal_gender  if vocal_gender
     post_for_task_id('/api/v1/generate/add-vocals', **body)
   end
@@ -136,7 +166,7 @@ class SunoClient
   # audio URL in a new style. Returns 2 clips on success.
   #
   # Two modes (per docs.sunoapi.org/suno-api/upload-and-cover-audio):
-  # - custom_mode: true  → `prompt` is sung verbatim as lyrics (≤5000 chars on V5).
+  # - custom_mode: true  → `prompt` is sung verbatim as lyrics (≤5000 chars on V5_5/V6).
   # - custom_mode: false → `prompt` is a "core idea"; Suno auto-generates fresh
   #   lyrics from it (≤500 chars). Suno does NOT preserve the source mp3's
   #   original lyrics in either mode — that is not a feature of this endpoint.
@@ -144,10 +174,10 @@ class SunoClient
   # `instrumental: true` skips vocals entirely; `prompt` then describes mood/
   # instrumentation only (no vocals to sing).
   def cover_audio(upload_url:, style:, title:, prompt:, custom_mode:,
-                  negative_tags: '', vocal_gender: nil, instrumental: false)
+                  negative_tags: '', vocal_gender: nil, instrumental: false, model: nil)
     body = { uploadUrl: upload_url, customMode: custom_mode, instrumental: instrumental,
              style: style, title: title, prompt: prompt,
-             model: @model, callBackUrl: 'https://example.com/noop' }
+             model: resolve_model(model), callBackUrl: 'https://example.com/noop' }
     body[:negativeTags] = negative_tags unless negative_tags.to_s.empty?
     body[:vocalGender]  = vocal_gender  if vocal_gender && !instrumental
     post_for_task_id('/api/v1/generate/upload-cover', **body)
@@ -381,9 +411,12 @@ class SunoClient
         # is the only place to surface them. compose_song already passes
         # lyrics through `params`, so this is additive (not the source of
         # truth there).
+        # `model_name`: which model Suno actually ran — logged and kept in
+        # the task result so a model switch can be verified from prod data.
         { audio_url: song['audioUrl'] || song['audio_url'],
           title: song['title'], duration: song['duration'],
-          lyrics: song['prompt'] }
+          lyrics: song['prompt'],
+          model_name: song['modelName'] || song['model_name'] }
       end
     when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED'
       # Suno-side generation failure. Whether resubmitting is worth it depends
@@ -465,7 +498,7 @@ class SunoClient
   def post_for_task_id(path, **body)
     t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     resp = HTTParty.post("#{@base_url}#{path}", body: body.to_json, headers: headers, timeout: 30)
-    LOGGER.debug "#{self.class.name}#post #{path} took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms code=#{resp.code}"
+    LOGGER.debug "#{self.class.name}#post #{path} took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms code=#{resp.code}#{body[:model] ? " model=#{body[:model]}" : ''}"
     raise submit_error(path, resp.code, resp.body) unless resp.code == 200
 
     parsed = resp.parsed_response

@@ -14,6 +14,7 @@ Agent::ToolRegistry.register(
     'negative_tags' => { type: 'string', description: SUNO_NEGATIVE_TAGS_DESC },
     'instrumental'  => { type: 'boolean', description: 'true если нужен инструментальный кавер в НОВОМ стиле (без вокала), e.g. "сделай инструментальную джаз-версию", или исходный трек инструментальный и пользователь не просит добавить вокал. По умолчанию false (с вокалом). При instrumental=true `lyrics`/`topic` игнорируются. Если нужен минус/караоке САМОЙ записи (оригинальная музыка без голоса) — это не сюда, а separate_vocals.' },
     'with_cover_art' => { type: 'boolean', description: 'true если пользователь хочет ещё и обложку. См. compose_song.' },
+    'model'         => SUNO_MODEL_PARAM,
     'retry_of_task_id' => { type: 'integer', optional: true, description: 'Только для ПОВТОРА неудавшегося кавера: номер task из служебного события cover_failed ("task #N"). Берёт исходник и параметры той задачи (пустые аргументы заполнятся из неё), так что повтор работает и без прикреплённого файла.' },
   },
   handler: ->(args, ctx) {
@@ -36,6 +37,8 @@ Agent::ToolRegistry.register(
     end
     rp = retry_src ? retry_src.params_hash : {}
     arg = ->(key) { v = args[key].to_s; v.strip.empty? ? rp[key].to_s : v }
+    model, model_error = SunoToolModel.resolve(args['model'], inherited: rp['model'])
+    next model_error if model_error
 
     upload_url = args['upload_url'].to_s.strip
     upload_file_id = nil
@@ -66,7 +69,7 @@ Agent::ToolRegistry.register(
       mins = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno', role: role)
       next Agent::ToolResult.deferred(
         user_text:    RateLimiter.reply(ctx[:chat_id], 'suno', role: role),
-        intent:       "сделать кавер через #{mins} мин: #{(args['title'] || 'трек').to_s.slice(0, 80)}#{retry_src ? " (cover_audio с retry_of_task_id=#{retry_src.id})" : ''}",
+        intent:       "сделать кавер через #{mins} мин: #{(args['title'] || 'трек').to_s.slice(0, 80)}#{retry_src ? " (cover_audio с retry_of_task_id=#{retry_src.id})" : ''}#{SunoToolModel.intent_suffix(model)}",
         retry_in_min: mins
       )
     end
@@ -118,6 +121,7 @@ Agent::ToolRegistry.register(
         negative_tags:    arg.call('negative_tags'),
         instrumental:     args['instrumental'] == true || rp['instrumental'] == true,
         with_cover_art:   args['with_cover_art'] == true,
+        model:            model, # validated; a retry keeps the failed task's model unless overridden
         retry_of_task_id: retry_src&.id,
         user_uid:         ctx[:user]&.uid,
       }.to_json

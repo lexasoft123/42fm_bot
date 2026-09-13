@@ -12,6 +12,7 @@ Agent::ToolRegistry.register(
     'vocal_gender'  => { type: 'string', description: 'Опционально: "m" или "f" — пол вокалиста.' },
     'negative_tags' => { type: 'string', description: SUNO_NEGATIVE_TAGS_DESC },
     'with_cover_art' => { type: 'boolean', description: 'true если пользователь хочет ещё и обложку. См. compose_song.' },
+    'model'         => SUNO_MODEL_PARAM,
     'retry_of_task_id' => { type: 'integer', optional: true, description: 'Только для ПОВТОРА неудавшейся задачи: номер task из служебного события add_vocals_failed ("task #N"). Берёт исходник и параметры той задачи (пустые аргументы заполнятся из неё).' },
   },
   handler: ->(args, ctx) {
@@ -34,6 +35,8 @@ Agent::ToolRegistry.register(
     end
     rp = retry_src ? retry_src.params_hash : {}
     arg = ->(key) { v = args[key].to_s; v.strip.empty? ? rp[key].to_s : v }
+    model, model_error = SunoToolModel.resolve(args['model'], inherited: rp['model'])
+    next model_error if model_error
 
     upload_url = args['upload_url'].to_s.strip
     upload_file_id = nil
@@ -64,7 +67,7 @@ Agent::ToolRegistry.register(
       mins = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno', role: role)
       next Agent::ToolResult.deferred(
         user_text:    RateLimiter.reply(ctx[:chat_id], 'suno', role: role),
-        intent:       "подпеть через #{mins} мин: #{(args['title'] || 'трек').to_s.slice(0, 80)}#{retry_src ? " (add_vocals с retry_of_task_id=#{retry_src.id})" : ''}",
+        intent:       "подпеть через #{mins} мин: #{(args['title'] || 'трек').to_s.slice(0, 80)}#{retry_src ? " (add_vocals с retry_of_task_id=#{retry_src.id})" : ''}#{SunoToolModel.intent_suffix(model)}",
         retry_in_min: mins
       )
     end
@@ -83,6 +86,7 @@ Agent::ToolRegistry.register(
         vocal_gender:     args['vocal_gender'].to_s.strip.empty? ? rp['vocal_gender'] : args['vocal_gender'],
         negative_tags:    arg.call('negative_tags'),
         with_cover_art:   args['with_cover_art'] == true,
+        model:            model, # validated; a retry keeps the failed task's model unless overridden
         retry_of_task_id: retry_src&.id,
         user_uid:         ctx[:user]&.uid,
       }.to_json

@@ -40,7 +40,8 @@ class SunoTaskHandler
         title:         p['title'],
         style:         p['style'].to_s,
         negative_tags: p['negative_tags'].to_s,
-        vocal_gender:  p['vocal_gender']
+        vocal_gender:  p['vocal_gender'],
+        model:         p['model']
       )
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit add_vocals: #{e.message}", raise_on_retry: e)
@@ -67,7 +68,8 @@ class SunoTaskHandler
         custom_mode:   custom_mode,
         negative_tags: p['negative_tags'].to_s,
         vocal_gender:  p['vocal_gender'],
-        instrumental:  p['instrumental'] == true
+        instrumental:  p['instrumental'] == true,
+        model:         p['model']
       )
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit cover_audio: #{e.message}", raise_on_retry: e)
@@ -90,7 +92,7 @@ class SunoTaskHandler
   # Returns [custom_mode, prompt] for Suno's upload-cover endpoint.
   #
   # Suno requires `prompt` to be non-empty in BOTH modes (≤5000 chars in
-  # custom mode on V5, ≤500 chars in auto mode), and has no "preserve
+  # custom mode on V5_5/V6, ≤500 chars in auto mode), and has no "preserve
   # original lyrics" option. The fallback chain guarantees a sensible
   # non-empty prompt regardless of what the agent supplied.
   #
@@ -174,7 +176,8 @@ class SunoTaskHandler
 
     begin
       suno_task_id = SunoClient.new.submit(title: title, lyrics: p['lyrics'], tags: tags,
-                                           negative_tags: p['negative_tags'].to_s)
+                                           negative_tags: p['negative_tags'].to_s,
+                                           model: p['model'])
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit: #{e.message}", raise_on_retry: e)
     end
@@ -241,7 +244,7 @@ class SunoTaskHandler
         :failed
       end
     when Array
-      LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result.size} clips"
+      LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result.size} clips model_name=#{result.map { |c| c[:model_name] }.compact.uniq.join(',').presence || '?'}"
       ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
       p = task.params_hash
       title = p['title'] || 'Песня от 42FM'

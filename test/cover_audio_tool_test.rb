@@ -7,6 +7,11 @@ unless Settings.respond_to?(:auth)
     { 'rate_limits' => { 'suno' => { 'max' => 100, 'window_minutes' => 60 } } }
   }
 end
+unless Settings.respond_to?(:suno)
+  Settings.singleton_class.send(:define_method, :suno) {
+    { 'api_url' => 'https://api.sunoapi.org', 'api_key' => 'k', 'model' => 'V6_WILD', 'models' => %w[V6_WILD V6 V5_5] }
+  }
+end
 unless Settings.respond_to?(:replies)
   Settings.singleton_class.send(:define_method, :replies) { {} }
 end
@@ -166,7 +171,7 @@ class CoverAudioToolTest < BotTest
                            params: { upload_url: 'https://api.telegram.org/file/botX/music/file_1667.mp3',
                                      upload_file_id: 'FID-1667', style: 'rhythm and blues', title: 'Остаться собой',
                                      lyrics: "[Verse]\nСколько печальных историй", topic: '', instrumental: false,
-                                     user_uid: 1 }.to_json)
+                                     model: 'V5_5', user_uid: 1 }.to_json)
   end
 
   def call_retry(args)
@@ -184,6 +189,7 @@ class CoverAudioToolTest < BotTest
     assert_equal 'rhythm and blues', p['style']
     assert_equal 'Остаться собой', p['title']
     assert_match(/Сколько печальных историй/, p['lyrics'])
+    assert_equal 'V5_5', p['model'], 'a retry keeps the failed task\'s model unless overridden'
     assert_equal src.id, p['retry_of_task_id']
   end
 
@@ -253,5 +259,55 @@ class CoverAudioToolTest < BotTest
     result = tool.handler.call({ 'retry_of_task_id' => src.id }, ctx)
     assert_match(/уже в работе/, result)
     assert_equal 1, BackgroundTask.where(chat_id: CHAT, task_type: 'suno_add_vocals', status: 'pending').count
+  end
+  def with_rate_limited_suno
+    RateLimiter.singleton_class.send(:alias_method, :__exceeded_m, :exceeded?)
+    RateLimiter.singleton_class.send(:define_method, :exceeded?) { |_, _, **_| true }
+    RateLimiter.singleton_class.send(:alias_method, :__minutes_m, :minutes_until_free)
+    RateLimiter.singleton_class.send(:define_method, :minutes_until_free) { |_, _, **_| 9 }
+    RateLimiter.singleton_class.send(:alias_method, :__reply_m, :reply)
+    RateLimiter.singleton_class.send(:define_method, :reply) { |_, _, **_| 'wait' }
+    yield
+  ensure
+    RateLimiter.singleton_class.send(:alias_method, :exceeded?, :__exceeded_m) rescue nil
+    RateLimiter.singleton_class.send(:remove_method, :__exceeded_m) rescue nil
+    RateLimiter.singleton_class.send(:alias_method, :minutes_until_free, :__minutes_m) rescue nil
+    RateLimiter.singleton_class.send(:remove_method, :__minutes_m) rescue nil
+    RateLimiter.singleton_class.send(:alias_method, :reply, :__reply_m) rescue nil
+    RateLimiter.singleton_class.send(:remove_method, :__reply_m) rescue nil
+  end
+
+  def test_unavailable_model_is_refused_before_anything_is_created
+    result = @tool.handler.call({ 'style' => 'jazz', 'title' => 'X', 'upload_url' => 'https://example.com/a.mp3', 'model' => 'V4' },
+                                { chat_id: CHAT, user: @user })
+    assert_match(/"V4" нет/, result)
+    assert_equal 0, BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio').count
+  end
+
+  def test_retry_explicit_model_overrides_the_failed_tasks_model
+    src = make_failed_cover # model V5_5
+    call_retry({ 'retry_of_task_id' => src.id, 'model' => 'v6' })
+    assert_equal 'V6', BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'pending').last.params_hash['model']
+  end
+
+  # A model copied from an old task that settings no longer allow is not the
+  # agent's mistake — the retry proceeds on the default instead of failing.
+  def test_retry_with_inherited_model_no_longer_allowed_uses_default
+    src = make_failed_cover
+    src.update_columns(params: src.params_hash.merge('model' => 'V3_5').to_json)
+    result = call_retry({ 'retry_of_task_id' => src.id })
+    refute_match(/нет\. Доступные/, result.to_s)
+    assert_nil BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'pending').last.params_hash['model']
+  end
+
+  def test_rate_limited_deferrals_keep_model_for_cover_and_add_vocals
+    ctx = { chat_id: CHAT, user: @user }
+    with_rate_limited_suno do
+      cover = @tool.handler.call({ 'style' => 'jazz', 'title' => 'X', 'upload_url' => 'https://example.com/a.mp3', 'model' => 'V6' }, ctx)
+      assert_match(/model=V6/, cover.deferred_intent)
+      vocals = Agent::ToolRegistry.find('add_vocals').handler.call(
+        { 'theme' => 'x', 'style' => 's', 'title' => 'T', 'upload_url' => 'https://example.com/a.mp3', 'model' => 'V5_5' }, ctx)
+      assert_match(/model=V5_5/, vocals.deferred_intent)
+    end
   end
 end

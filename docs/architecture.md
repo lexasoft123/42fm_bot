@@ -455,7 +455,7 @@ Generic DB-backed persistent task system for long-running operations. A poller t
 3. Enqueue: `BackgroundTask.create!(task_type: 'my_type', chat_id: ..., params: {}.to_json)`
 
 **Current handlers:**
-- `SunoTaskHandler` (`suno_generate`) — LLM request parsing → GPT lyrics composition → LLM tag enrichment → Suno V5 API submit → poll → download both clip variants → send as media group with `Performer_-_Song_Name.mp3` filenames → send lyrics as reply. Uses `ChatContext` for context-aware lyrics. Triggered exclusively via the `compose_song` agent tool (no direct command).
+- `SunoTaskHandler` (`suno_generate`) — LLM request parsing → GPT lyrics composition → LLM tag enrichment → Suno API submit (per-task `model`, default V6_WILD) → poll → download both clip variants → send as media group with `Performer_-_Song_Name.mp3` filenames → send lyrics as reply. Uses `ChatContext` for context-aware lyrics. Triggered exclusively via the `compose_song` agent tool (no direct command).
 - `ImageGenTaskHandler` (`image_generate`) — LLM English prompt generation (with chat context + knowledge) → FLUX 2 API submit → poll → send photo. Uses `ChatContext` for context-aware prompts. Triggered exclusively via the `generate_image` agent tool (no direct command).
 - `KnowledgeReviewHandler` (`knowledge_review`, plus the legacy `knowledge_compact` type as a drain for pending rows) — calls `KnowledgeBase.review!` for the task's chat; logs to `log/knowledge_compact.log`; rescues and marks the task failed itself rather than letting TaskRunner post an error into the chat.
 - `WrappedDigestHandler` (`weekly_wrapped`) — weekly Chat Wrapped auto-post with the retry-safe «Революция» roll (see "Chat Wrapped"). Enqueued by `CronScheduler#maybe_fire_digests`.
@@ -471,7 +471,8 @@ Single source of truth for chat context and knowledge lookup. Included by task h
 - `ChatContext.display_name(name:, first_name:, last_name:)` — module helper: flat-string label used by `Agent::Runner#trigger_user_display`. Shared with `serialize_msg` so the trigger line and history rows agree on every formatting edge case.
 
 ### SunoClient — `lib/suno_client.rb`
-HTTP client for the Suno AI song generation API (`sunoapi.org`), using V5 model. Key methods:
+HTTP client for the Suno AI song generation API (`sunoapi.org`). Key methods:
+- **Model** — `suno.model` (default `V6_WILD`, the experimental/creative V6 variant; `SunoClient::DEFAULT_MODEL` when unset — the old `'V4'` fallback had tighter limits than our prompts) plus `suno.models` (`[V6_WILD, V6, V5_5]`) that the agent may choose per request via the optional `model` arg of `compose_song` / `cover_audio` / `add_vocals` (shared `SUNO_MODEL_PARAM`, enum read from settings at schema-build time). The tools validate it up front with `SunoToolModel.resolve` (in `_suno_language_rule.rb`, before the rate-limit check and before any task exists): an agent-supplied model not in `SunoClient.allowed_models` returns an error string listing the allowed models, so "на v5" gets corrected in the same turn instead of silently running on the default; a model inherited from a `retry_of_task_id` source that settings no longer allow just means the default. The exact enum value is stored in `task.params['model']` (resubmits and retries keep it), and a rate-limited deferred intent carries `(model=…)` so the cron retry keeps it too. At submit, `SunoClient#resolve_model` is the last line of defence for old rows / settings changes: blank or unknown → default with a WARN (never a 400). `submit` / `add_vocals` / `cover_audio` take `model:`; the POST debug line logs it, and `poll_once` keeps Suno's `modelName` as each clip's `model_name` (logged on completion, stored in `result`). V6 changed no params, limits or response shapes vs V5_5. In-flight tasks created before a model change have no `model` param and run on the new default.
 - `submit(title:, lyrics:, tags:, negative_tags: '')` — POST to `/api/v1/generate`, returns `task_id`. `negative_tags` maps to Suno's `negativeTags` field (exclusions applied after positives); the key is **dropped from the POST body** when the value is empty (mirrors `vocal_gender` conditional in `add_vocals`/`cover_audio`).
 - `poll_once(task_id)` — GET status, returns `:pending`, `Array<{ audio_url:, title:, duration:, lyrics: }>` (all clip variants), `:retry` (SUCCESS without clips), `{ generation_failed: true, error: }` (`CREATE_TASK_FAILED` / `GENERATE_AUDIO_FAILED`, Suno's reason included and logged — the handler decides per task type), or `{ failed: true, error: }` (permanent: `SENSITIVE_WORD_ERROR`, error fields while PENDING)
 - `add_vocals(...)` always sends `negativeTags` (empty string when none) — required by the add-vocals endpoint, unlike generate / upload-cover where it is dropped when empty
@@ -518,7 +519,7 @@ When the user DID supply verbatim lyrics, the handler skips composition and runs
 Enumerated section-marker palette (composer picks only what fits the genre): `[Intro] [Verse] [Pre-Chorus] [Chorus] [Hook] [Post-Chorus] [Bridge] [Instrumental Bridge] [Interlude] [Break] [Build] [Drop] [Solo] [Instrumental] [Spoken Word] [Whisper] [Ad-lib] [Harmony] [Outro]`.
 
 #### Cover Audio mode resolution
-The `/api/v1/generate/upload-cover` endpoint takes a `customMode` flag + a `prompt` field whose meaning depends on mode — `customMode: true` sings `prompt` verbatim as lyrics (≤5000 chars on V5); `customMode: false` treats `prompt` as a "core idea" theme and Suno auto-generates fresh lyrics from it (≤500 chars). Suno does NOT preserve the original mp3's lyrics in either mode. The tool exposes two explicit args: `lyrics` (verbatim user-provided text → custom mode) and `topic` (short Russian theme phrase → auto mode).
+The `/api/v1/generate/upload-cover` endpoint takes a `customMode` flag + a `prompt` field whose meaning depends on mode — `customMode: true` sings `prompt` verbatim as lyrics (≤5000 chars on V5_5/V6); `customMode: false` treats `prompt` as a "core idea" theme and Suno auto-generates fresh lyrics from it (≤500 chars). Suno does NOT preserve the original mp3's lyrics in either mode. The tool exposes two explicit args: `lyrics` (verbatim user-provided text → custom mode) and `topic` (short Russian theme phrase → auto mode).
 
 `SunoTaskHandler#resolve_cover_prompt` resolution order: `instrumental=true` → auto-mode + title-as-prompt (lyrics/topic ignored — prompt isn't sung under instrumental but Suno still requires a value); else `lyrics` (truncated to 5000) → `topic` (truncated to 500) → legacy `prompt` if present (back-compat for in-flight tasks at deploy time, treated as topic) → `title` fallback.
 
@@ -954,7 +955,8 @@ knowledge:
 suno:
   api_url: https://api.sunoapi.org
   api_key: ...
-  model: V5
+  model: V6_WILD                  # default; V6 / V5_5 selectable per request
+  models: [V6_WILD, V6, V5_5]
 flux:
   api_url: https://api.bfl.ai     # legacy top-level block (read by FluxAdapter back-compat shim)
   api_key: ...

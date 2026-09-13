@@ -285,7 +285,14 @@ knowledge:
 
 suno:
   api_url: 'https://api.sunoapi.org'
-  model: 'V5_5'
+  # Default Suno model (sunoapi.org `model` enum). V6_WILD is the experimental,
+  # more creative V6 variant; V6 is the standard one. V5_5 is deprecated
+  # upstream but still accepted — kept for people who ask for the old sound.
+  # Same limits for all three (lyrics 5000 / style 1000 / title 100).
+  model: 'V6_WILD'
+  # Models the agent may pick per request (`model` arg of compose_song /
+  # cover_audio / add_vocals). The default above is always allowed.
+  models: ['V6_WILD', 'V6', 'V5_5']
   lyrics_prompt: |
     Ты — талантливый поэт-песенник радиостанции 42FM по имени Ботомиэль Жзяцлельман.
     Факты о чате и его участниках: {KNOWLEDGE}

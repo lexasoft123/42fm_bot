@@ -1,4 +1,5 @@
 require_relative 'test_helper'
+require 'yaml'
 LOGGER = Logger.new(IO::NULL) unless defined?(LOGGER)
 
 # Stub Settings for SunoClient — it reads api_url/api_key/model at init.
@@ -628,5 +629,77 @@ class SunoClientTest < Minitest::Test
   def test_poll_once_success_without_clips_is_retry
     body = { 'data' => { 'status' => 'SUCCESS', 'response' => { 'sunoData' => [] } } }
     assert_equal :retry, with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+  end
+  # --- Model selection (V6_WILD default, per-request V6 / V5_5) ---
+
+  def with_suno_settings(hash)
+    Settings.singleton_class.send(:alias_method, :__suno_models_test, :suno)
+    Settings.singleton_class.send(:define_method, :suno) { hash }
+    yield
+  ensure
+    Settings.singleton_class.send(:alias_method, :suno, :__suno_models_test) rescue nil
+    Settings.singleton_class.send(:remove_method, :__suno_models_test) rescue nil
+  end
+
+  V6_SETTINGS = { 'api_url' => 'https://api.sunoapi.org', 'api_key' => 'k',
+                  'model' => 'V6_WILD', 'models' => %w[V6_WILD V6 V5_5] }.freeze
+
+  def test_committed_settings_default_to_v6_wild_and_keep_v5_5
+    suno = YAML.load_file(File.expand_path('../config/settings.common.yml', __dir__))['suno']
+    assert_equal 'V6_WILD', suno['model']
+    assert_includes suno['models'], 'V6'
+    assert_includes suno['models'], 'V5_5', 'V5_5 stays selectable'
+  end
+
+  def test_missing_model_setting_falls_back_to_v6_wild_not_v4
+    captured = []
+    with_suno_settings('api_url' => 'https://api.sunoapi.org', 'api_key' => 'k') do
+      with_stubbed_post(captured: captured) { SunoClient.new.submit(title: 't', lyrics: 'l', tags: 'rock') }
+    end
+    assert_equal 'V6_WILD', captured.last[:body]['model']
+  end
+
+  def test_allowed_models_are_settings_list_plus_default
+    with_suno_settings(V6_SETTINGS.merge('model' => 'V6', 'models' => %w[V6_WILD V5_5])) do
+      assert_equal %w[V6_WILD V5_5 V6], SunoClient.allowed_models
+    end
+  end
+
+  def test_per_request_model_is_sent_on_all_generation_submits
+    captured = []
+    with_suno_settings(V6_SETTINGS) do
+      with_stubbed_post(captured: captured) do
+        c = SunoClient.new
+        c.submit(title: 't', lyrics: 'l', tags: 'rock', model: 'V5_5')
+        c.add_vocals(upload_url: 'https://x/a.mp3', prompt: 'p', title: 't', style: 's', model: 'v6')
+        c.cover_audio(upload_url: 'https://x/a.mp3', style: 's', title: 't', prompt: 'p', custom_mode: false, model: nil)
+      end
+    end
+    assert_equal %w[V5_5 V6 V6_WILD], captured.map { |r| r[:body]['model'] },
+                 'explicit model (case-insensitive) is used; nil means the default'
+  end
+
+  def test_unknown_model_falls_back_to_default_without_raising
+    captured = []
+    with_suno_settings(V6_SETTINGS) do
+      with_stubbed_post(captured: captured) { SunoClient.new.submit(title: 't', lyrics: 'l', tags: 'rock', model: 'V9_TURBO') }
+    end
+    assert_equal 'V6_WILD', captured.last[:body]['model']
+  end
+
+  def test_match_model_is_case_insensitive_and_nil_for_unknown
+    with_suno_settings(V6_SETTINGS) do
+      assert_equal 'V5_5', SunoClient.match_model('v5_5')
+      assert_nil SunoClient.match_model('V5')
+      assert_nil SunoClient.match_model('')
+    end
+  end
+
+  def test_poll_once_captures_model_name
+    body = { 'data' => { 'status' => 'SUCCESS', 'response' => { 'sunoData' => [
+      { 'audioUrl' => 'https://cdn/1.mp3', 'title' => 'T', 'duration' => 100, 'prompt' => 'x', 'modelName' => 'chirp-v6-wild' },
+    ] } } }
+    result = with_stubbed_get(body: body) { SunoClient.new.poll_once('any-id') }
+    assert_equal 'chirp-v6-wild', result.first[:model_name]
   end
 end

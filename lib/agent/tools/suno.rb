@@ -11,16 +11,20 @@ Agent::ToolRegistry.register(
     'title'  => { type: 'string', description: 'Название песни' },
     'artist' => { type: 'string', description: 'Исполнитель/группа, если песня в их стиле (e.g. "Rammstein", "Цой"). Пустая строка если не указан.' },
     'genre'  => { type: 'string', description: 'Жанр на русском (e.g. "рок", "метал", "рэп")' },
+    'model'  => SUNO_MODEL_PARAM,
     'with_cover_art' => { type: 'boolean', description: 'true если пользователь хочет ещё и обложку. После доставки песни автоматически создастся задача на cover_art (отдельный rate-limit не тратится сверх «suno», но если бакет уже исчерпан в момент чейна — обложка тихо пропустится).' },
   },
   handler: ->(args, ctx) {
+    model, model_error = SunoToolModel.resolve(args['model'])
+    next model_error if model_error
+
     role = ctx[:user]&.role
     if RateLimiter.exceeded?(ctx[:chat_id], 'suno', role: role)
       mins  = RateLimiter.minutes_until_free(ctx[:chat_id], 'suno', role: role)
       title = (args['title'] || args['lyrics'] || 'песню').to_s.slice(0, 80)
       next Agent::ToolResult.deferred(
         user_text:    RateLimiter.reply(ctx[:chat_id], 'suno', role: role),
-        intent:       "спеть через #{mins} мин: #{title}",
+        intent:       "спеть через #{mins} мин: #{title}#{SunoToolModel.intent_suffix(model)}",
         retry_in_min: mins
       )
     end
@@ -49,6 +53,9 @@ Agent::ToolRegistry.register(
                 artist: args['artist'].to_s,
                 genre: args['genre'].to_s.presence || 'рок',
                 with_cover_art: args['with_cover_art'] == true,
+                # Exact allowed enum value (validated above), stored per task so
+                # resubmits use the same model.
+                model: model,
                 user_uid: ctx[:user]&.uid }.to_json
     )
     suffix = args['with_cover_art'] == true ? ' (после песни придёт обложка)' : ''

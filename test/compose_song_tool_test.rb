@@ -7,6 +7,11 @@ unless Settings.respond_to?(:auth)
     { 'rate_limits' => { 'suno' => { 'max' => 100, 'window_minutes' => 60 } } }
   }
 end
+unless Settings.respond_to?(:suno)
+  Settings.singleton_class.send(:define_method, :suno) {
+    { 'api_url' => 'https://api.sunoapi.org', 'api_key' => 'k', 'model' => 'V6_WILD', 'models' => %w[V6_WILD V6 V5_5] }
+  }
+end
 unless Settings.respond_to?(:replies)
   Settings.singleton_class.send(:define_method, :replies) { {} }
 end
@@ -14,6 +19,7 @@ end
 require_relative '../lib/agent/tool_registry'
 require_relative '../lib/agent/tool_result'
 require_relative '../lib/rate_limiter'
+require_relative '../lib/suno_client'
 require_relative '../lib/agent/tools/suno'
 
 # Tests for compose_song's `theme`-vs-`lyrics` split.
@@ -129,5 +135,73 @@ class ComposeSongToolTest < BotTest
     desc = @tool.parameters['lyrics'][:description].to_s
     assert_match(/оставляй пустым|по умолчанию|optional/i, desc,
                  'lyrics description must instruct agent to leave empty by default')
+  end
+  def test_model_arg_persists_and_blank_means_default
+    call_tool({ 'theme' => 'про море', 'title' => 'Море', 'model' => 'V5_5' })
+    assert_equal 'V5_5', last_song_params['model']
+    call_tool({ 'theme' => 'про море', 'title' => 'Море', 'model' => '  ' })
+    assert_nil last_song_params['model'], 'blank model → nil → SunoClient default at submit'
+  end
+
+  # The model is optional (never forced on the agent) and its enum comes from
+  # settings at definition time.
+  def test_model_param_is_optional_with_enum_from_settings
+    Settings.singleton_class.send(:alias_method, :__suno_schema, :suno) if Settings.respond_to?(:suno)
+    Settings.singleton_class.send(:define_method, :suno) { { 'model' => 'V6_WILD', 'models' => %w[V6_WILD V6 V5_5] } }
+    defn = Agent::ToolRegistry.definitions_for(user_role: 'member', api_type: 'anthropic')
+                              .find { |d| d[:name] == 'compose_song' }
+    refute_includes defn[:input_schema][:required], 'model'
+    assert_equal %w[V6_WILD V6 V5_5], defn[:input_schema][:properties]['model'][:enum]
+  ensure
+    if Settings.singleton_class.method_defined?(:__suno_schema)
+      Settings.singleton_class.send(:alias_method, :suno, :__suno_schema)
+      Settings.singleton_class.send(:remove_method, :__suno_schema)
+    else
+      Settings.singleton_class.send(:remove_method, :suno) rescue nil
+    end
+  end
+  def with_rate_limited_suno
+    RateLimiter.singleton_class.send(:alias_method, :__exceeded_m, :exceeded?)
+    RateLimiter.singleton_class.send(:define_method, :exceeded?) { |_, _, **_| true }
+    RateLimiter.singleton_class.send(:alias_method, :__minutes_m, :minutes_until_free)
+    RateLimiter.singleton_class.send(:define_method, :minutes_until_free) { |_, _, **_| 9 }
+    RateLimiter.singleton_class.send(:alias_method, :__reply_m, :reply)
+    RateLimiter.singleton_class.send(:define_method, :reply) { |_, _, **_| 'wait' }
+    yield
+  ensure
+    RateLimiter.singleton_class.send(:alias_method, :exceeded?, :__exceeded_m) rescue nil
+    RateLimiter.singleton_class.send(:remove_method, :__exceeded_m) rescue nil
+    RateLimiter.singleton_class.send(:alias_method, :minutes_until_free, :__minutes_m) rescue nil
+    RateLimiter.singleton_class.send(:remove_method, :__minutes_m) rescue nil
+    RateLimiter.singleton_class.send(:alias_method, :reply, :__reply_m) rescue nil
+    RateLimiter.singleton_class.send(:remove_method, :__reply_m) rescue nil
+  end
+
+  # Review #1: an unavailable model ("на v5" — V5 exists at Suno but isn't in
+  # suno.models) must be refused in the tool, while the agent can still fix
+  # it, instead of being silently swapped for the default at submit.
+  def test_unavailable_model_is_refused_with_allowed_list_and_no_task
+    result = call_tool({ 'theme' => 'про море', 'title' => 'Море', 'model' => 'V5' })
+    assert_kind_of String, result
+    assert_match(/"V5" нет/, result)
+    assert_match(/V6_WILD, V6, V5_5/, result)
+    assert_equal 0, BackgroundTask.where(chat_id: CHAT, task_type: 'suno_generate').count
+  end
+
+  def test_model_is_stored_as_the_exact_enum_value
+    call_tool({ 'theme' => 'про море', 'title' => 'Море', 'model' => 'v5_5' })
+    assert_equal 'V5_5', last_song_params['model']
+  end
+
+  # Review #3: a rate-limited request keeps the model in the deferred intent,
+  # so the cron retry doesn't fall back to the default.
+  def test_rate_limited_deferral_keeps_the_requested_model
+    with_rate_limited_suno do
+      result = call_tool({ 'theme' => 'про море', 'title' => 'Море', 'model' => 'V5_5' })
+      assert result.deferred?
+      assert_match(/model=V5_5/, result.deferred_intent)
+      result = call_tool({ 'theme' => 'про море', 'title' => 'Море' })
+      refute_match(/model=/, result.deferred_intent, 'no model suffix when none was asked for')
+    end
   end
 end
