@@ -216,3 +216,25 @@ class BotDispatcherReactionTest < BotTest
     assert_equal 0, @msg.reload.reactions_count
   end
 end
+
+# A failing admin-menu callback used to escape bot.listen and restart the
+# whole long-poll loop.
+class BotDispatcherCallbackTest < Minitest::Test
+  def setup
+    require_relative '../lib/admin_menu'
+    AdminMenu::CallbackHandler.singleton_class.send(:alias_method, :__handle_test, :handle)
+    AdminMenu::CallbackHandler.define_singleton_method(:handle) { |*_| raise 'editMessageText failed' }
+  end
+
+  def teardown
+    AdminMenu::CallbackHandler.singleton_class.send(:alias_method, :handle, :__handle_test)
+    AdminMenu::CallbackHandler.singleton_class.send(:remove_method, :__handle_test)
+  end
+
+  def test_callback_handler_error_does_not_propagate
+    raised = false
+    AdminMenu::CallbackHandler.define_singleton_method(:handle) { |*_| raised = true; raise 'editMessageText failed' }
+    BotDispatcher.handle_callback(Object.new, Object.new)
+    assert raised, 'handler must actually have been called'
+  end
+end

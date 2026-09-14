@@ -1,4 +1,5 @@
 require 'base64'
+require 'unicode_utils'
 require_relative '../telegram_file'
 require_relative '../audio_attachment'
 require_relative '../pending_audio_request'
@@ -9,8 +10,35 @@ module Commands
 
     PATTERN = /^(?:бот[,]?\s+|[.]\s+|(?:балаболь|жпт)\s+)(?<text>.+)/im
 
+    # Is this message addressed to the bot (prefix, DM, or reply to a bot
+    # message)? Same rules as #match?, usable without a CommandContext —
+    # MessageResponder asks it when an error fires before dispatch.
+    def self.addressed?(message)
+      text = message.text || message.caption
+      addressed_cmd?(message, text && UnicodeUtils.downcase(text))
+    end
+
+    # Single source of the addressing rule — #match? calls it with the
+    # context's cmd, addressed? with one derived from the message.
+    def self.addressed_cmd?(message, cmd)
+      (cmd && cmd.match?(PATTERN)) || private_no_prefix?(message, cmd) || reply_to_bot?(message, cmd)
+    end
+
+    # In a 1-on-1 chat every plain text is addressed to the bot — no prefix
+    # needed. Slash commands are excluded: an unknown /command should fall
+    # through to FallbackReply, not burn an LLM call.
+    def self.private_no_prefix?(message, cmd)
+      message.chat.type == 'private' && !cmd.to_s.start_with?('/')
+    end
+
+    def self.reply_to_bot?(message, cmd)
+      return false unless cmd && message.reply_to_message
+      bot_id = Settings.telegram['token'].split(':').first.to_i
+      message.reply_to_message.from&.id == bot_id
+    end
+
     def match?
-      cmd =~ PATTERN || private_no_prefix? || reply_to_bot?
+      self.class.addressed_cmd?(message, cmd)
     end
 
     def execute
@@ -44,17 +72,12 @@ module Commands
 
     private
 
-    # In a 1-on-1 chat every plain text is addressed to the bot — no prefix
-    # needed. Slash commands are excluded: an unknown /command should fall
-    # through to FallbackReply, not burn an LLM call.
     def private_no_prefix?
-      message.chat.type == 'private' && !cmd.to_s.start_with?('/')
+      self.class.private_no_prefix?(message, cmd)
     end
 
     def reply_to_bot?
-      return false unless cmd && message.reply_to_message
-      bot_id = Settings.telegram['token'].split(':').first.to_i
-      message.reply_to_message.from&.id == bot_id
+      self.class.reply_to_bot?(message, cmd)
     end
 
     def maybe_save_phrase(text)

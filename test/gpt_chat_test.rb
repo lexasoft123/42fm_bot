@@ -193,3 +193,46 @@ class GptChatExecuteTest < BotTest
     assert_equal 'молодец', Phrase.last.content
   end
 end
+
+# MessageResponder asks GptChat.addressed? when an error fires before dispatch
+# (no CommandContext yet) — it must agree with #match?.
+class GptChatAddressedTest < Minitest::Test
+  def msg(text, type: 'supergroup', caption: nil, reply_from: nil)
+    OpenStruct.new(
+      text: text, caption: caption,
+      chat: OpenStruct.new(id: 1, type: type),
+      reply_to_message: (reply_from ? OpenStruct.new(from: OpenStruct.new(id: reply_from)) : nil)
+    )
+  end
+
+  def test_prefixed_group_message_is_addressed
+    assert Commands::GptChat.addressed?(msg('Бот, как дела'))
+  end
+
+  def test_plain_group_chatter_is_not_addressed
+    refute Commands::GptChat.addressed?(msg('всем привет'))
+  end
+
+  def test_caption_prefix_is_addressed
+    assert Commands::GptChat.addressed?(msg(nil, caption: 'бот что это'))
+  end
+
+  def test_private_text_is_addressed_but_slash_command_is_not
+    assert Commands::GptChat.addressed?(msg('привет', type: 'private'))
+    refute Commands::GptChat.addressed?(msg('/unknown', type: 'private'))
+  end
+
+  def test_reply_to_bot_is_addressed_reply_to_human_is_not
+    assert Commands::GptChat.addressed?(msg('ага', reply_from: 4242))
+    refute Commands::GptChat.addressed?(msg('ага', reply_from: 7))
+  end
+
+  def test_addressed_agrees_with_match
+    [msg('Бот, как дела'), msg('всем привет'), msg('привет', type: 'private'), msg('/unknown', type: 'private'),
+     msg('ага', reply_from: 4242), msg('ага', reply_from: 7), msg('жпт скажи'), msg('. точка')].each do |m|
+      ctx = CommandContext.new(bot: nil, message: m, user: nil, chat_id: 1, radio: nil, reply_master: nil,
+                               cmd: UnicodeUtils.downcase(m.text))
+      assert_equal !!Commands::GptChat.new(ctx).match?, !!Commands::GptChat.addressed?(m), m.text
+    end
+  end
+end

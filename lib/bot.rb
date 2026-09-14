@@ -27,31 +27,27 @@ begin
   ALLOWED_UPDATES = %w[message edited_message channel_post callback_query
                        message_reaction message_reaction_count].freeze
 
-  begin
-    Telegram::Bot::Client.run(token, logger: logger, allowed_updates: ALLOWED_UPDATES) do |bot|
-      TaskRunner.start(bot.api)
-      logger.info "TaskRunner started"
+  # Crash-retry lives in ListenSupervisor: it rebuilds the client after a
+  # Telegram 5xx/SSL error and resumes from the last getUpdates offset.
+  ListenSupervisor.new(token, logger: logger, client_options: { allowed_updates: ALLOWED_UPDATES }).run do |bot|
+    TaskRunner.start(bot.api)
+    logger.info "TaskRunner started"
 
-      CronScheduler.start
-      logger.info "CronScheduler started"
+    CronScheduler.start
+    logger.info "CronScheduler started"
 
-      @radio.start_keepalive
-      logger.info "Radio keepalive started"
+    @radio.start_keepalive
+    logger.info "Radio keepalive started"
 
-      synced = Chat.sync_from_config! rescue 0
-      logger.info "Chat.sync_from_config!: synced #{synced} chats"
+    synced = Chat.sync_from_config! rescue 0
+    logger.info "Chat.sync_from_config!: synced #{synced} chats"
 
-      AdminMenu.register_commands(bot.api)
-      logger.info "AdminMenu.register_commands done"
+    AdminMenu.register_commands(bot.api)
+    logger.info "AdminMenu.register_commands done"
 
-      bot.listen do |update|
-        BotDispatcher.dispatch(bot, update, radio: @radio)
-      end
+    bot.listen do |update|
+      BotDispatcher.dispatch(bot, update, radio: @radio)
     end
-  rescue => e
-    logger.error "Bot crash (retrying in 5s): #{e.class}: #{e.message}\n\t#{e.backtrace.first(20).join("\n\t")}"
-    sleep 5
-    retry
   end
 rescue => e
   FileUtils.mkdir_p(File.dirname(FALLBACK_LOG))

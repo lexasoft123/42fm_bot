@@ -74,22 +74,19 @@ class MessageResponder
     @bot = options[:bot]
     @message = options[:message]
     @chat_id = @message.chat.id
-    @user = User.create_with(
-      name: message.from.username,
-      first_name: message.from.first_name,
-      last_name: message.from.last_name,
-      role: 'new'
-    ).find_or_create_by(uid: message.from.id)
+    @user = find_or_build_user
     update_user_data
     @reply_master = ReplyMaster.new
     @radio = options[:radio]
   end
 
   def respond
-    save_message
+    already_saved = previously_saved?
+    save_message unless already_saved
 
     return if message.edit_date
     return if stale_after_restart?
+    return if already_saved && already_answered?
     return if maybe_handle_admin_input
     process_voice_message if message.voice && !super_admin_awaiting_input?
 
@@ -112,7 +109,9 @@ class MessageResponder
     LOGGER.debug "[chat=#{@chat_id}] #{self.class.name}#respond: delivering #{result&.type}"
     deliver(result)
   rescue => e
-    LOGGER.error "[chat=#{@chat_id}] #{self.class.name}#respond: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
+    notify = error_notice_wanted?
+    LOGGER.error "[chat=#{@chat_id}] #{self.class.name}#respond: #{e.class}: #{e.message} notice=#{notify ? 'sent' : 'suppressed'}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
+    return unless notify
     begin
       MessageSender.new(bot: @bot, chat: message.chat, text: "Мозги перегрелись, попробуй позже 🤖").send
     rescue => notify_err
@@ -121,6 +120,73 @@ class MessageResponder
   end
 
   private
+
+  # The error notice is for someone who asked the bot for something. A crash
+  # while handling ordinary chatter (FallbackReply, or a save failing before
+  # dispatch) used to post "Мозги перегрелись" into the group in reply to
+  # nobody — 27 times in three weeks of prod. Deliberate commands (`!трек`,
+  # `/admin`, `жзяцля правила`, …) still get it.
+  def error_notice_wanted?
+    return @matched_command != Commands::FallbackReply if @matched_command
+    Commands::GptChat.addressed?(message)
+  rescue => e
+    LOGGER.warn "[chat=#{@chat_id}] #{self.class.name}#error_notice_wanted?: #{e.class}: #{e.message}"
+    false
+  end
+
+  # Replay guard. ListenSupervisor keeps the getUpdates offset across in-process
+  # crash-retries, but a process restart (deploy, OOM, container restart)
+  # loses it and Telegram re-delivers the last unacknowledged batch. A
+  # re-delivered message already has its user row: don't store it twice.
+  # Checked before save_message, which would otherwise find the row it just
+  # inserted. Edits legitimately reuse the message_id.
+  def previously_saved?
+    return false if message.edit_date || message.message_id.nil?
+    Message.where(chat_id: @chat_id, message_id: message.message_id, role: 'user').exists?
+  rescue ActiveRecord::StatementInvalid => e
+    raise unless db_locked?(e)
+    LOGGER.error "[chat=#{@chat_id}] #{self.class.name}#previously_saved? db_locked, treating as new: #{e.message}"
+    false
+  end
+
+  # A re-delivered message is skipped only if the bot already replied to it.
+  # A turn killed mid-flight by the restart has its user row but no reply —
+  # it is dispatched again (stale_after_restart? still drops old ones).
+  # Replies without reply_to_message_id (plain command output) can't be
+  # matched, so such a command may answer twice after a restart.
+  def already_answered?
+    answered = Message.where(chat_id: @chat_id, role: 'bot', reply_to_message_id: message.message_id).exists?
+    LOGGER.info "[chat=#{@chat_id}] replay guard: #{answered ? 'skipped' : 're-dispatching unanswered'} msg=#{message.message_id}"
+    answered
+  rescue ActiveRecord::StatementInvalid => e
+    raise unless db_locked?(e)
+    LOGGER.error "[chat=#{@chat_id}] #{self.class.name}#already_answered? db_locked, dispatching: #{e.message}"
+    false
+  end
+
+  # SQLite "database is locked". The sqlite3 adapter raises it as a plain
+  # ActiveRecord::StatementInvalid — the same class as schema errors (no such
+  # column/table), which must keep failing loudly.
+  def db_locked?(error)
+    error.cause.is_a?(SQLite3::BusyException) || error.message.include?('database is locked')
+  end
+
+  # A locked DB must not cost the user their request: fall back to an
+  # existing row, or an unsaved User built from the message.
+  def find_or_build_user
+    User.create_with(
+      name: message.from.username,
+      first_name: message.from.first_name,
+      last_name: message.from.last_name,
+      role: 'new'
+    ).find_or_create_by(uid: message.from.id)
+  rescue ActiveRecord::StatementInvalid => e
+    raise unless db_locked?(e)
+    LOGGER.error "[chat=#{@chat_id}] #{self.class.name}: user lookup db_locked, continuing: #{e.message}"
+    (User.find_by(uid: message.from.id) rescue nil) ||
+      User.new(uid: message.from.id, name: message.from.username, first_name: message.from.first_name,
+               last_name: message.from.last_name, role: 'new')
+  end
 
   # DM only: a Suno tool asked for the missing audio (PendingAudioRequest) and
   # this captionless audio / audio-document is it — replay the stored request
@@ -144,6 +210,7 @@ class MessageResponder
       command = klass.new(ctx)
       if command.match?
         LOGGER.info "[chat=#{@chat_id}] #{self.class.name}#dispatch: matched #{klass.name}"
+        @matched_command = klass
         return command.execute
       end
     end
@@ -221,29 +288,37 @@ class MessageResponder
     return unless body || audio_src || photo_file_id
     body ||= audio_src ? '[аудио]' : '[фото]'
 
-    if message.edit_date
-      existing = Message.find_by(chat_id: @chat_id, message_id: message.message_id)
-      if existing
-        existing.update(body: body, edited_at: Time.at(message.edit_date))
-        return
+    begin
+      if message.edit_date
+        existing = Message.find_by(chat_id: @chat_id, message_id: message.message_id)
+        if existing
+          existing.update(body: body, edited_at: Time.at(message.edit_date))
+          return
+        end
       end
+
+      Message.create(
+        user_uid: @user.uid, chat_id: @chat_id, body: body,
+        message_id: message.message_id,
+        reply_to_message_id: message.reply_to_message&.message_id,
+        message_thread_id: message.message_thread_id,
+        forwarded: !message.forward_origin.nil?,
+        edited_at: (message.edit_date ? Time.at(message.edit_date) : nil),
+        attachment_file_id:   audio_src&.file_id,
+        attachment_mime_type: (audio_src.respond_to?(:mime_type) ? audio_src.mime_type : nil),
+        attachment_title:     attachment_title_from(audio_src),
+        attachment_performer: (audio_src.respond_to?(:performer) ? audio_src.performer : nil),
+        attachment_duration:  (audio_src.respond_to?(:duration)  ? audio_src.duration  : nil),
+        attachment_photo_file_id: photo_file_id
+      )
+    rescue ActiveRecord::StatementInvalid => e
+      raise unless db_locked?(e)
+      # History loses this row, but the request itself still gets dispatched.
+      LOGGER.error "[chat=#{@chat_id}] #{self.class.name}#save_message db_locked, row lost, dispatching anyway: #{e.message}"
+      return
     end
 
     media_only = !message.text && !message.caption  # nothing to extract from
-    Message.create(
-      user_uid: @user.uid, chat_id: @chat_id, body: body,
-      message_id: message.message_id,
-      reply_to_message_id: message.reply_to_message&.message_id,
-      message_thread_id: message.message_thread_id,
-      forwarded: !message.forward_origin.nil?,
-      edited_at: (message.edit_date ? Time.at(message.edit_date) : nil),
-      attachment_file_id:   audio_src&.file_id,
-      attachment_mime_type: (audio_src.respond_to?(:mime_type) ? audio_src.mime_type : nil),
-      attachment_title:     attachment_title_from(audio_src),
-      attachment_performer: (audio_src.respond_to?(:performer) ? audio_src.performer : nil),
-      attachment_duration:  (audio_src.respond_to?(:duration)  ? audio_src.duration  : nil),
-      attachment_photo_file_id: photo_file_id
-    )
     # Media-only rows have a `[аудио]`/`[фото]` placeholder body — feeding
     # them to the knowledge extractor adds noise AND bumps
     # `count % extract_every` cadence so real-text extraction fires on the
@@ -261,7 +336,13 @@ class MessageResponder
   def maybe_extract_knowledge
     return unless Settings._settings.respond_to?(:knowledge) && Settings.knowledge
     extract_every = Settings.knowledge['extract_every']
-    count = Message.where(chat_id: @chat_id, role: 'user').count
+    count = begin
+      Message.where(chat_id: @chat_id, role: 'user').count
+    rescue ActiveRecord::StatementInvalid => e
+      raise unless db_locked?(e)
+      LOGGER.error "[chat=#{@chat_id}] #{self.class.name}#maybe_extract_knowledge db_locked, skipping cadence check: #{e.message}"
+      return
+    end
     return unless count % extract_every == 0
 
     chat_id = @chat_id
@@ -288,6 +369,9 @@ class MessageResponder
       user.last_name = message.from.last_name
       user.save
     end
+  rescue ActiveRecord::StatementInvalid => e
+    raise unless db_locked?(e)
+    LOGGER.error "[chat=#{@chat_id}] #{self.class.name}#update_user_data db_locked, continuing: #{e.message}"
   end
 
   # Title fallback chain for the persisted column: Audio.title (ID3) →

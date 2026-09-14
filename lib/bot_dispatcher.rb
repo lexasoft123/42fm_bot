@@ -6,7 +6,7 @@ module BotDispatcher
     when Telegram::Bot::Types::Message
       handle_message(bot, update, radio: radio)
     when Telegram::Bot::Types::CallbackQuery
-      AdminMenu::CallbackHandler.handle(bot, update)
+      handle_callback(bot, update)
     when Telegram::Bot::Types::MessageReactionCountUpdated
       handle_reaction_count(update)
     when Telegram::Bot::Types::MessageReactionUpdated
@@ -14,6 +14,15 @@ module BotDispatcher
     else
       LOGGER.debug "[BotDispatcher] ignored update class #{update.class}"
     end
+  end
+
+  # CallbackHandler has no top-level rescue; a failed edit/send there used to
+  # escape bot.listen and bounce the whole loop through the crash-retry.
+  def handle_callback(bot, query)
+    AdminMenu::CallbackHandler.handle(bot, query)
+  rescue => e
+    chat_id = (query.message&.chat&.id rescue nil) || '?'
+    LOGGER.error "[chat=#{chat_id}] BotDispatcher#handle_callback: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
   end
 
   # Authoritative aggregate: Telegram periodically sends the total reaction

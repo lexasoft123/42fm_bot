@@ -31,6 +31,7 @@ class ReplyMaster
     if reply_now?(DAMN_RATE)
       username = user.name ? "@#{user.name}" : make_username(tlg_user)
       p = Phrase.order("random()").first
+      return nil unless p
       return "#{username}" + ", ты " + p.content
     else
       return nil

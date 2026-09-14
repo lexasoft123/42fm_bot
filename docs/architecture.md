@@ -15,13 +15,15 @@ bin/bot
             ├── config/boot.rb (loads Settings, requires all modules)
             ├── AppConfigurator.configure (i18n, DB, SOCKS proxy)
             ├── Radio.new (lazy TCP connection to Liquidsoap — connects on first use)
-            └── Telegram::Bot.run (long-polling loop)
-                 └── MessageResponder.new(bot, message, radio).respond
+            └── ListenSupervisor#run → Telegram::Bot::Client.run (long-polling loop; crash-retry resumes the getUpdates offset)
+                 └── BotDispatcher.dispatch → MessageResponder.new(bot, message, radio).respond
                       ├── dispatch(ctx) → Commands::REGISTRY (first match wins)
                       └── deliver(result) → MessageSender / bot.api
 ```
 
 `bin/console` provides a Pry REPL with the full environment loaded for debugging.
+
+**Crash-retry — `lib/listen_supervisor.rb`.** telegram-bot-ruby only rescues Faraday timeouts/connection failures inside `getUpdates`; a Telegram 502/429 `ResponseError` or an SSL EOF escapes `bot.listen`. `ListenSupervisor#run` rebuilds the client after 5s and passes the last `options[:offset]` into the new `Client.run` — a fresh client otherwise starts at offset 0 and Telegram re-sends the unacknowledged batch (prod Aug–Sep 2026: 19 retries, a duplicated Ч24 history row). The gem advances the offset *before* yielding each update, so an update whose handler escaped is skipped rather than crash-looped. Logged as `Bot crash (retrying in 5s, resuming offset=N)`. Per-connection setup (TaskRunner, CronScheduler, keepalive, `register_commands`) re-runs on each retry and is idempotent. A process restart still loses the offset — `MessageResponder`'s replay guard (below) covers that.
 
 ---
 
@@ -49,6 +51,7 @@ bin/bot
 │       └── dice.yml     # Dice game response templates
 ├── lib/
 │   ├── bot.rb                 # Main loop + message dispatch
+│   ├── listen_supervisor.rb   # Crash-retry around Client.run, resumes getUpdates offset
 │   ├── message_responder.rb   # Builds CommandContext, runs dispatch/deliver
 │   ├── message_sender.rb      # Telegram output wrapper
 │   ├── command_context.rb     # Struct: per-message shared state
@@ -156,7 +159,10 @@ Receives every inbound message. Builds a `CommandContext`, runs `dispatch`, then
 
 - `respond` — entry point: saves message, skips stale ones, processes voice, calls `dispatch`. A message with no text/caption normally ends there, except `run_pending_audio_followup`: in a **private chat**, a captionless `audio` / audio-MIME `document` (never `voice`) from a user with a live `PendingAudioRequest` entry replays that stored request through `Commands::GptChat` with this message's file as the source (see "DM audio follow-up")
 - `process_voice_message` — audio passthrough for `audio:`-enabled chats: posts the voice file's direct (token-bearing, deliberate) URL to the chat. Resolves getFile through `TelegramFile.public_url`, which handles both the gem-2.x typed `Types::File` and legacy Hash shapes — inline `file['result']` access raises `Dry::Struct::MissingAttributeError` on the typed object and aborts dispatch (prod bug, fixed Jun 2026)
-- `dispatch(ctx)` — iterates `Commands::REGISTRY`; returns result from first matching command
+- **Replay guard** — a process restart (deploy, OOM, container restart) loses the getUpdates offset, so Telegram re-delivers the last unacknowledged batch (in-process crash-retries keep the offset — see `ListenSupervisor`). Before `save_message`, a non-edit message whose `(chat_id, message_id)` already has a `role: 'user'` row isn't stored again; after `stale_after_restart?` it is skipped only if a `role: 'bot'` row replies to it (`replay guard: skipped msg=…`), otherwise dispatched again (`replay guard: re-dispatching unanswered msg=…`) — a turn killed mid-flight by the restart still gets its answer. Tradeoff: output sent without `reply_to_message_id` (plain command replies) can't be matched, so such a command may answer twice after a restart
+- **Lock-tolerant intake** — `save_message`, `update_user_data`, the user `find_or_create_by`, the replay-guard queries and `maybe_extract_knowledge`'s count rescue SQLite `database is locked` only (`db_locked?`: the sqlite3 adapter raises it as a plain `ActiveRecord::StatementInvalid` whose cause is `SQLite3::BusyException` — the same class as schema errors, which still propagate). They log at ERROR with the token `db_locked` (so `bin/inspect errors` shows them) and continue: the request is still dispatched, the history row is lost, the user falls back to an existing or unsaved `User`
+- **Error notice** — `respond`'s rescue logs `notice=sent|suppressed` and posts "Мозги перегрелись, попробуй позже 🤖" only for deliberate requests: the matched command is anything but `Commands::FallbackReply`, or — for errors before dispatch — `Commands::GptChat.addressed?(message)` (prefix / DM / reply to the bot). Prod Aug–Sep 2026 posted it 27 times into ordinary group chatter whose save hit a locked DB
+- `dispatch(ctx)` — iterates `Commands::REGISTRY`; returns result from first matching command (remembers the class for the error notice)
 - `deliver(result)` — sends the `CommandResult` payload via the appropriate Telegram API call, then persists a `role: 'bot'` `messages` row for every successfully-sent type (see *Bot-reply persistence* below)
 
 ### `CommandContext` — `lib/command_context.rb`
@@ -406,7 +412,7 @@ Per-chat rate limit: 10 emits per rolling hour. Loop protection: only image_gen/
 `AgentEventHandler#call` receives `(task, api)` from `TaskRunner` (no full `bot` object — `TaskRunner` only ever has `bot.api`), and forwards `api:` to `Agent::Runner.new`. The Runner stores it as `@tool_ctx[:api]` so tools that need to call Telegram (e.g. `google_search` sending image media groups) work in this code path. Runner logs a warning at initialization if `api:` is nil — a future caller who forgets will see a greppable `Agent::Runner initialized without Telegram api` in logs instead of a masked `NoMethodError` deep in a tool's `rescue`. All callers (`GptChat`, `GptQuestion`, `AgentEventHandler`) pass `api:` directly; `bot:` is no longer accepted.
 
 ### Telegram reactions capture — `lib/bot.rb` + `lib/bot_dispatcher.rb`
-Powers Quote-of-the-day and Wrapped "funniest". `lib/bot.rb` opts into reaction updates via `Client.run(..., allowed_updates: ALLOWED_UPDATES)` — the list **replaces** Telegram's server default (which omits reaction types), so it enumerates every consumed update type; passing it to `bot.listen` would be a no-op (only `Client#initialize`'s options reach `getUpdates`). `BotDispatcher` gains two branches:
+Powers Quote-of-the-day and Wrapped "funniest". `lib/bot.rb` opts into reaction updates via `allowed_updates: ALLOWED_UPDATES` in `ListenSupervisor`'s `client_options` (passed to `Client.run`) — the list **replaces** Telegram's server default (which omits reaction types), so it enumerates every consumed update type; passing it to `bot.listen` would be a no-op (only `Client#initialize`'s options reach `getUpdates`). `BotDispatcher` gains two branches:
 
 - `MessageReactionCountUpdated` → **authoritative**: `reactions_count = Σ total_count` (overwrite, never increment — self-heals any drift).
 - `MessageReactionUpdated` → per-user delta `new_reaction.size − old_reaction.size` (Telegram coalesces a user's reactions into full before/after sets: swap = 0, add = +1), clamped at 0 via `MAX(0, …)`. Best-effort only; needs the bot to be a **group admin** to be delivered at all (confirmed for the main prod chats). `user` can be nil (anonymous `actor_chat`) — irrelevant, only the delta is used.
@@ -593,7 +599,7 @@ Rolls 2 dice for user and 2 for bot, determines winner, returns templated respon
 
 ### Admin menu — `lib/admin_menu/` + `lib/bot_dispatcher.rb`
 Inline-keyboard menu in the super-admin's private chat for runtime bot administration (no SSH or YAML edits required for routine config). Triggered by `/admin` or `бот меню`; gated on `Settings.auth['super_admin_uids']`.
-- **`BotDispatcher`** (`lib/bot_dispatcher.rb`) — entry from `bot.listen`. Note: `bot.listen` (gem 2.7.0) yields `update.current_message` directly (the inner `Message` / `CallbackQuery` / `EditedMessage` / etc.), NOT the wrapper `Update`. `BotDispatcher.dispatch` does `case update when Message ... when CallbackQuery ... else log` — anything else is silently logged as ignored; add new `when` branches there to handle additional update types. Dispatches `Message` → `MessageResponder`, `CallbackQuery` → `AdminMenu::CallbackHandler`. Owns the chat-allowlist check including the implicit-auth bypass for super-admins in private chat.
+- **`BotDispatcher`** (`lib/bot_dispatcher.rb`) — entry from `bot.listen`. Note: `bot.listen` (gem 2.7.0) yields `update.current_message` directly (the inner `Message` / `CallbackQuery` / `EditedMessage` / etc.), NOT the wrapper `Update`. `BotDispatcher.dispatch` does `case update when Message ... when CallbackQuery ... else log` — anything else is silently logged as ignored; add new `when` branches there to handle additional update types. Dispatches `Message` → `MessageResponder`, `CallbackQuery` → `AdminMenu::CallbackHandler` (via `handle_callback`, which rescues and logs — the handler has no top-level rescue, and an escaping error used to bounce the whole listen loop through the crash-retry). Owns the chat-allowlist check including the implicit-auth bypass for super-admins in private chat.
 - **`AdminMenu::Session`** (`lib/admin_menu/session.rb`) — Mutex-guarded in-memory state per super-admin uid. Lost on restart (acceptable — sessions are short). `awaiting_input?` has a built-in 5-min TTL; stale sessions auto-clear on access.
 - **`AdminMenu::Views`** (`lib/admin_menu/views.rb`) — view builders. Each method returns `{ text:, reply_markup: }`. Plain text + emoji only — no `parse_mode` (chat titles can contain Markdown-active characters that would break renders).
 - **`AdminMenu::Router`** (`lib/admin_menu/router.rb`) — parses `adm:<view>[:<param>...]` callback_data into `Action` structs (`render` / `mutate` / `await_input` / `close` / `unknown`).
@@ -1040,8 +1046,8 @@ Log rotation: size-based — rotates at `max_size_mb`, keeps `keep_files` old fi
 ## Deployment
 
 - **Ruby:** 4.0
-- **Production runs in Docker:** `docker compose up -d --build`; the entrypoint runs `rake db:migrate` then execs the bot as PID 1. `restart: unless-stopped` handles crashes (the bot's own rescue/retry loop also retries within the process). Deploy from local: `make deploy`. See CLAUDE.md for the full run/deploy procedure.
-- **Local non-Docker runs only:** `daemons` gem via `./bin/bot start|stop|restart|status` — PID file in `pids/42fm_bot.pid`. `:monitor => false` — the bot's own `rescue/retry` loop handles restarts (never set `:monitor => true`; it spawns a second bot process causing duplicate responses).
+- **Production runs in Docker:** `docker compose up -d --build`; the entrypoint runs `rake db:migrate` then execs the bot as PID 1. `restart: unless-stopped` handles crashes (the bot's own `ListenSupervisor` loop also retries within the process). Deploy from local: `make deploy`. See CLAUDE.md for the full run/deploy procedure.
+- **Local non-Docker runs only:** `daemons` gem via `./bin/bot start|stop|restart|status` — PID file in `pids/42fm_bot.pid`. `:monitor => false` — the bot's own `ListenSupervisor` retry loop handles restarts (never set `:monitor => true`; it spawns a second bot process causing duplicate responses).
 - **SOCKS proxy:** configured in `settings.yml`, applied globally in `AppConfigurator#setup_proxy` via `socksify` (patches `Net::HTTP` — affects ALL outbound HTTP including Telegram polling and GPT calls)
 
 ---

@@ -1583,3 +1583,203 @@ class PendingAudioFollowupTest < BotTest
     refute_nil PendingAudioRequest.take(CHAT, other.uid)
   end
 end
+
+# The rescue in MessageResponder#respond posted "Мозги перегрелись" for ANY
+# error — prod: 27 times in three weeks, in reply to ordinary group chatter
+# whose save hit a locked DB. It must fire only for deliberate requests, a
+# failed save must not drop the request, and a replayed update (crash-retry)
+# must not be answered twice.
+class MessageResponderErrorNoticeTest < BotTest
+  include ProdTestHelpers
+  include Fixtures::Users
+
+  GROUP = -100_555
+
+  class RaisingCommand < Commands::Base
+    def match? = cmd.start_with?('!бум')
+    def execute = raise('boom')
+  end
+
+  class RecordingCommand < Commands::Base
+    class << self
+      attr_accessor :executed
+    end
+    def match? = cmd.start_with?('!запись')
+    def execute
+      self.class.executed << cmd
+      CommandResult.none
+    end
+  end
+
+  def setup
+    super
+    stub_settings!
+    require_relative '../lib/message_responder'
+    @user = member_user
+    RecordingCommand.executed = []
+    @original_registry = Commands::REGISTRY
+    swap_registry([RaisingCommand, RecordingCommand, Commands::FallbackReply])
+    @notices = []
+    notices = @notices
+    MessageSender.singleton_class.send(:alias_method, :__new_notice_test, :new)
+    MessageSender.singleton_class.send(:define_method, :new) do |**opts|
+      Struct.new(:text) { define_method(:send) { notices << text; 1 } }.new(opts[:text])
+    end
+  end
+
+  def teardown
+    swap_registry(@original_registry)
+    MessageSender.singleton_class.send(:alias_method, :new, :__new_notice_test) rescue nil
+    MessageSender.singleton_class.send(:remove_method, :__new_notice_test) rescue nil
+    super
+  end
+
+  def swap_registry(list)
+    Commands.send(:remove_const, :REGISTRY)
+    Commands.const_set(:REGISTRY, list)
+  end
+
+  def msg(text, message_id: 77, chat_type: 'supergroup', chat_id: GROUP)
+    OpenStruct.new(
+      text: text, caption: nil, message_id: message_id, reply_to_message: nil, message_thread_id: nil,
+      edit_date: nil, date: Time.now.to_i, forward_origin: nil, photo: nil, audio: nil, voice: nil, document: nil,
+      chat: OpenStruct.new(id: chat_id, type: chat_type, title: 'g'),
+      from: OpenStruct.new(id: @user.uid, username: @user.name, first_name: 'T', last_name: nil)
+    )
+  end
+
+  def responder(message)
+    MessageResponder.new(bot: OpenStruct.new(api: Object.new), message: message, radio: nil)
+  end
+
+  # Raises the way the sqlite3 adapter does: a plain StatementInvalid whose
+  # cause is the driver exception.
+  def raise_wrapped(driver_error, message)
+    begin
+      raise driver_error, message
+    rescue driver_error
+      raise ActiveRecord::StatementInvalid, "#{driver_error.name}: #{message}"
+    end
+  end
+
+  def with_failing_user_message_create(driver_error: SQLite3::BusyException, message: 'database is locked')
+    original = Message.method(:create)
+    test = self
+    Message.define_singleton_method(:create) do |*args, **kw|
+      attrs = args.first || kw
+      test.raise_wrapped(driver_error, message) if attrs[:role].nil?
+      original.call(*args, **kw)
+    end
+    yield
+  ensure
+    Message.singleton_class.send(:remove_method, :create)
+  end
+
+  def test_error_in_fallback_for_unaddressed_chatter_is_silent
+    ReplyMaster.send(:alias_method, :__reply_test, :reply)
+    ReplyMaster.send(:define_method, :reply) { |*| raise 'fallback boom' }
+    responder(msg('всем привет')).respond
+    assert_empty @notices
+  ensure
+    ReplyMaster.send(:alias_method, :reply, :__reply_test)
+    ReplyMaster.send(:remove_method, :__reply_test)
+  end
+
+  def test_error_in_deliberate_command_still_notifies
+    responder(msg('!бум')).respond
+    assert_equal ['Мозги перегрелись, попробуй позже 🤖'], @notices
+  end
+
+  def test_pre_dispatch_error_notifies_only_when_addressed
+    r = responder(msg('всем привет'))
+    r.define_singleton_method(:maybe_handle_admin_input) { raise 'pre-dispatch boom' }
+    r.respond
+    assert_empty @notices
+
+    r = responder(msg('бот привет', message_id: 78))
+    r.define_singleton_method(:maybe_handle_admin_input) { raise 'pre-dispatch boom' }
+    r.respond
+    assert_equal 1, @notices.size
+  end
+
+  def test_locked_save_still_dispatches_the_request
+    with_failing_user_message_create { responder(msg('!запись раз')).respond }
+    assert_equal ['!запись раз'], RecordingCommand.executed
+    assert_empty @notices
+  end
+
+  def test_non_lock_statement_invalid_still_fails_loudly
+    with_failing_user_message_create(driver_error: SQLite3::SQLException, message: 'no such column: foo') do
+      responder(msg('!запись раз')).respond
+    end
+    assert_empty RecordingCommand.executed, 'a schema error must not be swallowed as a lock'
+  end
+
+  def test_redelivered_answered_message_is_skipped
+    responder(msg('!запись раз')).respond
+    assert_equal ['!запись раз'], RecordingCommand.executed
+    Message.create!(chat_id: GROUP, message_id: 900, role: 'bot', body: 'ответ', reply_to_message_id: 77)
+
+    responder(msg('!запись раз')).respond
+    assert_equal ['!запись раз'], RecordingCommand.executed, 'an answered message must not be answered twice'
+    assert_equal 1, Message.where(chat_id: GROUP, message_id: 77, role: 'user').count
+  end
+
+  # A turn killed by a restart left its user row but no reply: answer it.
+  def test_redelivered_unanswered_message_is_dispatched_without_duplicate_row
+    responder(msg('!запись раз')).respond
+    responder(msg('!запись раз')).respond
+    assert_equal ['!запись раз', '!запись раз'], RecordingCommand.executed
+    assert_equal 1, Message.where(chat_id: GROUP, message_id: 77, role: 'user').count
+  end
+
+  def test_edit_of_saved_message_updates_body_and_does_not_dispatch
+    responder(msg('!запись раз')).respond
+    edited = msg('!запись исправлено')
+    edited.edit_date = Time.now.to_i
+    responder(edited).respond
+    assert_equal '!запись исправлено', Message.find_by(chat_id: GROUP, message_id: 77, role: 'user').body
+    assert_equal ['!запись раз'], RecordingCommand.executed
+  end
+
+  def test_bot_row_with_same_message_id_is_not_a_replay
+    Message.create!(chat_id: GROUP, message_id: 77, role: 'bot', body: 'bot reply')
+    responder(msg('!запись два')).respond
+    assert_equal ['!запись два'], RecordingCommand.executed
+  end
+
+  def with_locked_user_insert
+    test = self
+    locked = Object.new
+    locked.define_singleton_method(:find_or_create_by) { |*| test.raise_wrapped(SQLite3::BusyException, 'database is locked') }
+    User.singleton_class.send(:alias_method, :__create_with_test, :create_with)
+    User.define_singleton_method(:create_with) { |*| locked }
+    yield
+  ensure
+    User.singleton_class.send(:alias_method, :create_with, :__create_with_test)
+    User.singleton_class.send(:remove_method, :__create_with_test)
+  end
+
+  def test_locked_user_lookup_falls_back_to_existing_row
+    with_locked_user_insert do
+      r = responder(msg('!запись три'))
+      assert_equal @user.uid, r.user.uid
+      r.respond
+    end
+    assert_equal ['!запись три'], RecordingCommand.executed
+  end
+
+  # The case that really happens under WAL: a brand-new user's INSERT is locked.
+  def test_locked_insert_of_brand_new_user_still_dispatches
+    stranger = msg('!запись четыре', message_id: 79)
+    stranger.from = OpenStruct.new(id: 777_001, username: 'newbie', first_name: 'N', last_name: nil)
+    with_locked_user_insert do
+      r = responder(stranger)
+      assert r.user.new_record?
+      assert_equal 777_001, r.user.uid
+      r.respond
+    end
+    assert_equal ['!запись четыре'], RecordingCommand.executed
+    assert_equal 777_001, Message.find_by(chat_id: GROUP, message_id: 79).user_uid
+  end
+end
