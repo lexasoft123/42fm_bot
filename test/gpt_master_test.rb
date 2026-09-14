@@ -14,6 +14,7 @@ module Settings
       'adaptive_thinking' => { 'provider' => 'anthropic', 'model' => 'claude-opus-4-7', 'max_tokens' => 100, 'thinking' => { 'type' => 'adaptive' }, 'output_config' => { 'effort' => 'high' } },
       'openai'  => { 'provider' => 'openai',    'model' => 'gpt-4' },
       'deepseek_thinking' => { 'provider' => 'openai', 'model' => 'deepseek-v4-pro', 'thinking' => { 'type' => 'enabled' } },
+      'deepseek_capped' => { 'provider' => 'openai', 'model' => 'deepseek-v4-pro', 'max_tokens' => 32000 },
     },
     'pricing' => {
       'claude-sonnet-4-6' => { 'input' => 3, 'output' => 15, 'cache_read' => 0.30, 'cache_write' => 3.75 },
@@ -323,6 +324,26 @@ class GptMasterBodyBuildingTest < BotTest
       'DeepSeek thinking shape is bare {type: enabled}, no Anthropic-style budget_tokens'
   end
 
+  # max_tokens used to be sent only to Anthropic; OpenAI-compatible providers
+  # fell back to their default (DeepSeek thinking: 65,536 incl. reasoning).
+  def test_openai_branch_sends_max_tokens_only_when_configured
+    bodies = []
+    HTTParty.define_singleton_method(:post) do |_url, opts|
+      bodies << JSON.parse(opts[:body])
+      FakeResponse.new(200,
+        'choices' => [{ 'message' => { 'content' => 'k' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 })
+    end
+    begin
+      GptMaster.new([{ role: 'user', content: 'hi' }], setting: 'deepseek_capped', chat_id: 1, purpose: 'agent').call
+      GptMaster.new([{ role: 'user', content: 'hi' }], setting: 'openai', chat_id: 1, purpose: 'agent').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    assert_equal 32000, bodies[0]['max_tokens']
+    refute bodies[1].key?('max_tokens'), 'no max_tokens configured → provider default, not a guessed value'
+  end
+
   def test_openai_branch_omits_thinking_when_not_set
     captured = nil
     HTTParty.define_singleton_method(:post) do |_url, opts|
@@ -542,6 +563,75 @@ class GptMasterErrorBodyTest < BotTest
                              setting: 'openai', chat_id: 1, purpose: 'agent').call_raw(tools: [])
       assert_nil result
     end
+  end
+end
+
+# Prod 2026-09-02: a 200 whose body wasn't a JSON object crashed the agent
+# turn with NoMethodError on `.dig`. A 200 without a usable body must take the
+# same failure path as a non-200.
+class GptMasterUnusable200Test < BotTest
+  def test_string_body_200
+    HTTPartyStub.with_response(FakeResponse.new(200, '<html>gateway</html>')) do
+      assert_nil GptMaster.new([{ role: 'user', content: 'x' }], setting: 'openai', chat_id: 1, purpose: 'agent').call_raw(tools: [])
+      assert_equal 'жпт не жпт', GptMaster.new([{ role: 'user', content: 'x' }], setting: 'openai', chat_id: 1, purpose: 'agent').call
+    end
+  end
+
+  def test_unparseable_body_200
+    raising = Object.new
+    def raising.code; 200; end
+    def raising.body; 'not json'; end
+    def raising.parsed_response; raise JSON::ParserError, 'unexpected token'; end
+    HTTPartyStub.with_response(raising) do
+      assert_nil GptMaster.new([{ role: 'user', content: 'x' }], setting: 'openai', chat_id: 1, purpose: 'agent').call_raw(tools: [])
+    end
+  end
+
+  def test_hash_without_choices_200_openai
+    HTTPartyStub.with_response(FakeResponse.new(200, { 'object' => 'error', 'usage' => {} })) do
+      assert_nil GptMaster.new([{ role: 'user', content: 'x' }], setting: 'openai', chat_id: 1, purpose: 'agent').call_raw(tools: [])
+      assert_equal 'жпт не жпт', GptMaster.new([{ role: 'user', content: 'x' }], setting: 'openai', chat_id: 1, purpose: 'agent').call
+    end
+  end
+
+  def test_hash_without_content_200_anthropic
+    HTTPartyStub.with_response(FakeResponse.new(200, { 'type' => 'error' })) do
+      assert_nil GptMaster.new([{ role: 'user', content: 'x' }], setting: 'agent', chat_id: 1, purpose: 'agent').call_raw(tools: [])
+    end
+  end
+
+  def test_empty_choices_200_openai
+    HTTPartyStub.with_response(FakeResponse.new(200, { 'choices' => [] })) do
+      assert_nil GptMaster.new([{ role: 'user', content: 'x' }], setting: 'openai', chat_id: 1, purpose: 'agent').call_raw(tools: [])
+    end
+  end
+
+  # Positive controls: legitimate shapes a tighter check must never reject.
+  def assert_passes_through(setting, body)
+    HTTPartyStub.with_response(FakeResponse.new(200, body)) do
+      assert_equal body, GptMaster.new([{ role: 'user', content: 'x' }], setting: setting, chat_id: 1, purpose: 'agent').call_raw(tools: [])
+    end
+  end
+
+  def test_well_formed_text_reply_passes
+    assert_passes_through('openai', { 'choices' => [{ 'message' => { 'content' => 'ok' }, 'finish_reason' => 'stop' }] })
+  end
+
+  def test_openai_tool_calls_with_nil_content_passes
+    assert_passes_through('openai', { 'choices' => [{ 'message' => { 'content' => nil, 'tool_calls' => [
+      { 'id' => 't1', 'type' => 'function', 'function' => { 'name' => 'weather', 'arguments' => '{}' } }] },
+      'finish_reason' => 'tool_calls' }] })
+  end
+
+  def test_deepseek_truncated_reasoning_passes
+    assert_passes_through('openai', { 'choices' => [{ 'message' => { 'content' => '', 'reasoning_content' => '…' },
+                                                       'finish_reason' => 'length' }] })
+  end
+
+  def test_anthropic_tool_use_or_thinking_only_passes
+    assert_passes_through('agent', { 'content' => [{ 'type' => 'tool_use', 'id' => 't', 'name' => 'x', 'input' => {} }],
+                                     'stop_reason' => 'tool_use' })
+    assert_passes_through('agent', { 'content' => [{ 'type' => 'thinking', 'thinking' => '…' }], 'stop_reason' => 'max_tokens' })
   end
 end
 

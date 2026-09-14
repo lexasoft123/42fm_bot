@@ -285,7 +285,9 @@ HTTP client (HTTParty) supporting both Anthropic and OpenAI-compatible APIs. Pro
 Chat commands go through `Agent::Runner` directly (which instantiates `GptMaster` with `setting: 'agent'`, `system_prompt:`, and tools); there is no `GptMaster.chat` class method anymore.
 
 **Anthropic specifics:** uses `x-api-key` + `anthropic-version` headers, requires `max_tokens`, optionally enables extended thinking via `thinking_budget`. Extracts the `text` block from the `content` array (skipping thinking blocks). When a `system_prompt:` is supplied, it is sent as a `system` array with `cache_control: { type: 'ephemeral' }` on its single text block. When `call_raw(tools:)` is invoked, `cache_control` is attached to the **last** tool definition — caching the entire tools array as one prefix segment.
-**OpenAI/DeepSeek specifics:** uses `Authorization: Bearer`, passes `thinking: {type: 'enabled'}` for reasoning models. `system_prompt:` is converted into a leading `{role: 'system'}` message. No explicit cache markers (these providers auto-cache).
+**OpenAI/DeepSeek specifics:** uses `Authorization: Bearer`, passes `thinking: {type: 'enabled'}` for reasoning models. `system_prompt:` is converted into a leading `{role: 'system'}` message. No explicit cache markers (these providers auto-cache). `max_tokens` is sent when the setting defines it (it used to be Anthropic-only, so OpenAI-compatible calls ran on the provider default). On DeepSeek V4 thinking the default is 65,536 and **reasoning counts toward it** — prod 2026-08-16 a reasoning loop used all 65,536 with empty content. xAI accepts `max_tokens` (deprecated alias of `max_completion_tokens`) but excludes reasoning, so it is no runaway guard there. Values are sized from prod output: `agent` 16000 (p99 ≈ 3k), `agent_vision` 16000 (max ≈ 1.7k), `knowledge` 32000 (extraction p99 10k, max 12.7k), `knowledge_review` unset. An unusable 200 is also dumped to gpt.log (`response: {unusable_200:, took_ms:, body:}`, body truncated).
+
+**Unusable 200s:** `call`/`call_raw` validate the body before touching it (`usable_body`): unparseable (`JSON::ParserError`), not a Hash, or missing `content` (Anthropic) / `choices[0].message` (OpenAI) → logged and treated like a non-200 (`'жпт не жпт'` / `nil`). Prod 2026-09-02 a 317 s call returned a non-object 200 and crashed the agent turn on `.dig`.
 
 **Telemetry:** every successful response's `usage` block is extracted (Anthropic: `input_tokens`/`output_tokens`/`cache_creation_input_tokens`/`cache_read_input_tokens`; OpenAI: `prompt_tokens` minus `prompt_tokens_details.cached_tokens`, `completion_tokens`) and persisted as an `ApiUsage` row tagged with `chat_id` and `purpose`. A one-line log entry (`GptMaster usage [model]: in=N out=M cache_r=X cache_w=Y cost=$0.0042 purpose=agent chat=-100…`) is also emitted. Telemetry errors are swallowed (`LOGGER.warn`) — a broken `api_usage` table never blocks a reply.
 
@@ -375,7 +377,10 @@ Per-chat working memory distinct from the knowledge base — knowledge = facts a
 
 1. Send user message + tools definitions to LLM
 2. If LLM returns tool calls → execute them, append results, repeat
-3. If LLM returns text → return as final response
+3. If LLM returns text → return as final response. A **blank** text (nil/whitespace, no tool calls) is handled by turn type:
+   - agent_event / cron turn (`user_initiated: false`) → `""` — the agent chose silence (`AgentEventHandler`)
+   - user turn, `stop` is `length`/`max_tokens` (output budget exhausted — reasoning counts on DeepSeek) → `'жпт не жпт'` at once; retrying the same context would just repeat the runaway on the listen loop
+   - user turn, otherwise → one more iteration **with tools**: the blank assistant turn is not replayed, a user nudge is appended (`append_user_nudge` — merged into the last user turn on Anthropic): the image nudge if the request is an unanswered draw directive (counts as the watchdog firing), else `EMPTY_REPLY_NUDGE`. A second blank → stub. Before this, `""` reached `deliver`, which silently skips blank text, so the user got nothing
 4. Safety cap: max 5 iterations, then force a text response
 
 **Components:**
@@ -911,7 +916,7 @@ chat_gpt:
     knowledge:                    # KnowledgeBase extract + compact (background, frequent)
       provider: deepseek
       model: deepseek-v4-pro
-      max_tokens: 16000
+      max_tokens: 32000
     lyrics:                       # suno_handler song lyrics generation
       provider: deepseek
       model: deepseek-v4-pro

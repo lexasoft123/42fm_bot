@@ -35,13 +35,17 @@ class GptMaster
 
     retries = 0
     loop do
+      t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       response = HTTParty.post(@api_url, body: body.to_json, headers: headers, timeout: 300)
+      took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
       if response.code == 200
-        record_usage(response)
-        result = extract_content(response)
-        stop = response['stop_reason'] || response.dig('choices', 0, 'finish_reason')
-        LOGGER.debug("#{tag}#call: stop=#{stop} reply=#{result.to_s.length} chars")
-        dump_gpt(method: 'call', body: body, response: response.parsed_response, stop: stop)
+        parsed = usable_body(response, 'call', body: body, took_ms: took_ms)
+        return 'жпт не жпт' unless parsed
+        record_usage(parsed)
+        result = extract_content(parsed)
+        stop = stop_reason(parsed)
+        LOGGER.debug("#{tag}#call: stop=#{stop} reply=#{result.to_s.length} chars took=#{took_ms}ms")
+        dump_gpt(method: 'call', body: body, response: parsed, stop: stop)
         return result
       elsif response.code == 529 && retries < MAX_RETRIES
         retries += 1
@@ -66,11 +70,13 @@ class GptMaster
       response = HTTParty.post(@api_url, body: body.to_json, headers: headers, timeout: 300)
       took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
       if response.code == 200
-        record_usage(response)
-        stop = response['stop_reason'] || response.dig('choices', 0, 'finish_reason')
+        parsed = usable_body(response, 'call_raw', body: body, took_ms: took_ms)
+        return nil unless parsed
+        record_usage(parsed)
+        stop = stop_reason(parsed)
         LOGGER.debug("#{tag}#call_raw: stop_reason=#{stop} took=#{took_ms}ms")
-        dump_gpt(method: 'call_raw', body: body, response: response.parsed_response, stop: stop)
-        return response.parsed_response
+        dump_gpt(method: 'call_raw', body: body, response: parsed, stop: stop)
+        return parsed
       elsif response.code == 529 && retries < MAX_RETRIES
         retries += 1
         delay = RETRY_DELAYS[retries - 1]
@@ -171,6 +177,12 @@ class GptMaster
         model:    @model,
         messages: messages,
       }
+      # Without it the provider default applies: DeepSeek V4 thinking stops at
+      # 65,536 output tokens, and reasoning counts toward that (prod 2026-08-16:
+      # a reasoning loop burned all 65,536 with empty content, ~6.5 min of
+      # blocked bot loop). xAI still accepts max_tokens (deprecated alias of
+      # max_completion_tokens) but excludes reasoning from it.
+      body[:max_tokens] = @max_tokens if @max_tokens
       # DeepSeek V4-Pro accepts the same `thinking: {type: enabled}` shape we
       # use for Anthropic. Vanilla OpenAI chat-completions and Grok ignore
       # unknown body keys, so a `thinking:` config on those providers is a
@@ -244,6 +256,40 @@ class GptMaster
       nil
     end
     (parsed.is_a?(Hash) && parsed.dig('error', 'message')) || response.body
+  end
+
+  # A 200 isn't proof of a usable reply. Prod 2026-09-02: a call returned 200
+  # after 317 s with a body that wasn't a JSON object, and `.dig` on it crashed
+  # the agent turn. Returns the parsed Hash, or nil (logged) when the body is
+  # unparseable, not a Hash, or lacks the provider's `content` / `choices`.
+  # The rejected body also goes to gpt.log (truncated) with the request.
+  def usable_body(response, method, body:, took_ms:)
+    problem = nil
+    parsed = begin
+      response.parsed_response
+    rescue StandardError => e
+      problem = "unparseable body (#{e.class})"
+      nil
+    end
+    unless problem
+      usable = if anthropic?
+        parsed.is_a?(Hash) && parsed['content'].is_a?(Array)
+      else
+        parsed.is_a?(Hash) && parsed['choices'].is_a?(Array) && parsed['choices'].first.is_a?(Hash) &&
+          parsed['choices'].first['message'].is_a?(Hash)
+      end
+      return parsed if usable
+      problem = "no #{anthropic? ? 'content' : 'choices[0].message'}"
+    end
+    raw = response.body.to_s
+    LOGGER.error "#{tag}##{method}: 200 with #{problem} took=#{took_ms}ms: #{raw[0, 300]}"
+    dump_gpt(method: method, body: body, response: { 'unusable_200' => problem, 'took_ms' => took_ms,
+                                                     'body' => raw[0, 2000] }, stop: nil)
+    nil
+  end
+
+  def stop_reason(parsed)
+    anthropic? ? parsed['stop_reason'] : parsed.dig('choices', 0, 'finish_reason')
   end
 
   def extract_content(response)

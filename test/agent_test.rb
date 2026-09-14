@@ -468,6 +468,59 @@ class RunnerTest < BotTest
     assert_equal 'forced final text', result
   end
 
+  # A blank reply on a user turn used to reach deliver as "" and be dropped
+  # silently. It gets one more pass WITH tools; the blank assistant turn is not
+  # replayed; the nudge is merged into the last user turn (no consecutive user
+  # turns on Anthropic).
+  def test_blank_user_reply_retries_with_tools
+    FakeGptMaster.enqueue(anthropic_text(''), anthropic_text('ответ'))
+    result = build_runner(text: 'go', user: @user).run
+    assert_equal 'ответ', result
+    assert_equal %i[call_raw call_raw], FakeGptMaster.calls.map { |c| c[:method] }
+    retry_msgs = FakeGptMaster.calls.last[:messages]
+    assert_equal 1, retry_msgs.size, 'no blank assistant turn, no extra user turn'
+    assert_includes retry_msgs.last[:content].map { |b| b[:text] }, Agent::Runner::EMPTY_REPLY_NUDGE
+  end
+
+  def test_blank_after_output_budget_exhausted_returns_stub_without_retry
+    FakeGptMaster.enqueue({ 'content' => [], 'stop_reason' => 'max_tokens' })
+    assert_equal 'жпт не жпт', build_runner(text: 'go', user: @user).run
+    assert_equal 1, FakeGptMaster.calls.size
+  end
+
+  def test_second_blank_reply_returns_stub
+    FakeGptMaster.enqueue(anthropic_text(''), anthropic_text('  '))
+    assert_equal 'жпт не жпт', build_runner(text: 'go', user: @user).run
+    assert_equal 2, FakeGptMaster.calls.size
+  end
+
+  # Review finding: a blank reply to a draw directive must still get the
+  # generate_image nudge with tools available.
+  def test_blank_reply_to_draw_directive_nudges_generate_image
+    drawn = false
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_a, _c) { drawn = true; 'в очереди' })
+    FakeGptMaster.enqueue(anthropic_text(''), anthropic_tool_call('generate_image', { 'request' => 'кот' }),
+                          anthropic_text('Готово'))
+    result = build_runner(text: 'нарисуй кота', user: @user).run
+    assert drawn, 'generate_image must be reachable after a blank reply'
+    assert_equal 'Готово', result
+    nudge = FakeGptMaster.calls[1][:messages].last[:content].map { |b| b[:text] }.join
+    assert_includes nudge, 'generate_image'
+  end
+
+  # agent_event/cron turns: blank = the agent chose silence, no extra call.
+  def test_blank_reply_on_synthetic_turn_is_silence
+    FakeGptMaster.enqueue(anthropic_text(''))
+    assert_equal '', build_runner(text: 'go', user: @user, user_initiated: false).run
+    assert_equal 1, FakeGptMaster.calls.size
+  end
+
+  def test_non_blank_reply_is_returned_without_finalizer
+    FakeGptMaster.enqueue(anthropic_text('ответ'))
+    assert_equal 'ответ', build_runner(text: 'go', user: @user).run
+    assert_equal [:call_raw], FakeGptMaster.calls.map { |c| c[:method] }
+  end
+
   # Image-hallucination watchdog: when the agent ends a turn with the
   # `🎨 <caption>` pattern but never called generate_image, runner should
   # nudge once and re-loop instead of returning the hallucinated text.

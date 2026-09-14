@@ -686,3 +686,47 @@ class RunnerImageInjectionTest < BotTest
     assert_equal iter2.rindex(last), iter2.size - 1
   end
 end
+
+# The prod runaway shape (DeepSeek thinking): empty content + reasoning_content.
+class RunnerBlankReplyOpenaiTest < BotTest
+  include ViewImageTestHelpers
+  include Fixtures::Users
+
+  def setup
+    super
+    @saved_tools = Agent::ToolRegistry.instance_variable_get(:@tools)&.dup || []
+    Agent::ToolRegistry.instance_variable_set(:@tools, [])
+    @original_gpt_master = ::GptMaster
+    Object.send(:remove_const, :GptMaster)
+    Object.const_set(:GptMaster, ViFakeGptMaster)
+    ViFakeGptMaster.reset!
+    stub_settings!
+    @user = member_user
+  end
+
+  def teardown
+    Agent::ToolRegistry.instance_variable_set(:@tools, @saved_tools)
+    Object.send(:remove_const, :GptMaster)
+    Object.const_set(:GptMaster, @original_gpt_master)
+    super
+  end
+
+  def deepseek_blank(finish)
+    { 'choices' => [{ 'message' => { 'role' => 'assistant', 'content' => '', 'reasoning_content' => '21 12 13 21 …' },
+                      'finish_reason' => finish }] }
+  end
+
+  def test_length_stop_returns_stub_without_repeating_the_runaway
+    ViFakeGptMaster.enqueue(deepseek_blank('length'))
+    assert_equal 'жпт не жпт', build_runner(text: 'go', user: @user).run
+    assert_equal 1, ViFakeGptMaster.calls.size
+  end
+
+  def test_blank_stop_retries_without_replaying_reasoning
+    ViFakeGptMaster.enqueue(deepseek_blank('stop'), openai_text('ответ'))
+    assert_equal 'ответ', build_runner(text: 'go', user: @user).run
+    retry_msgs = ViFakeGptMaster.calls.last[:messages]
+    assert_equal({ role: 'user', content: Agent::Runner::EMPTY_REPLY_NUDGE }, retry_msgs.last)
+    refute retry_msgs.any? { |m| m.is_a?(Hash) && m.key?('reasoning_content') }, 'reasoning blob must not be replayed'
+  end
+end

@@ -12,6 +12,11 @@ module Agent
     # parse every iteration line. Pile-up of slow iterations is what
     # backs up `bot.listen`'s single-threaded queue.
     SLOW_ITERATION_MS = 5_000
+    # finish/stop reasons meaning the output budget ran out (reasoning counts
+    # toward it on DeepSeek) — retrying the same context would just repeat it.
+    OUTPUT_BUDGET_STOPS = %w[length max_tokens].freeze
+    EMPTY_REPLY_NUDGE = 'Ответ на запрос пользователя не дошёл — текста не было. Ответь сейчас: ' \
+                        'если нужен инструмент, вызови его; иначе дай текстовый ответ по-русски.'.freeze
 
     def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil, user_initiated: true, forum_thread_id: nil, private_chat: false)
       @text       = text
@@ -89,6 +94,7 @@ module Agent
 
       generate_image_called = false
       watchdog_fired        = false
+      blank_retried         = false
 
       MAX_ITERATIONS.times do |i|
         iter_t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -101,7 +107,29 @@ module Agent
         alog :warn, "slow iteration #{i + 1}: took=#{iter_ms}ms (threshold #{SLOW_ITERATION_MS}ms)" if iter_ms > SLOW_ITERATION_MS
 
         if tool_calls.empty?
-          text = extract_text(raw) || 'жпт не жпт'
+          text = extract_text(raw)
+          if text.nil? || text.strip.empty?
+            # Synthetic agent_event/cron turn: blank means the agent chose
+            # silence (AgentEventHandler) — not a failure.
+            return '' unless @user_initiated
+
+            # User turn: a blank reply used to reach deliver as "" and be
+            # dropped silently. Budget exhaustion won't improve on a retry of
+            # the same context (and would block the loop again) → visible stub.
+            if OUTPUT_BUDGET_STOPS.include?(stop.to_s) || blank_retried
+              alog :warn, "empty reply (iteration #{i + 1}, stop=#{stop}#{blank_retried ? ', after retry' : ''}) — returning stub"
+              return 'жпт не жпт'
+            end
+            # One more pass WITH tools. The blank assistant turn is not
+            # replayed; a draw directive gets the image nudge (watchdog)
+            # instead of the generic one.
+            blank_retried = true
+            draw = !generate_image_called && !watchdog_fired && image_request_unanswered?
+            watchdog_fired ||= draw
+            alog :warn, "empty reply (iteration #{i + 1}, stop=#{stop}) — #{draw ? 'draw directive, nudging generate_image' : 'retrying with tools'}"
+            append_user_nudge(messages, draw ? image_call_nudge_text : EMPTY_REPLY_NUDGE)
+            next
+          end
 
           # Image watchdog: the agent sometimes promises/describes an image but
           # never calls generate_image — either imitating the `🎨 <caption>`
@@ -196,15 +224,36 @@ module Agent
       @text.match?(DRAW_DIRECTIVE)
     end
 
+    def image_call_nudge_text
+      'Похоже, надо нарисовать/дорисовать картинку, но ты не вызвал инструмент ' \
+      'generate_image (только описал словами или пообещал). Сейчас вызови generate_image ' \
+      'с подходящим request — без описания в тексте и без 🎨-префикса; если правишь ' \
+      'присланное фото, добавь edit_source. Картинку отрисует сам инструмент.'
+    end
+
     def build_image_call_nudge
-      msg = 'Похоже, надо нарисовать/дорисовать картинку, но ты не вызвал инструмент ' \
-            'generate_image (только описал словами или пообещал). Сейчас вызови generate_image ' \
-            'с подходящим request — без описания в тексте и без 🎨-префикса; если правишь ' \
-            'присланное фото, добавь edit_source. Картинку отрисует сам инструмент.'
+      msg = image_call_nudge_text
       if anthropic?
         { role: 'user', content: [{ type: 'text', text: msg }] }
       else
         { role: 'user', content: msg }
+      end
+    end
+
+    # Add a synthetic user instruction without an assistant turn in between.
+    # Anthropic forbids two consecutive user turns, so there the text is
+    # merged into the last user message (initial request or tool_result turn);
+    # openai-compat accepts a fresh user turn after user/tool messages.
+    def append_user_nudge(messages, text)
+      last = messages.last
+      if anthropic? && last && (last[:role] || last['role']) == 'user'
+        content = last[:content]
+        blocks = content.is_a?(String) ? [{ type: 'text', text: content }] : Array(content)
+        last[:content] = blocks + [{ type: 'text', text: text }]
+      elsif anthropic?
+        messages << { role: 'user', content: [{ type: 'text', text: text }] }
+      else
+        messages << { role: 'user', content: text }
       end
     end
 

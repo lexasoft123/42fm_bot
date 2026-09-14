@@ -34,6 +34,7 @@ chat_gpt:
     agent:
       provider: deepseek
       model: deepseek-v4-pro
+      # Sent to DeepSeek and counts reasoning; prod turns ran p99 ~3k output.
       max_tokens: 16000
       thinking:
         type: enabled
@@ -51,6 +52,8 @@ chat_gpt:
     agent_vision:
       provider: grok
       model: grok-4-fast-reasoning
+      # xAI accepts it (deprecated alias of max_completion_tokens) but does not
+      # count reasoning; prod max ~1.7k output.
       max_tokens: 16000
     # Background fact extraction + cluster-merge compaction for the per-chat
     # knowledge base. Pure text-in / text-out, no tools, no vision — cheap LLM
@@ -60,7 +63,9 @@ chat_gpt:
     knowledge:
       provider: deepseek
       model: deepseek-v4-pro
-      max_tokens: 16000
+      # Includes reasoning on DeepSeek. Extraction output ran p99 10k / max 12.7k
+      # tokens in prod (2026-08..09) — 16000 would truncate the long tail.
+      max_tokens: 32000
     # Suno handler-side LLM calls — Sonnet > DeepSeek for both lyrics and
     # tags in our testing (better rhyme/meter/genre-convention adherence
     # for lyrics; richer style-vocabulary recall for tags — distinguishing
