@@ -319,6 +319,8 @@ Two invariants that are easy to break:
 
 A rebuild reads the legacy JSON `embedding` column **only for rows that have no blob** (a second, restricted query). It originally plucked both columns for every row, so while dual-write kept the JSON populated each rebuild allocated ~171 MB of strings it never parsed — p50 765 ms per rebuild in prod. That removes the Ruby cost but not all the I/O: `embedding_blob` sits *after* `embedding` in the row, so SQLite still reads through the JSON bytes to reach the blob until `rake knowledge:drop_legacy_embeddings` nulls them (measured on a synthetic table: 80 ms old query, 45 ms new, 16 ms once the JSON is gone).
 
+The Docker image builds `numo-linalg-alt` explicitly against Debian's system OpenBLAS and LAPACKE (`libopenblas-dev` + `liblapacke-dev`) and installs their runtime libraries. Do not replace `liblapacke-dev` with `liblapack-dev`: the gem probes for the C LAPACKE API, and if it is absent it downloads and compiles a full private OpenBLAS (~4.5 minutes on a cold build). Removing that private library afterward also leaves `linalg.so` with unresolved `LAPACKE_*` symbols and makes the bot restart-loop at boot.
+
 Build-time hardening: rows whose embedding length differs from the chat's modal length are excluded and warned about (`Numo`'s `cast` silently zero-pads ragged rows, so a change of embeddings model would otherwise corrupt every score), and norms are clamped so a stored zero-norm vector scores 0.0 instead of producing `NaN` (which made `sort_by` raise).
 
 ### KnowledgeBase — `lib/knowledge_base.rb`
