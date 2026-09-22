@@ -28,6 +28,7 @@ TEST_FILES := \
 	test/bot_dispatcher_test.rb \
 	test/rate_limiter_test.rb \
 	test/model_provider_client_test.rb \
+	test/image_prompt_templates_test.rb \
 	test/image_gen_adapter_test.rb \
 	test/image_gen_poll_error_test.rb \
 	test/image_gen_catalog_test.rb \

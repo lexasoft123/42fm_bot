@@ -77,14 +77,13 @@ class ImageGenTaskHandler
         [{ role: 'user', content: llm_prompt }]
       end
 
-      # Image-edit prompt enrichment needs vision (the LLM has to see the source
-      # image to write a useful edit instruction). Route to `agent_vision`
-      # (grok-4-fast-reasoning today) — DeepSeek rejects vision blocks.
-      # The Anthropic-shape vision block we build below is auto-translated to
-      # OpenAI shape in GptMaster#convert_vision_blocks_for_openai when the
-      # provider isn't anthropic. Text-to-image enrichment stays on the cheaper
-      # `agent` setting (no vision needed).
-      enrich_setting = editing ? 'agent_vision' : 'agent'
+      # Prompt composition is a bounded creative rewrite, not an agent turn.
+      # Keep it on its own low-latency setting with thinking disabled so it
+      # cannot spend thousands of reasoning tokens turning a joke into a
+      # literal checklist. DeepSeek Flash is multimodal, so one setting handles
+      # both text-to-image and edits. GptMaster converts these Anthropic-shape
+      # image blocks to OpenAI image_url blocks at the wire boundary.
+      enrich_setting = 'image_prompt'
       begin
         p['prompt'] = GptMaster.new(messages, setting: enrich_setting,
                                     chat_id: task.chat_id, user_uid: p['user_uid'],

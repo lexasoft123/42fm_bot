@@ -1,7 +1,9 @@
+require_relative 'prompt_templates'
+
 module ImageGen
-  # Base class for image-generation backends. Each concrete adapter owns its
-  # API client logic AND its prompt-enrichment templates so the handler stays
-  # provider-agnostic.
+  # Base class for image-generation backends. Concrete adapters own API client
+  # logic; all inherit the shared comedy-first prompt templates so model
+  # switching cannot silently restore conservative/boilerplate enrichment.
   class Adapter
     # Submit a generation/edit job. Returns external task_id String.
     # input_images: array of { data: <base64 string, no data-URI prefix>,
@@ -23,10 +25,11 @@ module ImageGen
       raise NotImplementedError
     end
 
-    # LLM template for prompt enrichment. mode ∈ [:text_to_image, :edit].
-    # Returns a String with %{request} %{context} %{knowledge} placeholders.
+    # Shared LLM template for prompt enrichment. mode ∈ [:text_to_image, :edit].
+    # Returns a String with %{request}, %{context}, %{knowledge}, and
+    # %{model_name} placeholders.
     def prompt_template(mode)
-      raise NotImplementedError
+      PromptTemplates.for(mode)
     end
 
     # Short identifier ('flux' | 'atlas'). Snapshotted into task.params at

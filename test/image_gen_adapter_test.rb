@@ -85,7 +85,8 @@ class FluxAdapterBackCompatTest < Minitest::Test
     adapter = ImageGen::FluxAdapter.new
     # Indirect assertion: we can construct it without raising. Prompt template
     # is stable across config sources.
-    assert_match(/FLUX 2 AI/, adapter.prompt_template(:text_to_image))
+    assert_same ImageGen::PromptTemplates::TEXT_TO_IMAGE,
+                adapter.prompt_template(:text_to_image)
   end
 
   def test_prefers_image_gen_over_top_level_flux
@@ -531,12 +532,12 @@ class AtlasAdapterTest < Minitest::Test
     refute_match(/FLUX 2 приоритизирует/, template, 'should drop FLUX-specific guidance')
   end
 
-  def test_prompt_template_edit_mode_is_imperative_and_model_agnostic
+  def test_prompt_template_edit_mode_is_direct_and_model_agnostic
     fake = FakeModelProviderClient.new
     template = with_fake_client(fake) { ImageGen::AtlasAdapter.new.prompt_template(:edit) }
     assert_match(/%\{model_name\}/, template)
     refute_match(/Wan/, template, 'edit template model name must be de-hardcoded')
-    assert_match(/повелительно/, template)
+    assert_match(/Опиши только изменение/, template)
     assert_match(/%\{request\}/, template)
   end
 
@@ -706,10 +707,11 @@ class CloseRouterImgAdapterTest < Minitest::Test
     assert_match(/synchronous/, err.message)
   end
 
-  def test_prompt_template_mentions_nano_banana
+  def test_prompt_template_is_shared_and_model_agnostic
     fake = FakeModelProviderClient.new
     template = with_fake_client(fake) { ImageGen::CloseRouterImgAdapter.new.prompt_template(:text_to_image) }
-    assert_match(/Nano Banana/, template)
+    assert_same ImageGen::PromptTemplates::TEXT_TO_IMAGE, template
+    assert_match(/%{model_name}/, template)
     assert_match(/%\{request\}/, template)
   end
 end
@@ -884,25 +886,18 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_match(/\[text_to_image\]/, gpt_text(FakeGptMaster.captured.first))
   end
 
-  # Regression: prompt enrichment for image-edit MUST go to a vision-capable
-  # provider. Pre-fix, the handler hardcoded `setting: 'agent'` (DeepSeek),
-  # which rejects the {type: 'image', source: {...}} content block with
-  # `400 unknown variant 'image', expected 'text'`. Fix routes editing to
-  # `agent_vision` (grok-4-fast-reasoning today; Anthropic-shape blocks are
-  # auto-translated to OpenAI shape at the GptMaster boundary) and keeps
-  # text-to-image on the cheaper `agent` setting where no image is sent.
-  def test_image_edit_uses_agent_vision_setting
+  # Both modes use the dedicated multimodal prompt composer. This keeps prompt
+  # length/creativity tuning independent from the full agent tool loop.
+  def test_image_edit_uses_image_prompt_setting
     task = fresh_task(input_image: Base64.strict_encode64('fakebytes'))
     ImageGenTaskHandler.new.call(task, @bot)
-    assert_equal 'agent_vision', FakeGptMaster.settings.first,
-      'image-edit prompt enrichment must use agent_vision; DeepSeek rejects vision content blocks'
+    assert_equal 'image_prompt', FakeGptMaster.settings.first
   end
 
-  def test_text_to_image_uses_agent_setting
+  def test_text_to_image_uses_image_prompt_setting
     task = fresh_task # no image
     ImageGenTaskHandler.new.call(task, @bot)
-    assert_equal 'agent', FakeGptMaster.settings.first,
-      'text-to-image prompt enrichment stays on cheap `agent` (DeepSeek)'
+    assert_equal 'image_prompt', FakeGptMaster.settings.first
   end
 
   def test_submit_uses_edit_template_when_input_image_present

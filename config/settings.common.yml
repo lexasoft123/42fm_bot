@@ -38,23 +38,25 @@ chat_gpt:
       max_tokens: 16000
       thinking:
         type: enabled
-    # Used when the user attaches/replies-to an image — DeepSeek doesn't see
-    # images, so vision requests go through Grok-4-fast. Picked automatically
-    # by Agent::Runner when @image is present, and by ImageGenTaskHandler when
-    # editing (input_image attached). Anthropic is no longer used for vision —
-    # Grok is cheaper, less filtered, and more permissive about named-people
-    # image descriptions which the bot's persona requires.
-    # Reasoning variant is preferred over non-reasoning: empirically the
-    # non-reasoning model occasionally hallucinated `🎨 <caption>` image
-    # replies as plain text instead of invoking generate_image (it had
-    # learned the format from chat history). Reasoning trades ~2× latency
-    # for materially more reliable tool-following.
+    # Dedicated image-prompt composer. This is a bounded transformation task,
+    # so extended reasoning only makes prompts longer and more literal. The
+    # same multimodal model handles T2I and edits without affecting the main
+    # agent's reasoning budget.
+    image_prompt:
+      provider: deepseek
+      model: deepseek-flash
+      max_tokens: 2000
+      thinking:
+        type: disabled
+    # Used by Agent::Runner when the user attaches/replies-to an image.
+    # Keep this separate from image_prompt: tool-following benefits from
+    # reasoning, while prompt composition deliberately disables it.
     agent_vision:
-      provider: grok
-      model: grok-4-fast-reasoning
-      # xAI accepts it (deprecated alias of max_completion_tokens) but does not
-      # count reasoning; prod max ~1.7k output.
+      provider: deepseek
+      model: deepseek-flash
       max_tokens: 16000
+      thinking:
+        type: enabled
     # Background fact extraction + cluster-merge compaction for the per-chat
     # knowledge base. Pure text-in / text-out, no tools, no vision — cheap LLM
     # is the right fit. Runs frequently (every Settings.knowledge.extract_every
@@ -145,6 +147,12 @@ chat_gpt:
       input: 0.14
       output: 0.28
       cache_read: 0.0028
+      cache_write: 0
+    # Conservative peak-hour rates; off-peak billing may be lower.
+    deepseek-flash:
+      input: 0.30
+      output: 1.20
+      cache_read: 0.006
       cache_write: 0
     # xAI Grok pricing per 1M tokens (USD). Source: docs.x.ai/docs/models.
     # cache_write is 0 — xAI caching is implicit (same as DeepSeek).
