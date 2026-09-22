@@ -342,6 +342,35 @@ class AtlasAdapterTest < Minitest::Test
     refute body.key?(:image), 'Seedream reads plural `images`, not singular `image`'
   end
 
+  def test_submit_text_to_image_qwen_3_uses_size_field
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'qwen-id' } })
+    with_fake_client(fake) do
+      ImageGen::AtlasAdapter.new.submit(prompt: 'newspaper layout', model: 'qwen-image-3.0-pro/text-to-image')
+    end
+    _, _, body = fake.calls.first
+    assert_equal 'qwen-image-3.0-pro/text-to-image', body[:model]
+    assert_equal '1024*1024', body[:size]
+    refute body.key?(:width), 'Qwen Image 3.0 uses `size`, not width'
+    refute body.key?(:height), 'Qwen Image 3.0 uses `size`, not height'
+  end
+
+  def test_submit_image_edit_qwen_3_uses_reference_image_urls_and_caps_at_three
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'qwen-edit' } })
+    images = (1..4).map { |n| { data: "B64#{n}", media_type: 'image/png' } }
+    with_fake_client(fake) do
+      ImageGen::AtlasAdapter.new.submit(
+        prompt: 'combine into a poster',
+        input_images: images,
+        model: 'qwen-image-3.0-pro/edit'
+      )
+    end
+    _, _, body = fake.calls.first
+    assert_equal 'qwen-image-3.0-pro/edit', body[:model]
+    assert_equal %w[B641 B642 B643].map { |data| "data:image/png;base64,#{data}" }, body[:reference_image_urls]
+    refute body.key?(:images)
+    refute body.key?(:image)
+  end
+
   def test_submit_handles_unwrapped_id_response_shape
     # Defensive: if Atlas ever returns the id at top level instead of data.id.
     fake = FakeModelProviderClient.new(post_returns: { 'id' => 'top-level' })

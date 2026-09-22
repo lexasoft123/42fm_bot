@@ -1,4 +1,5 @@
 require_relative 'test_helper'
+require 'yaml'
 LOGGER = Logger.new(IO::NULL) unless defined?(LOGGER)
 
 # Settings.image_gen accessor (same stub the adapter test uses).
@@ -11,12 +12,14 @@ require_relative '../lib/image_gen'
 
 class ImageGenCatalogTest < Minitest::Test
   CATALOG = {
-    'default_model' => 'nano-banana-2',
+    'default_model' => 'qwen-image-3-pro',
     'models' => {
       'nano-banana-2' => { 'provider' => 'atlas', 't2i' => 'google/nano-banana-2/text-to-image',
                            'edit' => 'google/nano-banana-2/edit', 'multi_image' => true, 'desc' => 'NB2 desc' },
       'wan-2.7'       => { 'provider' => 'atlas', 't2i' => 'alibaba/wan-2.7-pro/text-to-image',
                            'edit' => 'alibaba/wan-2.7/image-edit', 'desc' => 'Wan desc' },
+      'qwen-image-3-pro' => { 'provider' => 'atlas', 't2i' => 'qwen-image-3.0-pro/text-to-image',
+                              'edit' => 'qwen-image-3.0-pro/edit', 'multi_image' => true, 'desc' => 'Qwen desc' },
       'flux-2-pro'    => { 'provider' => 'flux', 't2i' => 'flux-2-pro',
                            'edit' => false, 'desc' => 'Flux desc' },
     },
@@ -33,15 +36,15 @@ class ImageGenCatalogTest < Minitest::Test
   end
 
   def test_keys_and_default
-    assert_equal %w[nano-banana-2 wan-2.7 flux-2-pro], ImageGen::Catalog.keys
-    assert_equal 'nano-banana-2', ImageGen::Catalog.default_key
+    assert_equal %w[nano-banana-2 wan-2.7 qwen-image-3-pro flux-2-pro], ImageGen::Catalog.keys
+    assert_equal 'qwen-image-3-pro', ImageGen::Catalog.default_key
   end
 
   def test_resolve_key_valid_blank_invalid
     assert_equal 'wan-2.7',       ImageGen::Catalog.resolve_key('wan-2.7')
-    assert_equal 'nano-banana-2', ImageGen::Catalog.resolve_key(nil)
-    assert_equal 'nano-banana-2', ImageGen::Catalog.resolve_key('')
-    assert_equal 'nano-banana-2', ImageGen::Catalog.resolve_key('does-not-exist')
+    assert_equal 'qwen-image-3-pro', ImageGen::Catalog.resolve_key(nil)
+    assert_equal 'qwen-image-3-pro', ImageGen::Catalog.resolve_key('')
+    assert_equal 'qwen-image-3-pro', ImageGen::Catalog.resolve_key('does-not-exist')
   end
 
   def test_provider_for
@@ -54,11 +57,13 @@ class ImageGenCatalogTest < Minitest::Test
   def test_model_id_for_text_to_image
     assert_equal 'alibaba/wan-2.7-pro/text-to-image', ImageGen::Catalog.model_id_for('wan-2.7', :text_to_image)
     assert_equal 'google/nano-banana-2/text-to-image', ImageGen::Catalog.model_id_for('nano-banana-2', :text_to_image)
+    assert_equal 'qwen-image-3.0-pro/text-to-image', ImageGen::Catalog.model_id_for('qwen-image-3-pro', :text_to_image)
   end
 
   def test_model_id_for_edit_including_unsupported
     assert_equal 'google/nano-banana-2/edit', ImageGen::Catalog.model_id_for('nano-banana-2', :edit)
     assert_equal 'alibaba/wan-2.7/image-edit', ImageGen::Catalog.model_id_for('wan-2.7', :edit)
+    assert_equal 'qwen-image-3.0-pro/edit', ImageGen::Catalog.model_id_for('qwen-image-3-pro', :edit)
     # edit: false → nil (caller passes model:nil → adapter uses its default)
     assert_nil ImageGen::Catalog.model_id_for('flux-2-pro', :edit)
   end
@@ -71,6 +76,7 @@ class ImageGenCatalogTest < Minitest::Test
 
   def test_multi_image
     assert ImageGen::Catalog.multi_image?('nano-banana-2'), 'flagged multi_image: true'
+    assert ImageGen::Catalog.multi_image?('qwen-image-3-pro'), 'Qwen supports up to three references'
     refute ImageGen::Catalog.multi_image?('wan-2.7'),       'no flag → single image'
     refute ImageGen::Catalog.multi_image?('flux-2-pro')
     # unknown key resolves to the (capable) default
@@ -78,19 +84,34 @@ class ImageGenCatalogTest < Minitest::Test
   end
 
   def test_multi_image_default_key
-    # Default (nano-banana-2) is itself capable → returned as-is.
-    assert_equal 'nano-banana-2', ImageGen::Catalog.multi_image_default_key
+    # Default (Qwen) is itself capable → returned as-is.
+    assert_equal 'qwen-image-3-pro', ImageGen::Catalog.multi_image_default_key
     # Default flipped to a single-image model → falls back to first capable key.
     Settings.image_gen = Marshal.load(Marshal.dump(CATALOG)).merge('default_model' => 'wan-2.7')
     ImageGen::Catalog.reset!
     assert_equal 'nano-banana-2', ImageGen::Catalog.multi_image_default_key
   end
 
+  def test_shipped_config_defaults_and_legacy_atlas_models_are_qwen
+    common = YAML.load_file(File.expand_path('../config/settings.common.yml', __dir__))
+    Settings.image_gen = common.fetch('image_gen')
+    ImageGen::Catalog.reset!
+
+    assert_equal 'qwen-image-3-pro', ImageGen::Catalog.default_key
+    assert_equal 'qwen-image-3-pro', ImageGen::Catalog.resolve_key(nil)
+    assert_equal 'qwen-image-3-pro', ImageGen::Catalog.resolve_key('unknown-model')
+
+    atlas = Settings.image_gen.dig('providers', 'atlas')
+    assert_equal 'qwen-image-3.0-pro/text-to-image', atlas['text_to_image_model']
+    assert_equal 'qwen-image-3.0-pro/edit', atlas['image_edit_model']
+  end
+
   def test_enum_and_describe_options
-    assert_equal %w[nano-banana-2 wan-2.7 flux-2-pro], ImageGen::Catalog.enum
+    assert_equal %w[nano-banana-2 wan-2.7 qwen-image-3-pro flux-2-pro], ImageGen::Catalog.enum
     desc = ImageGen::Catalog.describe_options
     assert_match(/nano-banana-2 — NB2 desc/, desc)
     assert_match(/wan-2.7 — Wan desc/, desc)
+    assert_match(/qwen-image-3-pro — Qwen desc/, desc)
     assert_match(/flux-2-pro — Flux desc/, desc)
   end
 
@@ -105,10 +126,10 @@ class ImageGenCatalogTest < Minitest::Test
   end
 
   def test_memoization_and_reset
-    assert_equal 3, ImageGen::Catalog.all.size
+    assert_equal 4, ImageGen::Catalog.all.size
     # Mutate settings WITHOUT reset → memoized value unchanged
     Settings.image_gen = { 'models' => {} }
-    assert_equal 3, ImageGen::Catalog.all.size
+    assert_equal 4, ImageGen::Catalog.all.size
     ImageGen::Catalog.reset!
     assert_equal 0, ImageGen::Catalog.all.size
   end

@@ -29,12 +29,14 @@ class GenerateImageToolTest < BotTest
 
   CATALOG = {
     'provider' => 'atlas',
-    'default_model' => 'nano-banana-2',
+    'default_model' => 'qwen-image-3-pro',
     'models' => {
       'nano-banana-2' => { 'provider' => 'atlas', 't2i' => 'google/nano-banana-2/text-to-image',
                            'edit' => 'google/nano-banana-2/edit', 'multi_image' => true, 'desc' => 'NB2' },
       'wan-2.7'       => { 'provider' => 'atlas', 't2i' => 'alibaba/wan-2.7-pro/text-to-image',
                            'edit' => 'alibaba/wan-2.7/image-edit', 'desc' => 'Wan' },
+      'qwen-image-3-pro' => { 'provider' => 'atlas', 't2i' => 'qwen-image-3.0-pro/text-to-image',
+                              'edit' => 'qwen-image-3.0-pro/edit', 'multi_image' => true, 'desc' => 'Qwen' },
     },
   }.freeze
 
@@ -68,12 +70,12 @@ class GenerateImageToolTest < BotTest
 
   def test_omitted_model_defaults_to_catalog_default
     call_tool('prompt' => 'кот')
-    assert_equal 'nano-banana-2', last_params['model']
+    assert_equal 'qwen-image-3-pro', last_params['model']
   end
 
   def test_invalid_model_falls_back_to_default
     call_tool('prompt' => 'кот', 'model' => 'midjourney')
-    assert_equal 'nano-banana-2', last_params['model']
+    assert_equal 'qwen-image-3-pro', last_params['model']
   end
 
   # --- multi-image / chat-history sourcing ----------------------------------
@@ -87,7 +89,7 @@ class GenerateImageToolTest < BotTest
   # default so the user actually gets a combine.
   def test_combine_switches_incapable_model_to_capable_default
     call_tool('prompt' => 'объедини', 'model' => 'wan-2.7', 'source_message_ids' => [10, 11])
-    assert_equal 'nano-banana-2', last_params['model']
+    assert_equal 'qwen-image-3-pro', last_params['model']
     assert_equal [10, 11], last_params['source_message_ids']
   end
 
@@ -134,7 +136,7 @@ class GenerateImageToolTest < BotTest
       d = defs.find { |x| (api == 'anthropic' ? x[:name] : x[:function][:name]) == 'generate_image' }
       refute_nil d, "#{api}: generate_image must be present"
       schema = api == 'anthropic' ? d[:input_schema] : d[:function][:parameters]
-      assert_equal %w[nano-banana-2 wan-2.7], schema[:properties]['model'][:enum], "#{api}: enum from catalog"
+      assert_equal %w[nano-banana-2 wan-2.7 qwen-image-3-pro], schema[:properties]['model'][:enum], "#{api}: enum from catalog"
       assert_match(/NB2/, schema[:properties]['model'][:description], "#{api}: desc suffix appended")
       assert_includes schema[:required], 'prompt', "#{api}: prompt required"
       refute_includes schema[:required], 'model', "#{api}: model optional"

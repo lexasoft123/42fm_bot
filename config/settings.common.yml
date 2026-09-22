@@ -347,14 +347,14 @@ flux:
 # top-level block and the shim get removed (plan step 16).
 image_gen:
   provider: atlas                # 'atlas' | 'flux' | 'closerouter' — adapter for legacy/no-model tasks
-  default_model: nano-banana-2   # catalog key used when the agent omits/sends an unknown model
+  default_model: qwen-image-3-pro # catalog key used when the agent omits/sends an unknown model
   providers:
     atlas:
       api_url: 'https://api.atlascloud.ai'
-      # Default Atlas t2i flipped to nano-banana-2 so legacy/no-model tasks
+      # Atlas defaults match the catalog default so legacy/no-model tasks
       # (current_adapter → @t2i_model) match the catalog default below.
-      text_to_image_model: 'google/nano-banana-2/text-to-image'
-      image_edit_model:    'alibaba/wan-2.7/image-edit'
+      text_to_image_model: 'qwen-image-3.0-pro/text-to-image'
+      image_edit_model:    'qwen-image-3.0-pro/edit'
       width:  1024
       height: 1024
     flux:
@@ -373,18 +373,19 @@ image_gen:
   # threaded into adapter.submit(model:); `edit: false` → edit unsupported, the
   # adapter falls back to its configured image_edit_model. `desc` guides the
   # agent's choice. `multi_image: true` → the model can EDIT/COMBINE several
-  # input images at once (nano-banana family); omitted ⇒ single input image only
+  # input images at once (for example nano-banana or Qwen 3); omitted ⇒ single input image only
   # (Wan/Flux use the first and ignore the rest). The generate_image tool
   # auto-switches a combine request (>1 image) to a multi_image model. NB: a
-  # model whose provider lacks an api_key in settings.yml fails at submit. All
-  # ids below verified live (submit→poll) 2026-06-16.
+  # model whose provider lacks an api_key in settings.yml fails at submit.
+  # Existing ids were verified live (submit→poll) 2026-06-16; Qwen ids and
+  # request schema were verified against Atlas documentation 2026-09-22.
   models:
     nano-banana-2:
       provider: atlas
       t2i:  'google/nano-banana-2/text-to-image'
       edit: 'google/nano-banana-2/edit'
       multi_image: true
-      desc: 'Google Nano Banana 2 (Atlas). Силён в фотореализме и тексте на картинке. Умеет объединять несколько картинок. Универсал, по умолчанию.'
+      desc: 'Google Nano Banana 2 (Atlas). Силён в фотореализме и тексте на картинке. Умеет объединять несколько картинок.'
     wan-2.7:
       provider: atlas
       t2i:  'alibaba/wan-2.7-pro/text-to-image'
@@ -396,6 +397,12 @@ image_gen:
       edit: 'bytedance/seedream-v5.0-pro/edit'
       multi_image: true
       desc: 'Bytedance Seedream 5.0 Pro (Atlas). Флагман: сильное следование промпту, отличная типографика и текст на картинке, фотореалистичная детализация. Умеет объединять до 10 картинок.'
+    qwen-image-3-pro:
+      provider: atlas
+      t2i:  'qwen-image-3.0-pro/text-to-image'
+      edit: 'qwen-image-3.0-pro/edit'
+      multi_image: true
+      desc: 'Qwen Image 3.0 Pro (Atlas). Универсал по умолчанию: силён в сложных макетах, точном следовании промпту и многоязычном тексте. Генерация до 2K, редактирование и объединение до 3 исходных картинок.'
     nano-banana-pro:
       provider: closerouter
       t2i:  'google/nano-banana-pro'

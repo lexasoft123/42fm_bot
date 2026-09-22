@@ -46,8 +46,8 @@ module ImageGen
     #   edit body : { model: '...image-edit',    prompt: '...', <image field> }
     #
     # T2I SIZING IS PER-MODEL: Wan/nano-banana take width+height integers;
-    # Seedream takes a single `size: "WIDTH*HEIGHT"` string (width/height are
-    # not recognised).
+    # Seedream and Qwen Image 3.0 take a single `size: "WIDTH*HEIGHT"` string
+    # (width/height are not recognised).
     #
     # THE EDIT IMAGE FIELD IS PER-MODEL (this differs by model family — getting
     # it wrong makes the model silently ignore the source and regenerate from
@@ -55,8 +55,10 @@ module ImageGen
     #   - Wan 2.7          → singular  `image:  'data:...;base64,...'`  (confirmed live 2026-04-30)
     #   - nano-banana/*    → plural    `images: ['data:...;base64,...', ...]`  (confirmed live 2026-06-24)
     #   - seedream-v5.0/*  → plural    `images: ['data:...;base64,...', ...]`  (Atlas docs: up to 10 refs)
+    #   - qwen-image-3.0/* → plural    `reference_image_urls: [...]`          (Atlas docs: up to 3 refs)
     # All accept base64 data URIs (no public-URL/upload step). nano-banana &
-    # Seedream accept up to ~10 images (combine); Wan reads a single image. Min res 240×240.
+    # Seedream accept up to ~10 images (combine); Qwen 3.0 accepts 3; Wan reads
+    # a single image. Min res varies by model.
     #   submit response: { code:200, data: { id, status:'processing', urls:{get}, ... } }
     #   poll    response: { code, data: { id, status, outputs:[<url>], error, ... } }
     #     status set: 'processing' | 'completed' | 'failed'
@@ -68,9 +70,14 @@ module ImageGen
         edit_model = (model || @edit_model)
         data_uris  = imgs.map { |i| "data:#{i[:media_type] || 'image/jpeg'};base64,#{i[:data]}" }
         base = { model: edit_model, prompt: prompt }
-        # Per-model field: nano-banana & Seedream read `images` (array), Wan
-        # reads singular `image`. Wrong one → silent regenerate-from-scratch.
-        if edit_model.to_s.match?(/nano-banana|seedream/)
+        # Per-model field: Qwen 3.0 reads `reference_image_urls`, nano-banana &
+        # Seedream read `images`, and Wan reads singular `image`. Wrong one can
+        # silently regenerate from scratch. Atlas documents a 3-reference cap
+        # for Qwen 3.0, below the tool-wide MAX_EDIT_IMAGES cap.
+        if edit_model.to_s.include?('qwen-image-3.0')
+          LOGGER.warn "AtlasAdapter: Qwen Image 3.0 accepts at most 3 references; ignoring #{data_uris.length - 3}" if data_uris.length > 3
+          base.merge(reference_image_urls: data_uris.first(3))
+        elsif edit_model.to_s.match?(/nano-banana|seedream/)
           base.merge(images: data_uris)
         else
           base.merge(image: data_uris.first)
@@ -78,9 +85,9 @@ module ImageGen
       else
         t2i_model = (model || @t2i_model)
         base = { model: t2i_model, prompt: prompt }
-        # Per-model sizing: Seedream takes `size: "WIDTH*HEIGHT"`; Wan/nano-banana
-        # take separate width/height integers.
-        if t2i_model.to_s.include?('seedream')
+        # Per-model sizing: Seedream and Qwen Image 3.0 take
+        # `size: "WIDTH*HEIGHT"`; Wan/nano-banana take width/height integers.
+        if t2i_model.to_s.match?(/seedream|qwen-image-3\.0/)
           base.merge(size: "#{@width}*#{@height}")
         else
           base.merge(width: @width, height: @height)
