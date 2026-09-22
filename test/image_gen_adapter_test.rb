@@ -342,6 +342,37 @@ class AtlasAdapterTest < Minitest::Test
     refute body.key?(:image), 'Seedream reads plural `images`, not singular `image`'
   end
 
+  def test_submit_text_to_image_gpt_image_sunburst_uses_x_size_field
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'gpt-image-id' } })
+    with_fake_client(fake) do
+      ImageGen::AtlasAdapter.new.submit(
+        prompt: 'precise poster',
+        model: 'openai/gpt-image-2.5-sunburst/text-to-image'
+      )
+    end
+    _, _, body = fake.calls.first
+    assert_equal 'openai/gpt-image-2.5-sunburst/text-to-image', body[:model]
+    assert_equal '1024x1024', body[:size]
+    refute body.key?(:width), 'GPT Image uses `size`, not width'
+    refute body.key?(:height), 'GPT Image uses `size`, not height'
+  end
+
+  def test_submit_image_edit_gpt_image_sunburst_uses_images_array
+    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'gpt-image-edit' } })
+    with_fake_client(fake) do
+      ImageGen::AtlasAdapter.new.submit(
+        prompt: 'preserve the faces',
+        input_images: [{ data: 'B64A', media_type: 'image/jpeg' },
+                       { data: 'B64B', media_type: 'image/png' }],
+        model: 'openai/gpt-image-2.5-sunburst/edit'
+      )
+    end
+    _, _, body = fake.calls.first
+    assert_equal 'openai/gpt-image-2.5-sunburst/edit', body[:model]
+    assert_equal ['data:image/jpeg;base64,B64A', 'data:image/png;base64,B64B'], body[:images]
+    refute body.key?(:image), 'GPT Image reads plural `images`, not singular `image`'
+  end
+
   def test_submit_text_to_image_qwen_3_uses_size_field
     fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'qwen-id' } })
     with_fake_client(fake) do

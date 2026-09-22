@@ -377,8 +377,8 @@ image_gen:
   # (Wan/Flux use the first and ignore the rest). The generate_image tool
   # auto-switches a combine request (>1 image) to a multi_image model. NB: a
   # model whose provider lacks an api_key in settings.yml fails at submit.
-  # Existing ids were verified live (submit→poll) 2026-06-16; Qwen ids and
-  # request schema were verified against Atlas documentation 2026-09-22.
+  # Existing ids were verified live (submit→poll) 2026-06-16; Qwen and GPT
+  # Image 2.5 ids/request schemas were verified against Atlas docs 2026-09-22.
   models:
     nano-banana-2:
       provider: atlas
@@ -403,6 +403,12 @@ image_gen:
       edit: 'qwen-image-3.0-pro/edit'
       multi_image: true
       desc: 'Qwen Image 3.0 Pro (Atlas). Универсал по умолчанию: силён в сложных макетах, точном следовании промпту и многоязычном тексте. Генерация до 2K, редактирование и объединение до 3 исходных картинок.'
+    gpt-image-2.5-sunburst:
+      provider: atlas
+      t2i:  'openai/gpt-image-2.5-sunburst/text-to-image'
+      edit: 'openai/gpt-image-2.5-sunburst/edit'
+      multi_image: true
+      desc: 'OpenAI GPT Image 2.5 Sunburst (Atlas). Выбирай для точного редактирования, сохранения деталей и сложных инструкций. Умеет объединять несколько исходных картинок; обычно дороже Qwen.'
     nano-banana-pro:
       provider: closerouter
       t2i:  'google/nano-banana-pro'

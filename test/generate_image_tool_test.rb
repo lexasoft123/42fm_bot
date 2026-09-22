@@ -37,6 +37,8 @@ class GenerateImageToolTest < BotTest
                            'edit' => 'alibaba/wan-2.7/image-edit', 'desc' => 'Wan' },
       'qwen-image-3-pro' => { 'provider' => 'atlas', 't2i' => 'qwen-image-3.0-pro/text-to-image',
                               'edit' => 'qwen-image-3.0-pro/edit', 'multi_image' => true, 'desc' => 'Qwen' },
+      'gpt-image-2.5-sunburst' => { 'provider' => 'atlas', 't2i' => 'openai/gpt-image-2.5-sunburst/text-to-image',
+                                    'edit' => 'openai/gpt-image-2.5-sunburst/edit', 'multi_image' => true, 'desc' => 'Sunburst' },
     },
   }.freeze
 
@@ -136,7 +138,7 @@ class GenerateImageToolTest < BotTest
       d = defs.find { |x| (api == 'anthropic' ? x[:name] : x[:function][:name]) == 'generate_image' }
       refute_nil d, "#{api}: generate_image must be present"
       schema = api == 'anthropic' ? d[:input_schema] : d[:function][:parameters]
-      assert_equal %w[nano-banana-2 wan-2.7 qwen-image-3-pro], schema[:properties]['model'][:enum], "#{api}: enum from catalog"
+      assert_equal %w[nano-banana-2 wan-2.7 qwen-image-3-pro gpt-image-2.5-sunburst], schema[:properties]['model'][:enum], "#{api}: enum from catalog"
       assert_match(/NB2/, schema[:properties]['model'][:description], "#{api}: desc suffix appended")
       assert_includes schema[:required], 'prompt', "#{api}: prompt required"
       refute_includes schema[:required], 'model', "#{api}: model optional"

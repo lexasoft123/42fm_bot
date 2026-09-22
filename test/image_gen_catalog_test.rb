@@ -20,6 +20,8 @@ class ImageGenCatalogTest < Minitest::Test
                            'edit' => 'alibaba/wan-2.7/image-edit', 'desc' => 'Wan desc' },
       'qwen-image-3-pro' => { 'provider' => 'atlas', 't2i' => 'qwen-image-3.0-pro/text-to-image',
                               'edit' => 'qwen-image-3.0-pro/edit', 'multi_image' => true, 'desc' => 'Qwen desc' },
+      'gpt-image-2.5-sunburst' => { 'provider' => 'atlas', 't2i' => 'openai/gpt-image-2.5-sunburst/text-to-image',
+                                    'edit' => 'openai/gpt-image-2.5-sunburst/edit', 'multi_image' => true, 'desc' => 'Sunburst desc' },
       'flux-2-pro'    => { 'provider' => 'flux', 't2i' => 'flux-2-pro',
                            'edit' => false, 'desc' => 'Flux desc' },
     },
@@ -36,7 +38,7 @@ class ImageGenCatalogTest < Minitest::Test
   end
 
   def test_keys_and_default
-    assert_equal %w[nano-banana-2 wan-2.7 qwen-image-3-pro flux-2-pro], ImageGen::Catalog.keys
+    assert_equal %w[nano-banana-2 wan-2.7 qwen-image-3-pro gpt-image-2.5-sunburst flux-2-pro], ImageGen::Catalog.keys
     assert_equal 'qwen-image-3-pro', ImageGen::Catalog.default_key
   end
 
@@ -58,12 +60,14 @@ class ImageGenCatalogTest < Minitest::Test
     assert_equal 'alibaba/wan-2.7-pro/text-to-image', ImageGen::Catalog.model_id_for('wan-2.7', :text_to_image)
     assert_equal 'google/nano-banana-2/text-to-image', ImageGen::Catalog.model_id_for('nano-banana-2', :text_to_image)
     assert_equal 'qwen-image-3.0-pro/text-to-image', ImageGen::Catalog.model_id_for('qwen-image-3-pro', :text_to_image)
+    assert_equal 'openai/gpt-image-2.5-sunburst/text-to-image', ImageGen::Catalog.model_id_for('gpt-image-2.5-sunburst', :text_to_image)
   end
 
   def test_model_id_for_edit_including_unsupported
     assert_equal 'google/nano-banana-2/edit', ImageGen::Catalog.model_id_for('nano-banana-2', :edit)
     assert_equal 'alibaba/wan-2.7/image-edit', ImageGen::Catalog.model_id_for('wan-2.7', :edit)
     assert_equal 'qwen-image-3.0-pro/edit', ImageGen::Catalog.model_id_for('qwen-image-3-pro', :edit)
+    assert_equal 'openai/gpt-image-2.5-sunburst/edit', ImageGen::Catalog.model_id_for('gpt-image-2.5-sunburst', :edit)
     # edit: false → nil (caller passes model:nil → adapter uses its default)
     assert_nil ImageGen::Catalog.model_id_for('flux-2-pro', :edit)
   end
@@ -77,6 +81,7 @@ class ImageGenCatalogTest < Minitest::Test
   def test_multi_image
     assert ImageGen::Catalog.multi_image?('nano-banana-2'), 'flagged multi_image: true'
     assert ImageGen::Catalog.multi_image?('qwen-image-3-pro'), 'Qwen supports up to three references'
+    assert ImageGen::Catalog.multi_image?('gpt-image-2.5-sunburst'), 'Sunburst supports multiple references'
     refute ImageGen::Catalog.multi_image?('wan-2.7'),       'no flag → single image'
     refute ImageGen::Catalog.multi_image?('flux-2-pro')
     # unknown key resolves to the (capable) default
@@ -107,11 +112,12 @@ class ImageGenCatalogTest < Minitest::Test
   end
 
   def test_enum_and_describe_options
-    assert_equal %w[nano-banana-2 wan-2.7 qwen-image-3-pro flux-2-pro], ImageGen::Catalog.enum
+    assert_equal %w[nano-banana-2 wan-2.7 qwen-image-3-pro gpt-image-2.5-sunburst flux-2-pro], ImageGen::Catalog.enum
     desc = ImageGen::Catalog.describe_options
     assert_match(/nano-banana-2 — NB2 desc/, desc)
     assert_match(/wan-2.7 — Wan desc/, desc)
     assert_match(/qwen-image-3-pro — Qwen desc/, desc)
+    assert_match(/gpt-image-2.5-sunburst — Sunburst desc/, desc)
     assert_match(/flux-2-pro — Flux desc/, desc)
   end
 
@@ -126,10 +132,10 @@ class ImageGenCatalogTest < Minitest::Test
   end
 
   def test_memoization_and_reset
-    assert_equal 4, ImageGen::Catalog.all.size
+    assert_equal 5, ImageGen::Catalog.all.size
     # Mutate settings WITHOUT reset → memoized value unchanged
     Settings.image_gen = { 'models' => {} }
-    assert_equal 4, ImageGen::Catalog.all.size
+    assert_equal 5, ImageGen::Catalog.all.size
     ImageGen::Catalog.reset!
     assert_equal 0, ImageGen::Catalog.all.size
   end
