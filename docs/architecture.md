@@ -285,7 +285,7 @@ HTTP client (HTTParty) supporting both Anthropic and OpenAI-compatible APIs. Pro
 Chat commands go through `Agent::Runner` directly (which instantiates `GptMaster` with `setting: 'agent'`, `system_prompt:`, and tools); there is no `GptMaster.chat` class method anymore.
 
 **Anthropic specifics:** uses `x-api-key` + `anthropic-version` headers, requires `max_tokens`, optionally enables extended thinking via `thinking_budget`. Extracts the `text` block from the `content` array (skipping thinking blocks). When a `system_prompt:` is supplied, it is sent as a `system` array with `cache_control: { type: 'ephemeral' }` on its single text block. When `call_raw(tools:)` is invoked, `cache_control` is attached to the **last** tool definition — caching the entire tools array as one prefix segment.
-**OpenAI/DeepSeek specifics:** uses `Authorization: Bearer`, passes `thinking: {type: 'enabled'}` for reasoning models. `system_prompt:` is converted into a leading `{role: 'system'}` message. No explicit cache markers (these providers auto-cache). `max_tokens` is sent when the setting defines it (it used to be Anthropic-only, so OpenAI-compatible calls ran on the provider default). On DeepSeek V4 thinking the default is 65,536 and **reasoning counts toward it** — prod 2026-08-16 a reasoning loop used all 65,536 with empty content. xAI accepts `max_tokens` (deprecated alias of `max_completion_tokens`) but excludes reasoning, so it is no runaway guard there. Values are sized from prod output: `agent` 16000 (p99 ≈ 3k), `agent_vision` 16000 (max ≈ 1.7k), `knowledge` 32000 (extraction p99 10k, max 12.7k), `knowledge_review` unset. An unusable 200 is also dumped to gpt.log (`response: {unusable_200:, took_ms:, body:}`, body truncated).
+**OpenAI/DeepSeek specifics:** uses `Authorization: Bearer`, passes `thinking: {type: 'enabled'}` for reasoning models. `system_prompt:` is converted into a leading `{role: 'system'}` message. No explicit cache markers (these providers auto-cache). `max_tokens` is sent when the setting defines it (it used to be Anthropic-only, so OpenAI-compatible calls ran on the provider default). All active DeepSeek settings intentionally use `deepseek-flash` (V4.1 Flash): it is multimodal, cheaper, allows more concurrency, and leads V4-Pro-0813 on DeepSeek's newer agent/tool benchmarks. The still-available text-only V4-Pro remains priced in config as an optional fallback. On DeepSeek thinking, reasoning counts toward the output cap — prod 2026-08-16 a reasoning loop used the old 65,536 default with empty content. xAI accepts `max_tokens` (deprecated alias of `max_completion_tokens`) but excludes reasoning, so it is no runaway guard there. Values are sized from prod output: `agent` 16000 (p99 ≈ 3k), `agent_vision` 16000 (max ≈ 1.7k), `knowledge` 32000 (extraction p99 10k, max 12.7k), `knowledge_review` unset. An unusable 200 is also dumped to gpt.log (`response: {unusable_200:, took_ms:, body:}`, body truncated).
 
 **Unusable 200s:** `call`/`call_raw` validate the body before touching it (`usable_body`): unparseable (`JSON::ParserError`), not a Hash, or missing `content` (Anthropic) / `choices[0].message` (OpenAI) → logged and treated like a non-200 (`'жпт не жпт'` / `nil`). Prod 2026-09-02 a 317 s call returned a non-object 200 and crashed the agent turn on `.dig`.
 
@@ -690,7 +690,7 @@ Inline-keyboard menu in the super-admin's private chat for runtime bot administr
 | `бобёр [минус] [track#]` | Random phrase as TTS |
 
 ### Translation (inline by agent)
-No dedicated command, no tool. Users say `бот переведи на немецкий: …` or use slang aliases (`пиздани` → ukrainian, `бульбани` → belarusian, `шпрехни` → german, `пшекни` → polish, `блгрни` → bulgarian, `татарни` → tatar, `казахни` → kazakh, `грекни` → greek, `сербни` → serbian) and `Agent::Runner` translates inline in a single LLM turn — the `agent_prompt` in `config/settings.common.yml` enumerates the slang aliases and instructs the agent to return only the raw translation without persona wrapping. DeepSeek V4 Pro speaks all those languages natively, so routing through a tool would just add round-trips for zero benefit.
+No dedicated command, no tool. Users say `бот переведи на немецкий: …` or use slang aliases (`пиздани` → ukrainian, `бульбани` → belarusian, `шпрехни` → german, `пшекни` → polish, `блгрни` → bulgarian, `татарни` → tatar, `казахни` → kazakh, `грекни` → greek, `сербни` → serbian) and `Agent::Runner` translates inline in a single LLM turn — the `agent_prompt` in `config/settings.common.yml` enumerates the slang aliases and instructs the agent to return only the raw translation without persona wrapping. DeepSeek V4.1 Flash speaks all those languages natively, so routing through a tool would just add round-trips for zero benefit.
 
 ### Info / Entertainment
 | Command | Description |
@@ -910,7 +910,7 @@ chat_gpt:
     # main` at first call rather than silently picking some other model.
     agent:                        # Agent::Runner tool loop + general text work
       provider: deepseek
-      model: deepseek-v4-pro
+      model: deepseek-flash
       max_tokens: 16000
     image_prompt:                 # bounded T2I/edit prompt composition
       provider: deepseek
@@ -924,12 +924,15 @@ chat_gpt:
       thinking: { type: enabled }
     knowledge:                    # KnowledgeBase extract + compact (background, frequent)
       provider: deepseek
-      model: deepseek-v4-pro
+      model: deepseek-flash
       max_tokens: 32000
     lyrics:                       # suno_handler song lyrics generation
       provider: deepseek
       model: deepseek-v4-pro
       max_tokens: 16000
+    knowledge_review:             # small-cluster dedup judge
+      provider: deepseek
+      model: deepseek-flash
     embedder:                     # EmbeddingService — text→vector
       provider: openai
       model: text-embedding-3-small

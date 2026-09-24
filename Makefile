@@ -12,6 +12,7 @@ TEST_FILES := \
 	test/listen_supervisor_test.rb \
 	test/api_usage_test.rb \
 	test/gpt_master_test.rb \
+	test/model_settings_test.rb \
 	test/cost_report_test.rb \
 	test/e2e_telemetry_test.rb \
 	test/scratchpad_test.rb \

@@ -33,7 +33,10 @@ chat_gpt:
     # silently picking some other model.
     agent:
       provider: deepseek
-      model: deepseek-v4-pro
+      # V4.1 Flash is the intentional default: newer agent/tool performance,
+      # native vision, higher throughput, and substantially lower cost than
+      # the still-available text-only V4-Pro-0813 model.
+      model: deepseek-flash
       # Sent to DeepSeek and counts reasoning; prod turns ran p99 ~3k output.
       max_tokens: 16000
       thinking:
@@ -64,7 +67,7 @@ chat_gpt:
     # the threshold). KnowledgeBase passes setting: 'knowledge' explicitly.
     knowledge:
       provider: deepseek
-      model: deepseek-v4-pro
+      model: deepseek-flash
       # Includes reasoning on DeepSeek. Extraction output ran p99 10k / max 12.7k
       # tokens in prod (2026-08..09) — 16000 would truncate the long tail.
       max_tokens: 32000
@@ -96,11 +99,10 @@ chat_gpt:
       model: claude-sonnet-4-6
       max_tokens: 16000
     # Knowledge dedup judge. High-volume mechanical judgement over small
-    # clusters -- flash is the right tier, and materially cheaper than the
-    # v4-pro used for extraction.
+    # clusters -- V4.1 Flash is the right tier and is shared with extraction.
     knowledge_review:
       provider: deepseek
-      model: deepseek-v4-flash
+      model: deepseek-flash
     embedder:
       provider: openai
       model: text-embedding-3-small
@@ -133,15 +135,14 @@ chat_gpt:
       cache_read: 0
       cache_write: 0
     # DeepSeek pricing per 1M tokens (USD). Source: api-docs.deepseek.com/quick_start/pricing.
-    # V4-Pro is in 75% promo discount through 2026-05-31 — values below are the
-    # discounted (currently-billed) rates. After 2026-05-31 update to the post-
-    # promo rates: input 1.74, output 3.48, cache_read 0.0145.
     # cache_write is 0 — DeepSeek caching is implicit (no separate write fee,
     # unlike Anthropic where cache_write is the 5m-TTL ephemeral write rate).
+    # V4-Pro remains available as an optional text-only fallback. Use its
+    # conservative peak-hour rates here; off-peak billing may be lower.
     deepseek-v4-pro:
-      input: 0.435
-      output: 0.87
-      cache_read: 0.003625
+      input: 1.32
+      output: 3.96
+      cache_read: 0.044
       cache_write: 0
     deepseek-v4-flash:
       input: 0.14
