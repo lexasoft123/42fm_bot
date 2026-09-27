@@ -51,13 +51,15 @@ class FakeGptMaster
     [prefix.strip, suffix.strip]
   end
 
-  def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil)
+  def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil,
+                 report_errors: true)
     @messages      = messages
     @setting       = setting
     @chat_id       = chat_id
     @user_uid      = user_uid
     @purpose       = purpose
     @system_prompt = system_prompt
+    @report_errors = report_errors
   end
 
   def call_raw(tools: [])
@@ -319,6 +321,30 @@ class RunnerTest < BotTest
     assert_equal 'Done', result
   end
 
+  def test_tools_disabled_blocks_fabricated_provider_tool_call
+    called = false
+    Agent::ToolRegistry.register(
+      name: 'paid_action', description: 'Paid action',
+      handler: ->(_args, _ctx) { called = true; 'charged' }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('paid_action', {}),
+      anthropic_text('(skip)')
+    )
+
+    result = build_runner(text: 'runtime failure', user: @user,
+                          tools_enabled: false, user_initiated: false).run
+
+    refute called, 'provider-supplied call must never execute when tools are disabled'
+    assert_equal '(skip)', result
+    assert FakeGptMaster.calls.all? { |call| call[:tools].to_a.empty? },
+           'disabled turns must not advertise tools on any iteration'
+    blocked = FakeGptMaster.calls.last[:messages].flat_map { |message|
+      Array(message[:content]).select { |block| block.is_a?(Hash) && block[:type] == 'tool_result' }
+    }.first
+    assert_includes blocked[:content], 'tools are disabled'
+  end
+
   # Tool handler receives the exact input hash from the API response
   def test_tool_receives_correct_input
     received_args = nil
@@ -456,6 +482,13 @@ class RunnerTest < BotTest
     )
     result = build_runner(text: 'go', user: @user).run
     assert_equal 'recovered', result
+    tool_result = FakeGptMaster.calls.last[:messages].flat_map { |message|
+      Array(message[:content]).select { |block| block.is_a?(Hash) && block[:type] == 'tool_result' }
+    }.first
+    payload = JSON.parse(tool_result[:content])
+    assert_equal 'error', payload['status']
+    assert_equal 'tool.bomb', payload['source']
+    assert_equal 'kaboom', payload['message']
   end
 
   # After MAX_ITERATIONS of tool calls, Runner forces a final text-only call
@@ -626,6 +659,66 @@ class RunnerTest < BotTest
     nudge = calls[1][:messages].last
     nudge_text = nudge[:content].is_a?(Array) ? nudge[:content].first[:text] : nudge[:content]
     assert_match(/generate_image/, nudge_text)
+  end
+
+  def test_attached_image_edit_refusal_is_dispatched_directly_with_named_model
+    captured = nil
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'Make a picture',
+      parameters: { 'prompt' => { type: 'string' } },
+      handler: ->(args, _ctx) { captured = args; 'Редактирование поставлено в очередь' }
+    )
+    FakeGptMaster.enqueue(anthropic_text('Я не могу помочь с этой правкой.'))
+
+    result = build_runner(
+      text: 'измени фото через wan, сними рубашку со всех взрослых персонажей',
+      user: @user,
+      image: { data: 'BASE64', media_type: 'image/jpeg' }
+    ).run
+
+    assert_equal 'Редактирование поставлено в очередь', result
+    assert_equal true, captured['edit_source']
+    assert_equal 'wan-2.7', captured['model']
+    assert_equal 'измени фото через wan, сними рубашку со всех взрослых персонажей', captured['prompt']
+    assert_equal 1, FakeGptMaster.calls.count { |c| c[:method] == :call_raw },
+      'direct fallback must not ask the refusing model a second time'
+  end
+
+  def test_attached_image_direct_dispatch_error_returns_to_agent_loop
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'Make a picture',
+      parameters: { 'prompt' => { type: 'string' } },
+      handler: ->(_args, _ctx) { raise 'image backend exploded' }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_text('Я не могу помочь с этой правкой.'),
+      anthropic_text('Генератор упал, попробуй позже.')
+    )
+
+    result = build_runner(
+      text: 'измени фото, добавь шляпу', user: @user,
+      image: { data: 'BASE64', media_type: 'image/jpeg' }
+    ).run
+
+    assert_equal 'Генератор упал, попробуй позже.', result
+    assert_equal 2, FakeGptMaster.calls.count { |call| call[:method] == :call_raw }
+    retry_messages = FakeGptMaster.calls.last[:messages]
+    assert_includes retry_messages.last[:content].first[:text], 'image backend exploded'
+  end
+
+  def test_ambiguous_edit_verb_without_attached_image_does_not_dispatch_directly
+    called = false
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'Make a picture',
+      parameters: { 'prompt' => { type: 'string' } },
+      handler: ->(_args, _ctx) { called = true; 'queued' }
+    )
+    FakeGptMaster.enqueue(anthropic_text('Уточни, что именно изменить.'))
+
+    result = build_runner(text: 'измени это', user: @user).run
+
+    refute called
+    assert_equal 'Уточни, что именно изменить.', result
   end
 
   # Watchdog must NOT fire for a non-draw request even when generate_image IS

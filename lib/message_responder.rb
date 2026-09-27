@@ -111,6 +111,9 @@ class MessageResponder
   rescue => e
     notify = error_notice_wanted?
     LOGGER.error "[chat=#{@chat_id}] #{self.class.name}#respond: #{e.class}: #{e.message} notice=#{notify ? 'sent' : 'suppressed'}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
+    Agent::ErrorReporter.report(
+      chat_id: @chat_id, source: 'message_responder.respond', error: e
+    ) if defined?(Agent::ErrorReporter)
     return unless notify
     begin
       MessageSender.new(bot: @bot, chat: message.chat, text: "Мозги перегрелись, попробуй позже 🤖").send
@@ -273,6 +276,9 @@ class MessageResponder
     end
   rescue => e
     LOGGER.error "[chat=#{@chat_id}] #{self.class.name}#deliver(#{result.type}): #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
+    Agent::ErrorReporter.report(
+      chat_id: @chat_id, source: "message_responder.deliver.#{result.type}", error: e
+    ) if defined?(Agent::ErrorReporter)
   end
 
   def save_message

@@ -1,5 +1,6 @@
 require 'httparty'
 require 'json'
+require_relative 'agent/error_reporter'
 
 class GptMaster
   MAX_RETRIES = 3
@@ -12,7 +13,8 @@ class GptMaster
     'openai'    => 'https://api.openai.com/v1/chat/completions',
   }.freeze
 
-  def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil)
+  def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil,
+                 report_errors: true)
     cfg      = self.class.resolve_setting(setting)
     @api_key  = cfg[:api_key]
     @api_url  = cfg[:api_url]
@@ -27,6 +29,7 @@ class GptMaster
     @user_uid        = user_uid
     @purpose         = purpose
     @system_prompt   = system_prompt
+    @report_errors   = report_errors
   end
 
   def call
@@ -53,7 +56,9 @@ class GptMaster
         LOGGER.warn "#{tag}#call: overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
         sleep delay
       else
-        LOGGER.error "#{tag}#call: #{response.code} #{error_message(response)}"
+        detail = error_message(response)
+        LOGGER.error "#{tag}#call: #{response.code} #{detail}"
+        report_provider_error('call', response.code, detail)
         return 'жпт не жпт'
       end
     end
@@ -83,7 +88,9 @@ class GptMaster
         LOGGER.warn "#{tag}#call_raw: overloaded, retry #{retries}/#{MAX_RETRIES} in #{delay}s"
         sleep delay
       else
-        LOGGER.error "#{tag}#call_raw: #{response.code} #{error_message(response)}"
+        detail = error_message(response)
+        LOGGER.error "#{tag}#call_raw: #{response.code} #{detail}"
+        report_provider_error('call_raw', response.code, detail)
         return nil
       end
     end
@@ -283,9 +290,19 @@ class GptMaster
     end
     raw = response.body.to_s
     LOGGER.error "#{tag}##{method}: 200 with #{problem} took=#{took_ms}ms: #{raw[0, 300]}"
+    report_provider_error(method, 200, "#{problem}: #{raw[0, 300]}")
     dump_gpt(method: method, body: body, response: { 'unusable_200' => problem, 'took_ms' => took_ms,
                                                      'body' => raw[0, 2000] }, stop: nil)
     nil
+  end
+
+  def report_provider_error(method, status, detail)
+    return unless @chat_id && @report_errors
+    Agent::ErrorReporter.report(
+      chat_id: @chat_id,
+      source: "gpt_master.#{method}",
+      error: "provider=#{@model} status=#{status} #{detail}"
+    )
   end
 
   def stop_reason(parsed)

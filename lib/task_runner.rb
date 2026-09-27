@@ -1,5 +1,6 @@
 require 'concurrent-ruby'
 require 'set'
+require_relative 'agent/error_reporter'
 
 class TaskRunner
   POLL_INTERVAL = 15
@@ -34,6 +35,19 @@ class TaskRunner
       @handlers[task_type]
     end
 
+    # Read-only runtime snapshot for diagnostics. Keep mutable internals behind
+    # the processing mutex and return copies so callers cannot affect dispatch.
+    def state_snapshot
+      processing_ids = @processing_mutex.synchronize { @processing.to_a.sort }
+      {
+        running: !!@thread&.alive?,
+        poll_interval_seconds: POLL_INTERVAL,
+        max_workers: MAX_WORKERS,
+        processing_task_ids: processing_ids,
+        registered_task_types: @handlers.keys.sort,
+      }
+    end
+
     def claim(id)
       @processing_mutex.synchronize do
         return false if @processing.include?(id)
@@ -63,10 +77,7 @@ class TaskRunner
         @runner = new(bot_api)
         @thread = Thread.new do
           loop do
-            @runner.dispatch_pending
-            sleep POLL_INTERVAL
-          rescue => e
-            LOGGER.error "#{name}: #{e.class}: #{e.message}"
+            @runner.poll_cycle
             sleep POLL_INTERVAL
           end
         end
@@ -80,6 +91,17 @@ class TaskRunner
 
   def update_api(bot_api)
     @api = bot_api
+  end
+
+  # One isolated poll iteration. Keeping the boundary outside the forever-loop
+  # makes the global error bridge directly testable and ensures the next cycle
+  # still runs after a DB/dispatcher failure.
+  def poll_cycle
+    dispatch_pending
+  rescue => e
+    LOGGER.error "#{self.class.name}: #{e.class}: #{e.message}"
+    Agent::ErrorReporter.report_global(source: 'task_runner.poller', error: e)
+    nil
   end
 
   def dispatch_pending
@@ -102,6 +124,7 @@ class TaskRunner
     unless handler_class
       LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}: unknown task_type '#{task.task_type}'"
       task.mark_failed!("unknown task_type")
+      Agent::ErrorReporter.report_task_failure(task, source: 'task_runner.unknown_task')
       return
     end
 
@@ -117,9 +140,14 @@ class TaskRunner
         LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}: task #{task.id} (#{task.task_type}) timed out after #{task.attempts} attempts"
         task.mark_failed!('timeout')
         notify_chat(task.chat_id, "Задача не выполнена (таймаут)")
+        Agent::ErrorReporter.report_task_failure(task, source: 'task_runner.timeout')
       end
-    when :done, :failed
-      nil # handler already updated state
+    when :failed
+      # Feature handlers may already have emitted a richer event. The reporter
+      # detects it by parent_task_id and only supplies a generic fallback.
+      Agent::ErrorReporter.report_task_failure(task, source: "task_handler.#{task.task_type}")
+    when :done
+      nil
     end
   rescue => e
     transient = e.message.match?(TRANSIENT_ERROR_RE) ||
@@ -133,6 +161,7 @@ class TaskRunner
     if task.reload.timed_out? || permanent
       task.mark_failed!(e.message)
       notify_chat(task.chat_id, "Ошибка: #{e.message.truncate(200)}")
+      Agent::ErrorReporter.report_task_failure(task, source: "task_handler.#{task.task_type}")
     end
   end
 

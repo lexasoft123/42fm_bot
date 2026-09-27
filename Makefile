@@ -8,6 +8,7 @@ BACKUP_KEEP ?= 5
 TEST_FILES := \
 	test/song_search_test.rb \
 	test/agent_test.rb \
+	test/bot_state_tool_test.rb \
 	test/production_errors_test.rb \
 	test/listen_supervisor_test.rb \
 	test/api_usage_test.rb \

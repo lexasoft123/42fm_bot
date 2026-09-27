@@ -96,9 +96,11 @@ class ViFakeGptMaster
     [prefix.strip, suffix.strip]
   end
 
-  def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil)
+  def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil,
+                 report_errors: true)
     @messages = messages
     @setting  = setting
+    @report_errors = report_errors
   end
 
   def call_raw(tools: [])

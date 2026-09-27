@@ -85,10 +85,26 @@ class ImageGenTaskHandler
       # image blocks to OpenAI image_url blocks at the wire boundary.
       enrich_setting = 'image_prompt'
       begin
-        p['prompt'] = GptMaster.new(messages, setting: enrich_setting,
-                                    chat_id: task.chat_id, user_uid: p['user_uid'],
-                                    purpose: 'image_prompt').call
-        raise "GPT prompt failed" unless p['prompt'] && p['prompt'] != 'жпт не жпт'
+        composed_prompt = GptMaster.new(messages, setting: enrich_setting,
+                                        chat_id: task.chat_id, user_uid: p['user_uid'],
+                                        purpose: 'image_prompt').call
+        raise "GPT prompt failed" if composed_prompt == 'жпт не жпт'
+
+        # Some OpenAI-compatible providers can consume the whole output budget
+        # in hidden/reasoning content and return an empty visible reply with
+        # stop=length. Enrichment is optional, so never submit that empty prompt
+        # to the image backend; preserve the user's request instead.
+        if composed_prompt.to_s.strip.empty?
+          LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: prompt composer returned blank output; using raw request"
+          p['prompt'] = request
+        else
+          p['prompt'] = composed_prompt.to_s.strip
+        end
+
+        if prompt_refusal?(p['prompt'])
+          LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: prompt composer refused; using raw request"
+          p['prompt'] = request
+        end
       rescue => e
         return bail_or_retry(task, api, p, 'prompt_failures', MAX_PROMPT_FAILURES, "prompt: #{e.message}", raise_on_retry: e)
       end
@@ -127,6 +143,16 @@ class ImageGenTaskHandler
     LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted #{task_id} via #{adapter.name}"
     ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: task_id, params: p.to_json) }
     :pending
+  end
+
+  # Prompt enrichment is optional polish, never an authorization layer. If the
+  # composer returns a stock refusal, sending that refusal to the image backend
+  # makes an otherwise valid provider request fail silently or draw the refusal
+  # itself. Preserve the user's raw wording instead.
+  PROMPT_REFUSAL = /(?:i\s+(?:can(?:not|'t)|won't)\s+(?:help|assist|comply|create)|я\s+не\s+могу\s+(?:помочь|выполнить|создать|сделать)|не\s+могу\s+(?:помочь|выполнить|создать|сделать)|отказываюсь)/i
+
+  def prompt_refusal?(text)
+    text.to_s.match?(PROMPT_REFUSAL)
   end
 
   # Synchronous-path delivery. Mirrors the `when Hash` arm of poll_and_deliver

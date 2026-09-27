@@ -48,18 +48,21 @@ chat_gpt:
     image_prompt:
       provider: deepseek
       model: deepseek-flash
-      max_tokens: 2000
+      # Enough for the 300-word upper prompt bound, while preventing a prompt
+      # rewrite from monopolizing a task worker for ~70 seconds.
+      max_tokens: 768
       thinking:
         type: disabled
     # Used by Agent::Runner when the user attaches/replies-to an image.
-    # Keep this separate from image_prompt: tool-following benefits from
-    # reasoning, while prompt composition deliberately disables it.
+    # Thinking adds latency and exposes a long policy deliberation, but does
+    # not improve tool routing; explicit image edits have a deterministic
+    # generate_image fallback in Runner when the model returns no tool call.
     agent_vision:
       provider: deepseek
       model: deepseek-flash
       max_tokens: 16000
       thinking:
-        type: enabled
+        type: disabled
     # Background fact extraction + cluster-merge compaction for the per-chat
     # knowledge base. Pure text-in / text-out, no tools, no vision — cheap LLM
     # is the right fit. Runs frequently (every Settings.knowledge.extract_every
@@ -89,15 +92,19 @@ chat_gpt:
     #    TAGS_PROMPT with the artist-emulation rule + Rammstein exemplar.
     #    See suno_handler.rb#resolve_tags.
     #
-    # Cost: typical ~$0.05-0.08 per song on the common (suno_compose)
-    # path — one synchronous call @ $3/$15 per Mtok, ~5k input ctx + 3-5k
+    # Cost: typical ~$0.03-0.05 per song on the common (suno_compose)
+    # path — one synchronous call @ $2/$10 per Mtok, ~5k input ctx + 3-5k
     # output (lyrics + tags). Worst case at max_tokens=16000 output is
-    # ~$0.24. Verbatim-lyrics path is just the tiny suno_tags call
+    # ~$0.16. Verbatim-lyrics path is just the tiny suno_tags call
     # (~$0.01-0.02).
     lyrics:
       provider: anthropic
-      model: claude-sonnet-4-6
+      model: claude-sonnet-5
       max_tokens: 16000
+      # Sonnet 5 enables adaptive thinking by default; the old Sonnet 4.6
+      # workload ran without it. Preserve that bounded creative-call behavior.
+      thinking:
+        type: disabled
     # Knowledge dedup judge. High-volume mechanical judgement over small
     # clusters -- V4.1 Flash is the right tier and is shared with extraction.
     knowledge_review:
@@ -109,6 +116,12 @@ chat_gpt:
   # USD per 1M tokens. Used by ApiUsage.compute_cost. Unknown models → row recorded with cost 0.
   # cache_write is the 5m-TTL cache write rate (we only use ephemeral cache_control).
   pricing:
+    claude-sonnet-5:
+      input: 2
+      output: 10
+      cache_read: 0.20
+      cache_write: 2.50
+    # Retained for historical api_usage rows created before the Sonnet 5 move.
     claude-sonnet-4-6:
       input: 3
       output: 15

@@ -770,11 +770,13 @@ class HandlerAdapterIntegrationTest < BotTest
   class FakeGptMaster
     @@captured = []
     @@settings = []
+    @@response = 'enriched prompt'
     def self.captured; @@captured; end
     def self.settings; @@settings; end
-    def self.reset!; @@captured = []; @@settings = []; end
+    def self.response=(value); @@response = value; end
+    def self.reset!; @@captured = []; @@settings = []; @@response = 'enriched prompt'; end
     def initialize(messages, **kw); @@captured << messages; @@settings << kw[:setting]; end
-    def call; 'enriched prompt'; end
+    def call; @@response; end
   end
 
   class FakeBotApi
@@ -898,6 +900,30 @@ class HandlerAdapterIntegrationTest < BotTest
     task = fresh_task # no image
     ImageGenTaskHandler.new.call(task, @bot)
     assert_equal 'image_prompt', FakeGptMaster.settings.first
+  end
+
+  def test_prompt_composer_refusal_falls_back_to_raw_user_request
+    task = fresh_task(input_image: Base64.strict_encode64('fakebytes'))
+    raw_request = task.params_hash['request']
+    FakeGptMaster.response = "I can't help create that image."
+
+    ImageGenTaskHandler.new.call(task, @bot)
+
+    assert_equal raw_request, @fake_adapter.submit_calls.first[:prompt]
+    task.reload
+    assert_equal raw_request, task.params_hash['prompt']
+  end
+
+  def test_blank_prompt_composer_output_falls_back_to_raw_user_request
+    task = fresh_task(input_image: Base64.strict_encode64('fakebytes'))
+    raw_request = task.params_hash['request']
+    FakeGptMaster.response = " \n\t "
+
+    ImageGenTaskHandler.new.call(task, @bot)
+
+    assert_equal raw_request, @fake_adapter.submit_calls.first[:prompt]
+    task.reload
+    assert_equal raw_request, task.params_hash['prompt']
   end
 
   def test_submit_uses_edit_template_when_input_image_present

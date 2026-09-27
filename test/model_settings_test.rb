@@ -23,7 +23,16 @@ class ModelSettingsTest < BotTest
     settings = @settings.dig('chat_gpt', 'settings')
 
     assert_equal 'enabled', settings.dig('agent', 'thinking', 'type')
-    assert_equal 'enabled', settings.dig('agent_vision', 'thinking', 'type')
+    assert_equal 'disabled', settings.dig('agent_vision', 'thinking', 'type')
     assert_equal 'disabled', settings.dig('image_prompt', 'thinking', 'type')
+    assert_equal 768, settings.dig('image_prompt', 'max_tokens')
+  end
+
+  def test_current_non_deepseek_roles_are_pinned
+    settings = @settings.dig('chat_gpt', 'settings')
+
+    assert_equal 'claude-sonnet-5', settings.dig('lyrics', 'model')
+    assert_equal 'disabled', settings.dig('lyrics', 'thinking', 'type')
+    assert_equal 'text-embedding-3-small', settings.dig('embedder', 'model')
   end
 end

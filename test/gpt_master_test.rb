@@ -147,6 +147,43 @@ class GptMasterAnthropicUsageTest < BotTest
   end
 end
 
+class GptMasterErrorReportingTest < BotTest
+  def test_non_200_response_enqueues_runtime_error_for_chat
+    HTTPartyStub.with_response(FakeResponse.new(502, 'gateway failed')) do
+      result = GptMaster.new([{ role: 'user', content: 'x' }], setting: 'openai',
+                             chat_id: 91_001, purpose: 'agent').call_raw(tools: [])
+      assert_nil result
+    end
+
+    event = BackgroundTask.where(task_type: 'agent_event', chat_id: 91_001).last
+    refute_nil event
+    assert_equal 'runtime_error', event.params_hash['event_type']
+    assert_includes event.params_hash['summary'], 'gpt_master.call_raw'
+  end
+
+  def test_unusable_200_response_enqueues_runtime_error_for_chat
+    HTTPartyStub.with_response(FakeResponse.new(200, { 'choices' => [] })) do
+      result = GptMaster.new([{ role: 'user', content: 'x' }], setting: 'openai',
+                             chat_id: 91_002, purpose: 'agent').call_raw(tools: [])
+      assert_nil result
+    end
+
+    event = BackgroundTask.where(task_type: 'agent_event', chat_id: 91_002).last
+    refute_nil event
+    assert_includes event.params_hash['summary'], 'status=200'
+  end
+
+  def test_error_reporting_can_be_disabled_for_runtime_error_turn
+    HTTPartyStub.with_response(FakeResponse.new(503, 'still down')) do
+      result = GptMaster.new([{ role: 'user', content: 'x' }], setting: 'openai',
+                             chat_id: 91_003, purpose: 'agent', report_errors: false).call_raw(tools: [])
+      assert_nil result
+    end
+
+    assert_nil BackgroundTask.where(task_type: 'agent_event', chat_id: 91_003).last
+  end
+end
+
 class GptMasterOpenAIUsageTest < BotTest
   def test_openai_response_cached_tokens_subtracted_from_input
     body = {

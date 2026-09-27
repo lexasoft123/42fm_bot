@@ -1,6 +1,7 @@
 require 'erb'
 require_relative 'scratchpad'
 require_relative 'tool_result'
+require_relative 'error_reporter'
 
 module Agent
   class Runner
@@ -18,7 +19,7 @@ module Agent
     EMPTY_REPLY_NUDGE = 'Ответ на запрос пользователя не дошёл — текста не было. Ответь сейчас: ' \
                         'если нужен инструмент, вызови его; иначе дай текстовый ответ по-русски.'.freeze
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil, user_initiated: true, forum_thread_id: nil, private_chat: false)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil, user_initiated: true, forum_thread_id: nil, private_chat: false, tools_enabled: true, report_errors: true)
       @text       = text
       @context    = context
       @knowledge  = knowledge
@@ -34,6 +35,8 @@ module Agent
       # request, so the draw-directive watchdog must stay OFF there — otherwise
       # it would re-trigger image-gen on the very loop built to prevent that.
       @user_initiated = user_initiated
+      @tools_enabled = tools_enabled
+      @report_errors = report_errors
       # When the user attached/replied with an image, route through `agent_vision`
       # (typically Anthropic with vision) so the model can actually see it. The
       # text-only `agent` setting (typically DeepSeek for cheaper tool-loop runs)
@@ -88,7 +91,7 @@ module Agent
     def run
       system_prompt, user_content = build_initial_content
       messages = build_initial_messages(user_content)
-      tools    = ToolRegistry.definitions_for(user_role: @user.role, api_type: @api_type)
+      tools    = @tools_enabled ? ToolRegistry.definitions_for(user_role: @user.role, api_type: @api_type) : []
 
       alog :info, "START user=#{@user.name} (#{@user.role})\nREQUEST: #{@text}"
 
@@ -120,6 +123,18 @@ module Agent
               alog :warn, "empty reply (iteration #{i + 1}, stop=#{stop}#{blank_retried ? ', after retry' : ''}) — returning stub"
               return 'жпт не жпт'
             end
+            # A photo is already in hand and the user explicitly asked to edit
+            # it. Do not make the vision model act as a policy gate: enqueue the
+            # raw request directly and let the image backend decide what it can
+            # render.
+            if direct_image_edit_request?
+              generate_image_called = true
+              direct_result = dispatch_direct_image_edit
+              return direct_result unless Agent::ErrorReporter.tool_error_result?(direct_result)
+              append_user_nudge(messages, direct_image_error_nudge(direct_result))
+              next
+            end
+
             # One more pass WITH tools. The blank assistant turn is not
             # replayed; a draw directive gets the image nudge (watchdog)
             # instead of the generic one.
@@ -138,6 +153,15 @@ module Agent
           # with no generate_image call in either case, nudge once and re-loop.
           hallucinated = hallucinated_image_caption?(text)
           if !generate_image_called && !watchdog_fired && (hallucinated || image_request_unanswered?)
+            if direct_image_edit_request?
+              generate_image_called = true
+              direct_result = dispatch_direct_image_edit
+              return direct_result unless Agent::ErrorReporter.tool_error_result?(direct_result)
+              messages << build_assistant_message(raw)
+              append_user_nudge(messages, direct_image_error_nudge(direct_result))
+              next
+            end
+
             watchdog_fired = true
             reason = hallucinated ? '🎨 caption in text' : 'draw directive in request'
             alog :warn, "watchdog: #{reason} but no generate_image call — nudging"
@@ -148,6 +172,22 @@ module Agent
 
           alog :info, "DONE (#{i + 1} iteration#{i > 0 ? 's' : ''}, stop=#{stop}, no tools, took=#{iter_ms}ms)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
           return text
+        end
+
+        # `tools: []` is advisory at the provider boundary: a malformed or
+        # prompt-injected response can still contain fabricated tool calls.
+        # Runtime-error turns require a hard execution boundary, so answer each
+        # call with a disabled result and let the model produce plain text.
+        unless @tools_enabled
+          alog :warn, "blocked #{tool_calls.length} provider-supplied tool call(s) while tools are disabled"
+          messages << build_assistant_message(raw)
+          tool_calls.each do |tc|
+            result = JSON.generate(status: 'error', source: "tool.#{tc[:name]}",
+                                   message: 'tools are disabled for this turn')
+            messages << build_tool_result_message(tc[:id], result)
+          end
+          append_user_nudge(messages, 'Инструменты недоступны в этом служебном ходе. Ответь только текстом или (skip).')
+          next
         end
 
         alog :info, "iteration #{i + 1} [stop=#{stop} took=#{iter_ms}ms]: #{tool_calls.map { |t| "#{t[:name]}(#{t[:input].to_json})" }.join(', ')}"
@@ -218,10 +258,43 @@ module Agent
     # Gated to real user turns (@user_initiated): the agent-event path echoes
     # the original request into @text and must not re-trigger image-gen.
     DRAW_DIRECTIVE = /(?:на|до|от|пере|под|за|с)?рису(?:й|йте)/i
+    # Deliberately broad only when a source image is attached/replied to.
+    # These verbs are ambiguous in plain text ("сними ролик", "убери комнату"),
+    # but unambiguously request an image edit when @image exists.
+    IMAGE_EDIT_DIRECTIVE = /(?:измени(?:те)?|изменьте|передела(?:й|йте)|отредактиру(?:й|йте)|замени(?:те)?|заменьте|убери(?:те)?|добавь(?:те)?|сними(?:те)?|раздень(?:те)?|переодень(?:те)?|поменя(?:й|йте))/i
+    IMAGE_MODEL_MENTIONS = [
+      [/nano[\s_-]*banana[\s_-]*pro/i, 'nano-banana-pro'],
+      [/nano[\s_-]*banana/i, 'nano-banana-2'],
+      [/sunburst|gpt[\s_-]*image/i, 'gpt-image-2.5-sunburst'],
+      [/qwen/i, 'qwen-image-3-pro'],
+      [/seedream/i, 'seedream-5-pro'],
+      [/wan/i, 'wan-2.7'],
+      [/flux/i, 'flux-2-pro'],
+    ].freeze
+
     def image_request_unanswered?
       return false unless @user_initiated
       return false if @text.nil? || @text.empty?
-      @text.match?(DRAW_DIRECTIVE)
+      @text.match?(DRAW_DIRECTIVE) || direct_image_edit_request?
+    end
+
+    def direct_image_edit_request?
+      @user_initiated && @image.is_a?(Hash) && @image[:data] &&
+        !@text.to_s.empty? && @text.match?(IMAGE_EDIT_DIRECTIVE)
+    end
+
+    def dispatch_direct_image_edit
+      args = { 'prompt' => @text, 'edit_source' => true }
+      model = IMAGE_MODEL_MENTIONS.find { |pattern, _key| @text.match?(pattern) }&.last
+      args['model'] = model if model
+      alog :warn, "direct image-edit fallback: vision model returned no tool call; " \
+                  "dispatching generate_image#{model ? " model=#{model}" : ''}"
+      execute_tool('generate_image', args)
+    end
+
+    def direct_image_error_nudge(result)
+      "Прямая попытка вызвать generate_image завершилась ошибкой: #{result}. " \
+        'Учти эту ошибку и дай пользователю нормальный ответ или выбери другой доступный подход.'
     end
 
     def image_call_nudge_text
@@ -266,7 +339,7 @@ module Agent
     def new_gpt(messages, system_prompt)
       GptMaster.new(messages, setting: @setting,
                     chat_id: @chat_id, user_uid: @user&.uid, purpose: 'agent',
-                    system_prompt: system_prompt)
+                    system_prompt: system_prompt, report_errors: @report_errors)
     end
 
     # Render prompt template, split on CACHE_BREAK_MARKER, return [system_prompt, user_content].
@@ -351,6 +424,12 @@ module Agent
     end
 
     def execute_tool(name, input)
+      unless @tools_enabled
+        alog :warn, "blocked tool #{name} while tools are disabled"
+        return JSON.generate(status: 'error', source: "tool.#{name}",
+                             message: 'tools are disabled for this turn')
+      end
+
       tool = ToolRegistry.find(name)
       unless tool
         alog :warn, "unknown tool #{name}"
@@ -366,7 +445,7 @@ module Agent
       truncate(materialize_result(result))
     rescue => e
       alog :error, "tool #{name} error: #{e.class}: #{e.message}"
-      "идите нахуй"
+      Agent::ErrorReporter.tool_result(source: "tool.#{name}", error: e)
     end
 
     # Inject tool-fetched images (view_image) into the conversation so the

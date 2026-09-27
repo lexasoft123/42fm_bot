@@ -4,7 +4,8 @@ require_relative '../lib/agent/tools/_suno_language_rule'
 
 # Regression guards for two coordinated changes:
 #
-# 1. The `lyrics` chat_gpt setting points at Anthropic's claude-sonnet-4-6.
+# 1. The `lyrics` chat_gpt setting points at Anthropic's claude-sonnet-5
+#    with thinking disabled to preserve the bounded Sonnet 4.6 behavior.
 #    DeepSeek was producing weaker rhyme/meter on creative songwriting in
 #    our testing; flipping to Sonnet trades cost (this path is rare —
 #    only fires when params['lyrics'] is empty, see suno_handler.rb's
@@ -50,16 +51,17 @@ class SunoLanguagePolicyTest < BotTest
 
   # --- 1. lyrics setting → Sonnet ---
 
-  def test_lyrics_setting_uses_anthropic_sonnet_4_6
+  def test_lyrics_setting_uses_anthropic_sonnet_5_without_thinking
     lyrics = @settings.dig('chat_gpt', 'settings', 'lyrics')
     refute_nil lyrics, 'chat_gpt.settings.lyrics block must exist'
-    assert_equal 'anthropic',          lyrics['provider']
-    assert_equal 'claude-sonnet-4-6',  lyrics['model']
+    assert_equal 'anthropic',       lyrics['provider']
+    assert_equal 'claude-sonnet-5', lyrics['model']
+    assert_equal 'disabled',        lyrics.dig('thinking', 'type')
   end
 
   def test_lyrics_setting_has_pricing_entry
-    pricing = @settings.dig('chat_gpt', 'pricing', 'claude-sonnet-4-6')
-    refute_nil pricing, 'claude-sonnet-4-6 pricing must be wired'
+    pricing = @settings.dig('chat_gpt', 'pricing', 'claude-sonnet-5')
+    refute_nil pricing, 'claude-sonnet-5 pricing must be wired'
     %w[input output cache_read].each { |k| assert pricing[k], "pricing.#{k} missing" }
   end
 

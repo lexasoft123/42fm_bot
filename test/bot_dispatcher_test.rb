@@ -219,7 +219,7 @@ end
 
 # A failing admin-menu callback used to escape bot.listen and restart the
 # whole long-poll loop.
-class BotDispatcherCallbackTest < Minitest::Test
+class BotDispatcherCallbackTest < BotTest
   def setup
     require_relative '../lib/admin_menu'
     AdminMenu::CallbackHandler.singleton_class.send(:alias_method, :__handle_test, :handle)
@@ -234,7 +234,12 @@ class BotDispatcherCallbackTest < Minitest::Test
   def test_callback_handler_error_does_not_propagate
     raised = false
     AdminMenu::CallbackHandler.define_singleton_method(:handle) { |*_| raised = true; raise 'editMessageText failed' }
-    BotDispatcher.handle_callback(Object.new, Object.new)
+    query = OpenStruct.new(message: OpenStruct.new(chat: OpenStruct.new(id: 4242)))
+    BotDispatcher.handle_callback(Object.new, query)
     assert raised, 'handler must actually have been called'
+    event = BackgroundTask.where(task_type: 'agent_event', chat_id: 4242).last
+    refute_nil event
+    assert_equal 'runtime_error', event.params_hash['event_type']
+    assert_includes event.params_hash['summary'], 'bot_dispatcher.callback'
   end
 end

@@ -70,9 +70,11 @@ class FakeGptMaster
     [prefix.strip, suffix.strip]
   end
 
-  def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil)
+  def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil,
+                 report_errors: true)
     @messages = messages
     @setting  = setting
+    @report_errors = report_errors
   end
 
   def call_raw(tools: [])
@@ -186,6 +188,9 @@ class TaskRunnerTest < BotTest
     task.reload
     assert_equal 'failed', task.status
     assert_match(/unknown/, task.result_hash['error'])
+    event = BackgroundTask.where(chat_id: task.chat_id, task_type: 'agent_event').last
+    assert_equal task.id, event.params_hash['parent_task_id']
+    assert_equal 'runtime_error', event.params_hash['event_type']
   end
 
   # Task that keeps returning :pending gets timed out after max_attempts
@@ -205,6 +210,8 @@ class TaskRunnerTest < BotTest
     assert_equal 'timeout', task.result_hash['error']
     # Verify timeout notification was sent to chat
     assert @api_calls.any? { |c| c[:method] == :sendMessage && c[:args][:text].include?('таймаут') }
+    event = BackgroundTask.where(chat_id: task.chat_id, task_type: 'agent_event').last
+    assert_equal task.id, event.params_hash['parent_task_id']
   end
 
   # Handler that raises an exception — task gets attempts incremented
@@ -235,6 +242,8 @@ class TaskRunnerTest < BotTest
 
     task.reload
     assert_equal 'failed', task.status
+    event = BackgroundTask.where(chat_id: task.chat_id, task_type: 'agent_event').last
+    assert_equal task.id, event.params_hash['parent_task_id']
   end
 
   # Handler returning :done — no further processing needed
@@ -254,6 +263,21 @@ class TaskRunnerTest < BotTest
 
     task.reload
     assert_equal 'done', task.status
+  end
+
+  def test_poll_cycle_reports_global_dispatch_error
+    captured = []
+    original = Agent::ErrorReporter.method(:report_global)
+    Agent::ErrorReporter.define_singleton_method(:report_global) { |**kwargs| captured << kwargs }
+    runner = TaskRunner.new(@api)
+    runner.define_singleton_method(:dispatch_pending) { raise 'database unavailable' }
+
+    assert_nil runner.poll_cycle
+    assert_equal 1, captured.length
+    assert_equal 'task_runner.poller', captured.first[:source]
+    assert_equal 'database unavailable', captured.first[:error].message
+  ensure
+    Agent::ErrorReporter.define_singleton_method(:report_global, original) if original
   end
 
   private

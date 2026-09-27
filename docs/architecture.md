@@ -114,6 +114,7 @@ bin/bot
 │   │       ├── horoscope.rb   # Horoscope tool
 │   │       ├── suno.rb        # Suno song generation tool
 │   │       ├── image_gen.rb   # Image generation tool (agent picks model per request from the catalog)
+│   │       ├── bot_state.rb   # Admin-only read-only runtime/task/model diagnostics
 │   │       └── scratchpad.rb  # remember / forget — agent working memory (ADR-003)
 │   ├── chat_context.rb        # ChatContext module: shared chat context + knowledge lookup for handlers
 │   ├── task_handlers/
@@ -374,6 +375,8 @@ Per-chat working memory distinct from the knowledge base — knowledge = facts a
 
 **`Agent::ToolResult`** — structured tool-result protocol. Tool handlers may return either a String (passthrough) or `Agent::ToolResult.deferred(user_text:, intent:, retry_in_min:)` for rate-limited / retry-later outcomes. `Agent::Runner` auto-writes the intent to the chat's scratchpad on `:deferred` (with `due_at = now + retry_in_min`) and forwards a `[deferred retry_in=Nmin, intent saved to scratchpad] <user_text>` prefix to the LLM. New deferred-style tools just call `Agent::ToolResult.deferred(...)` — no per-tool prompt scaffolding required.
 
+**`Agent::ErrorReporter`** (`lib/agent/error_reporter.rb`) is the centralized error bridge back into the agent loop. A tool exception is converted to compact `{status:"error", source, error_class, message}` JSON and appended as that tool call's result, so the same turn can explain, retry, or choose another tool. Terminal background-task failures plus `MessageResponder`, dispatcher, TaskRunner-poller, and provider-response failures are converted to sanitized `agent_event(runtime_error)` tasks. URLs, authorization headers (including quoted JSON/hash keys), JSON/assignment credentials, JWTs, data URIs, and token-shaped strings are redacted; `inspect_bot_state` uses the same sanitizer. Task failures are deduplicated by `parent_task_id`: an existing tailored image/Suno event wins; otherwise TaskRunner creates one generic fallback event. Parentless errors are fingerprint-coalesced for five minutes and retain the 10/hour/chat cap. `agent_event` failures never emit another event, and the runtime-error Runner disables `GptMaster` provider-error reporting for its own explanation call, preventing recursion.
+
 ### Agent Mode — `lib/agent/`
 `GptChat` and `GptQuestion` always route through `Agent::Runner`. The runner implements an agentic tool-use loop:
 
@@ -388,13 +391,15 @@ Per-chat working memory distinct from the knowledge base — knowledge = facts a
 **Components:**
 - `Agent::ToolRegistry` — central registry; tools register via `ToolRegistry.register(name:, description:, parameters:, handler:, admin_only:)`
 - `Agent::Runner` — orchestrates the loop, handles provider differences (Anthropic vs OpenAI tool-calling formats), supports vision (multi-modal messages with images)
-- `lib/agent/tools/*.rb` — tool definitions (radio×8, weather, google_search, knowledge×3, horoscope, compose_song, generate_image, load_messages, view_image)
+- `lib/agent/tools/*.rb` — tool definitions (radio×8, weather, google_search, knowledge×3, horoscope, compose_song, generate_image, load_messages, view_image, admin-only inspect_bot_state)
 
 **Tool-calling formats:**
 - Anthropic: `tools: [{name, description, input_schema}]`, response `content: [{type: "tool_use"}]`, results as `{type: "tool_result"}`
 - OpenAI: `tools: [{type: "function", function: {...}}]`, response `tool_calls: [...]`, results as `{role: "tool"}`
 
 Admin-only tools are filtered from definitions AND checked at execution time (denial messages pulled from `Settings.replies['admin_denied']`). Tool results are truncated to 2000 chars.
+
+**Runtime diagnostics — `inspect_bot_state`:** admin-only, read-only tool backed by `Agent::BotState` and `TaskRunner.state_snapshot`. `view=overview` reports bot uptime, poller health/capacity, currently claimed task IDs, registered task types, active non-secret model settings, and queue aggregates; `view=tasks` reports up to five recent tasks from the current chat; `task_id` gives one task. The split keeps the JSON below Runner's 2000-character tool-result cap. A requested ID is restricted to the current chat; other chats contribute counts only, never request/error content. URLs and token-like strings in task summaries/errors are redacted before entering the LLM context.
 
 **Vision support:** When a user attaches or replies to a photo with a bot-addressed message (e.g. "бот что тут?"), `GptChat` downloads the photo via `TelegramFile.download_image` (getFile → token URL → base64), and passes it to `Agent::Runner`, which routes the turn to the `agent_vision` setting and builds a multi-modal message with an `image` content block (Anthropic shape; `GptMaster` converts to OpenAI `image_url` data-URI at the wire for openai-compat providers). Falls back to text-only if the download fails or there's no photo.
 
@@ -408,7 +413,9 @@ Admin-only tools are filtered from definitions AND checked at execution time (de
 Cost note: an injected base64 image rides every subsequent iteration of the agent loop. The persisted photo size is capped at ≤1280px, and `GptMaster#dump_gpt` redacts base64 image payloads (both Anthropic `image` and OpenAI `image_url` shapes) from `gpt.log` to keep log volume sane. Limitations: only photos received **after** this feature deployed have a stored file_id (no backfill possible); images sent as uncompressed documents (`message.document` with `image/*` MIME) are not captured — matches the existing `extract_image` behavior.
 
 ### Agent Event Loop — `lib/task_handlers/agent_event_handler.rb`
-When image_gen / suno tasks hit interesting outcomes (failure after retries, success after retries), the handler emits an `agent_event` BackgroundTask via the `lib/task_handlers/agent_event_emitter.rb` mixin. `AgentEventHandler` runs `Agent::Runner` with a synthetic `[СЛУЖЕБНОЕ СОБЫТИЕ]` text describing what happened; the agent decides whether to comment, retry via tools, or `(skip)`.
+When image_gen / suno tasks hit interesting outcomes (failure after retries, success after retries), the handler emits an `agent_event` BackgroundTask via the `lib/task_handlers/agent_event_emitter.rb` mixin. Other terminal task/runtime failures are bridged centrally by `Agent::ErrorReporter` as `runtime_error`. `AgentEventHandler` runs `Agent::Runner` with a synthetic `[СЛУЖЕБНОЕ СОБЫТИЕ]` text describing what happened; the agent decides whether to comment, retry via tools, or `(skip)`.
+
+Synthetic turns never inherit admin authority: their synthetic user has role `member`. Generic `runtime_error` turns additionally run with `tools_enabled: false`; the runner omits tool definitions **and rejects provider-supplied tool calls at execution time**. Diagnostic details are HTML-escaped inside an explicit untrusted-data delimiter, so a forged closing tag cannot turn exception/user text into instructions. Tailored informational events retain the 10/hour/chat cap. Parent-backed terminal task errors remain one-per-parent-task; parentless runtime failures are fingerprint-coalesced for five minutes and capped. Loop protection is structural: errors while processing an `agent_event` are logged and marked failed but never enqueue another `agent_event`.
 
 Suno upload tasks use their own event types (`cover_failed`, `add_vocals_failed`) whose descriptions tell the agent not to replace the cover with a from-scratch song without consent and to offer `retry_of_task_id` instead (see "Upload-source failures"); separation emits `separation_failed` / `separation_delivery_failed`.
 
@@ -459,7 +466,9 @@ Generic DB-backed persistent task system for long-running operations. A poller t
 
 **Components:**
 - `BackgroundTask` model — ActiveRecord wrapper for `background_tasks` table with status helpers (`mark_done!`, `mark_failed!`, `increment_attempts!`, `timed_out?`)
-- `TaskRunner` — generic poller + handler registry. Polls pending tasks every 10s, dispatches to registered handlers by `task_type`
+- `TaskRunner` — generic poller + handler registry. Polls pending tasks every 15s, dispatches to registered handlers by `task_type`; the `poll_cycle` boundary reports dispatcher/DB faults to super-admin agent loops and lets the forever-loop continue
+- `TaskRunner.state_snapshot` — mutex-protected read-only runtime view used by `inspect_bot_state` (`running`, processing IDs, worker/poll limits, registered handler types); callers receive copies and cannot mutate dispatcher state
+- `Agent::ErrorReporter` — terminal failure bridge. TaskRunner invokes it for unknown task types, timeouts, exhausted exceptions, and handlers returning `:failed`; it preserves an existing task-specific event or creates one sanitized `runtime_error` event for the agent
 - Handler classes in `lib/task_handlers/` — each implements `def call(task, api)` returning `:pending`, `:done`, or `:failed`
 
 **Adding a new task type:**
@@ -497,7 +506,7 @@ HTTP client for the Suno AI song generation API (`sunoapi.org`). Key methods:
 **Submit error format (`post_for_task_id` → `submit_error`).** Every submit raises `"Suno <path> failed: <code> <detail>"` on a non-200 OR on HTTP 200 without `data.taskId` (then Suno's body `code`/`msg` is the detail — prod add-vocals "No taskId" failures used to drop it). URLs are always redacted (`redact_urls`) because Suno echoes `uploadUrl`/`audioUrl` back and that is the Telegram file URL with the bot token; the detail is capped at 300 chars. The code rendering is load-bearing for `TaskRunner#process_one`'s regex classification: permanent codes (400/401/404/413/429 no credits) and 5xx are rendered bare (`" 429 "`, so `\s4\d{2}[\s{]` → permanent, `\s5\d{2}[\s{]` → transient); other codes (405 rate limit, 430 call frequency, 455 maintenance) are rendered `code=430` so they are NOT treated as permanent and the handler's submit-failure cap decides. The regexes live in `TaskRunner::PERMANENT_ERROR_RE` / `TRANSIENT_ERROR_RE`; every Suno handler's submit rescue (`SunoTaskHandler#bail_or_retry`, WAV, cover-art, separation) checks `TaskRunner.permanent_error?(e)` first and fails the task itself with its normal notice + agent_event (`*_rejected` reason, redacted detail) rather than re-raising into TaskRunner's raw `Ошибка: …`.
 
 #### Combined compose call
-On the common path (user did NOT supply verbatim lyrics), `SunoTaskHandler#compose_lyrics_and_tags` makes ONE Sonnet 4.6 call (`setting: 'lyrics'`, `purpose: 'suno_compose'`) producing both lyrics and style tags in a single response. Format pinned to two XML blocks:
+On the common path (user did NOT supply verbatim lyrics), `SunoTaskHandler#compose_lyrics_and_tags` makes ONE Claude Sonnet 5 call with thinking disabled (`setting: 'lyrics'`, `purpose: 'suno_compose'`) producing both lyrics and style tags in a single response. Format pinned to two XML blocks:
 
 ```
 <lyrics>
@@ -516,7 +525,7 @@ Parser is a trivial regex on each block. **Coherence win**: the same model holds
 When the user DID supply verbatim lyrics, the handler skips composition and runs only `resolve_tags` (`purpose: 'suno_tags'`) — the tags-only fallback path remains unchanged.
 
 #### Tag-ordering convention (TAGS_PROMPT)
-`SunoTaskHandler::TAGS_PROMPT` instructs the enrichment LLM (Anthropic Sonnet 4.6 via `setting: 'lyrics'`) to emit tags in *genre → mood → instruments → vocals → mix* order, ~120–180 chars total. Mix descriptors (`polished production`, `lo-fi`, `wet reverb`, `dry mix`, `punchy drums`, `radio-ready`) are optional seasoning — composer skips when generic. **Negatives are NOT emitted into the tag string** — they flow exclusively through the structured `negative_tags` agent-tool param → `SunoClient#submit(negative_tags:)` → Suno's `negativeTags` POST field (omitted from the body when empty). Inlining `"no X / without Y"` inside `tags` would let Suno parse them as positive descriptors.
+`SunoTaskHandler::TAGS_PROMPT` instructs the enrichment LLM (Anthropic Claude Sonnet 5 via `setting: 'lyrics'`) to emit tags in *genre → mood → instruments → vocals → mix* order, ~120–180 chars total. Mix descriptors (`polished production`, `lo-fi`, `wet reverb`, `dry mix`, `punchy drums`, `radio-ready`) are optional seasoning — composer skips when generic. **Negatives are NOT emitted into the tag string** — they flow exclusively through the structured `negative_tags` agent-tool param → `SunoClient#submit(negative_tags:)` → Suno's `negativeTags` POST field (omitted from the body when empty). Inlining `"no X / without Y"` inside `tags` would let Suno parse them as positive descriptors.
 
 **Always-enrich (structural):** the `compose_song` agent tool does NOT accept a `tags` arg — the handler runs `resolve_tags` on every gen, regardless of agent input. Single source of truth for style emulation; eliminates the failure mode where the agent inlined generic genre tags and bypassed the enrichment path (prod task 1360, 2026-05-18). Tag input to enrichment is `genre + artist + title`. Artist-emulation rule in `TAGS_PROMPT`: when copying a specific artist's style, describe *distinctive* traits (vocal manner, timbre, phrasing, tempo, production quirks), not shared genre traits — e.g. Rammstein vs OOMPH share NDH but differ in operatic baritone / rolled R consonants / spoken-word verses / mid-tempo stomp / cinematic synths / glossy production.
 
@@ -575,7 +584,7 @@ Service-adapter layer. The `ImageGenTaskHandler` is provider-agnostic; concrete 
 
 - **Per-request model selection** — the `generate_image` agent tool exposes a `model` enum; the agent picks a catalog key (e.g. `nano-banana-2`, `qwen-image-3-pro`, `gpt-image-2.5-sunburst`, `wan-2.7`, `flux-2-pro`). **`ImageGen::Catalog`** (`lib/image_gen/catalog.rb`) maps each key → `{provider, t2i, edit, desc}` from config (`image_gen.models`). The tool stores the resolved key in `task.params['model']`; `ImageGenTaskHandler` resolves the entry, selects the adapter **by the entry's provider** (not just `current_adapter`), validates that provider against `ImageGen::ADAPTERS` (unknown → re-resolve to `default_model` so adapter and model id stay coherent), snapshots both `provider` and `model` into params, and threads the provider-specific id into `adapter.submit(model:)`. Missing/invalid key → `image_gen.default_model`. `edit: false` in an entry → `model_id_for(:edit)` returns nil → the adapter falls back to its configured `image_edit_model`. The catalog is read **lazily**: Settings isn't loaded at tool-require time (boot.rb requires the tools before `Settings.load!`), so the tool defers the enum/description via `enum_source`/`desc_suffix_source` lambdas resolved in `ToolRegistry.definitions_for` (per-turn, at runtime). `Catalog.all` is memoized; `reset!` is the test seam.
 - **Multi-image edit + chat-history sourcing** — the `generate_image` tool also takes `source_message_ids` (array of Telegram `message_id`s of earlier `photo: true` messages). Edit sources are therefore: the current/replied photo (inline, already base64 in `ctx[:image]`) **plus** any history photos the agent picks by message_id. History photos are **downloaded in the handler** (`ImageGenTaskHandler#resolve_input_images` reuses the `view_image` resolution: `Message…pick(:attachment_photo_file_id)` → `TelegramFile.download_image`) — never in the tool, which runs in the bot's listen loop (no blocking I/O). Missing/old message_ids (no stored file_id) are skipped with a warning; if an edit was requested but **zero** images resolve, the task fails with a user-facing notice instead of silently regenerating from scratch. Total source images are capped at `ImageGen::MAX_EDIT_IMAGES` (6). Only models flagged `multi_image: true` in the catalog (nano-banana, Seedream, Qwen 3, GPT Image 2.5 Sunburst) can combine several inputs; model-specific adapter limits still apply (Qwen: 3). When the agent picks an incapable model (Wan/Flux) for a >1-image request, the tool **auto-switches** to the capable `default_model` (`ImageGen::Catalog.multi_image?`).
-- **Prompt enrichment** — `ImageGenTaskHandler` sends both T2I and edit requests through the dedicated multimodal `chat_gpt.settings.image_prompt` model (DeepSeek Flash, thinking disabled, `max_tokens: 2000`). This isolates a bounded creative rewrite from the full chat/vision agents. `ImageGen::PromptTemplates` supplies one shared comedy-first template to every adapter: one dominant visual gag, 1–3 supporting references, no character census or automatic camera/4K filler, direct preservation of provocative adult intent, 100–220 words (group scenes ≤300), and 40–120 words for edits.
+- **Prompt enrichment** — `ImageGenTaskHandler` sends both T2I and edit requests through the dedicated multimodal `chat_gpt.settings.image_prompt` model (DeepSeek Flash, thinking disabled, `max_tokens: 768`). This isolates a bounded creative rewrite from the full chat/vision agents and keeps it from monopolizing a task worker. `ImageGen::PromptTemplates` supplies one shared comedy-first template to every adapter: one dominant visual gag, 1–3 supporting references, no character census or automatic camera/4K filler, direct preservation of provocative adult intent, 100–220 words (group scenes ≤300), and 40–120 words for edits. Enrichment is not an authorization gate: a stock refusal or blank/whitespace-only composer reply is detected and replaced by the raw user request before submission.
 - **`ImageGen::Adapter`** (`lib/image_gen/adapter.rb`) — base class. Concrete adapters override `submit(prompt:, input_images:, model:)` (`input_images:` = array of `{data:, media_type:}` edit sources or nil for text-to-image — single-image adapters use the first; `model:` nil ⇒ adapter's configured default) and `poll_once(external_id)`; `prompt_template(:text_to_image|:edit)` inherits the shared `ImageGen::PromptTemplates`; `name` returns `self.class::NAME`; `synchronous?` defaults `false`.
 - **`ImageGen` facade** (`lib/image_gen.rb`) — `ADAPTERS = { 'flux' => FluxAdapter, 'atlas' => AtlasAdapter, 'closerouter' => CloseRouterImgAdapter }.freeze`. Submit-side: `current_adapter` reads `Settings.image_gen['provider']` (used only for legacy/no-model tasks; catalog-keyed tasks call `adapter_for(entry_provider)`). Poll-side: `adapter_for(snapshot)` resolves by the value snapshotted into `task.params['provider']` at submit time, so a config flip mid-flight doesn't reroute polling to a different prediction id space (legacy rows fall back to `current_adapter`).
 - **Synchronous adapters** — when `Adapter#synchronous?` returns `true`, `#submit` returns a terminal result Hash (`{url:, completed:true}`) instead of an external_id String. `ImageGenTaskHandler#deliver_sync_result` short-circuits the poll cycle and marks the task done in one call. `#poll_once` raises `NotImplementedError` if reached. Only `CloseRouterImgAdapter` is sync today; Flux + Atlas stay async with the `:pending` / `:poll_error` / `:retry` / `:failed` / `{url:}` poll return contract.
@@ -912,24 +921,26 @@ chat_gpt:
       provider: deepseek
       model: deepseek-flash
       max_tokens: 16000
+      thinking: { type: enabled }
     image_prompt:                 # bounded T2I/edit prompt composition
       provider: deepseek
       model: deepseek-flash
-      max_tokens: 2000
+      max_tokens: 768
       thinking: { type: disabled }
     agent_vision:                 # Agent::Runner picks this when @image is attached
       provider: deepseek
       model: deepseek-flash
       max_tokens: 16000
-      thinking: { type: enabled }
+      thinking: { type: disabled }
     knowledge:                    # KnowledgeBase extract + compact (background, frequent)
       provider: deepseek
       model: deepseek-flash
       max_tokens: 32000
     lyrics:                       # suno_handler song lyrics generation
-      provider: deepseek
-      model: deepseek-v4-pro
+      provider: anthropic
+      model: claude-sonnet-5
       max_tokens: 16000
+      thinking: { type: disabled }
     knowledge_review:             # small-cluster dedup judge
       provider: deepseek
       model: deepseek-flash
@@ -937,6 +948,11 @@ chat_gpt:
       provider: openai
       model: text-embedding-3-small
   pricing:                        # USD per 1M tokens; used by ApiUsage.compute_cost
+    claude-sonnet-5:
+      input: 2
+      output: 10
+      cache_read: 0.20
+      cache_write: 2.50
     claude-sonnet-4-6:
       input: 3
       output: 15

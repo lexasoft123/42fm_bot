@@ -1,3 +1,5 @@
+require_relative 'agent/error_reporter'
+
 module BotDispatcher
   module_function
 
@@ -23,6 +25,8 @@ module BotDispatcher
   rescue => e
     chat_id = (query.message&.chat&.id rescue nil) || '?'
     LOGGER.error "[chat=#{chat_id}] BotDispatcher#handle_callback: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
+    Agent::ErrorReporter.report(chat_id: chat_id == '?' ? nil : chat_id,
+                                source: 'bot_dispatcher.callback', error: e)
   end
 
   # Authoritative aggregate: Telegram periodically sends the total reaction
@@ -37,6 +41,8 @@ module BotDispatcher
     end
   rescue => e
     LOGGER.warn "[chat=#{update.chat.id rescue '?'}] handle_reaction_count: #{e.class}: #{e.message}"
+    Agent::ErrorReporter.report(chat_id: (update.chat.id rescue nil),
+                                source: 'bot_dispatcher.reaction_count', error: e)
   end
 
   # Per-user delta (needs the bot to be a group admin to be delivered).
@@ -55,6 +61,8 @@ module BotDispatcher
     end
   rescue => e
     LOGGER.warn "[chat=#{update.chat.id rescue '?'}] handle_reaction: #{e.class}: #{e.message}"
+    Agent::ErrorReporter.report(chat_id: (update.chat.id rescue nil),
+                                source: 'bot_dispatcher.reaction', error: e)
   end
 
   # Reaction updates carry no `from`/chat-type, so the message-oriented
@@ -102,6 +110,8 @@ module BotDispatcher
     # has its own internal rescue, but construction itself (e.g. user save) can
     # raise before that fires.
     LOGGER.error "[chat=#{message.chat.id rescue '?'}] BotDispatcher#handle_message: #{e.class}: #{e.message}\n\t#{e.backtrace&.first(5)&.join("\n\t")}"
+    Agent::ErrorReporter.report(chat_id: (message.chat.id rescue nil),
+                                source: 'bot_dispatcher.message', error: e)
   end
 
   # Super-admin private chats bypass the chats-table allowlist so /admin works
