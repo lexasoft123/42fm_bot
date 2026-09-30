@@ -38,7 +38,7 @@ Agent::ToolRegistry.register(
     inline_lyrics = args['lyrics'].to_s.strip.presence
     inline_topic  = args['theme'].to_s.strip.presence
     PendingAudioRequest.clear_for(ctx) # a task is being created — the follow-up is moot
-    BackgroundTask.create!(
+    task = BackgroundTask.create!(
       task_type: 'suno_generate',
       chat_id: ctx[:chat_id],
       max_attempts: 60,
@@ -56,9 +56,14 @@ Agent::ToolRegistry.register(
                 # Exact allowed enum value (validated above), stored per task so
                 # resubmits use the same model.
                 model: model,
+                forum_thread_id: ctx[:forum_thread_id],
                 user_uid: ctx[:user]&.uid }.to_json
     )
     suffix = args['with_cover_art'] == true ? ' (после песни придёт обложка)' : ''
-    "Песня «#{args['title']}» поставлена в очередь генерации и скоро будет отправлена в чат#{suffix}"
+    Agent::ToolResult.action(
+      status: :queued, action: 'compose_song', task_id: task.id, task_type: task.task_type,
+      phase: :queued, delivery: :pending,
+      user_text: "Песня «#{args['title']}» поставлена в очередь генерации и скоро будет отправлена в чат#{suffix}"
+    )
   }
 )

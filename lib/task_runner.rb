@@ -128,6 +128,11 @@ class TaskRunner
       return
     end
 
+    # `attempts` counts handler/poll cycles. Lifecycle phase is separate and
+    # only explicit failures increment retry_count.
+    unless %w[delivering persisting_delivery].include?(task.lifecycle_phase)
+      task.mark_processing!
+    end
     t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     result = handler_class.new.call(task, @api)
     took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
@@ -162,6 +167,8 @@ class TaskRunner
       task.mark_failed!(e.message)
       notify_chat(task.chat_id, "Ошибка: #{e.message.truncate(200)}")
       Agent::ErrorReporter.report_task_failure(task, source: "task_handler.#{task.task_type}")
+    elsif task.status == 'pending' && task.lifecycle_phase != 'retrying'
+      task.mark_retrying!
     end
   end
 

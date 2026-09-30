@@ -1,5 +1,6 @@
 require 'httparty'
 require 'set'
+require_relative '../agent/error_reporter'
 
 module ImageGen
   # FLUX 2 image generation via api.bfl.ai. Absorbed from the former top-level
@@ -21,8 +22,10 @@ module ImageGen
         return if @logged_unknown_status.include?(task_id)
         @logged_unknown_status.add(task_id)
       end
-      LOGGER.warn "FluxAdapter: unknown status=#{status.inspect} for #{task_id} (treating as :pending)"
+      LOGGER.warn "FluxAdapter: unknown status=#{safe(status.inspect)} for #{safe(task_id)} (treating as :pending)"
     end
+
+    def self.safe(value) = Agent::ErrorReporter.sanitize(value)
 
     def initialize
       # Back-compat shim: merge top-level Settings.flux UNDER image_gen.providers.flux.
@@ -54,17 +57,17 @@ module ImageGen
         LOGGER.warn "#{self.class.name}: #{imgs.size} input images given but FLUX edits one — using the first" if imgs.size > 1
         first = imgs.first
         body[:input_image] = "data:#{first[:media_type] || 'image/jpeg'};base64,#{first[:data]}"
-        LOGGER.debug "#{self.class.name}: submitting edit (prompt #{prompt.length} chars, #{imgs.size} image(s)) to #{effective_model}"
+        LOGGER.debug "#{self.class.name}: submitting edit (prompt #{prompt.length} chars, #{imgs.size} image(s)) to #{safe(effective_model)}"
       else
         body[:width]  = width
         body[:height] = height
-        LOGGER.debug "#{self.class.name}: submitting prompt (#{prompt.length} chars) to #{effective_model}"
+        LOGGER.debug "#{self.class.name}: submitting prompt (#{prompt.length} chars) to #{safe(effective_model)}"
       end
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       resp = HTTParty.post("#{@base_url}/v1/#{effective_model}",
         body: body.to_json, headers: headers, timeout: 60)
       LOGGER.debug "#{self.class.name}#submit took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms code=#{resp.code}"
-      raise "Flux submit failed: #{resp.code} #{resp.body}" unless resp.code == 200
+      raise "Flux submit failed: #{safe(resp.code)} #{safe(resp.body)}" unless resp.code == 200
       resp.parsed_response['id'] || raise("No id in response")
     end
 
@@ -76,7 +79,7 @@ module ImageGen
       took_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
       return :pending unless resp.code == 200
       data = resp.parsed_response
-      LOGGER.debug "#{self.class.name}#poll_once took=#{took_ms}ms status=#{data['status'].inspect}"
+      LOGGER.debug "#{self.class.name}#poll_once took=#{took_ms}ms status=#{safe(data['status'].inspect)}"
       case data['status']
       when 'Ready'
         { url: data.dig('result', 'sample') }
@@ -91,12 +94,16 @@ module ImageGen
         :pending
       end
     rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
-      LOGGER.warn "#{self.class.name} poll_once: #{e.class}: #{e.message}"
+      LOGGER.warn "#{self.class.name} poll_once: #{e.class}: #{safe(e.message)}"
       :pending
     end
 
 
     private
+
+    def safe(value)
+      Agent::ErrorReporter.sanitize(value)
+    end
 
     def headers
       { 'Content-Type' => 'application/json', 'x-key' => @api_key }

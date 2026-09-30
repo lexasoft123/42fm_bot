@@ -18,6 +18,13 @@ module Agent
     OUTPUT_BUDGET_STOPS = %w[length max_tokens].freeze
     EMPTY_REPLY_NUDGE = 'Ответ на запрос пользователя не дошёл — текста не было. Ответь сейчас: ' \
                         'если нужен инструмент, вызови его; иначе дай текстовый ответ по-русски.'.freeze
+    SAFE_FAILURE_REPLY = 'Не смог нормально оформить ответ — попробуй ещё раз.'.freeze
+    UNKNOWN_STATUS_REPLY = 'Не могу подтвердить текущий статус задачи — сначала нужно проверить его через task_status.'.freeze
+    INTEGRITY_NUDGE = 'Предыдущий текст содержит внутренний синтаксис агента или вызова инструмента. ' \
+                      'Перепиши только пользовательский ответ обычным русским текстом. Не показывай ' \
+                      'рассуждения, JSON, имена функций, служебные поля и не вызывай инструменты. ' \
+                      'Не утверждай статус очереди, генерации или доставки, если он не подтверждён ' \
+                      'результатом уже выполненного инструмента.'.freeze
 
     def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil, user_initiated: true, forum_thread_id: nil, private_chat: false, tools_enabled: true, report_errors: true)
       @text       = text
@@ -37,6 +44,12 @@ module Agent
       @user_initiated = user_initiated
       @tools_enabled = tools_enabled
       @report_errors = report_errors
+      # Only payloads produced by ToolResult.action inside this Runner are
+      # authoritative. Provider-written JSON must never manufacture state.
+      @trusted_action_payloads = {}
+      @latest_evidence = {}
+      @latest_evidence_batch = []
+      @evidence_sequence = 0
       # When the user attached/replied with an image, route through `agent_vision`
       # (typically Anthropic with vision) so the model can actually see it. The
       # text-only `agent` setting (typically DeepSeek for cheaper tool-loop runs)
@@ -88,7 +101,21 @@ module Agent
       false
     end
 
+    attr_reader :last_turn_metrics
+
     def run
+      reset_turn_metrics
+      result = run_inner
+      @turn_status = classify_turn_status(result)
+      result
+    rescue => e
+      @turn_status = 'exception'
+      raise
+    ensure
+      emit_turn_metrics
+    end
+
+    def run_inner
       system_prompt, user_content = build_initial_content
       messages = build_initial_messages(user_content)
       tools    = @tools_enabled ? ToolRegistry.definitions_for(user_role: @user.role, api_type: @api_type) : []
@@ -98,11 +125,14 @@ module Agent
       generate_image_called = false
       watchdog_fired        = false
       blank_retried         = false
+      task_status_called    = false
+      status_watchdog_fired = false
 
       MAX_ITERATIONS.times do |i|
+        @turn_iterations = i + 1
         iter_t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         raw = new_gpt(messages, system_prompt).call_raw(tools: tools)
-        return 'жпт не жпт' unless raw
+        return @user_initiated ? SAFE_FAILURE_REPLY : '' unless raw
 
         stop       = extract_stop_reason(raw)
         tool_calls = extract_tool_calls(raw)
@@ -121,7 +151,7 @@ module Agent
             # the same context (and would block the loop again) → visible stub.
             if OUTPUT_BUDGET_STOPS.include?(stop.to_s) || blank_retried
               alog :warn, "empty reply (iteration #{i + 1}, stop=#{stop}#{blank_retried ? ', after retry' : ''}) — returning stub"
-              return 'жпт не жпт'
+              return SAFE_FAILURE_REPLY
             end
             # A photo is already in hand and the user explicitly asked to edit
             # it. Do not make the vision model act as a policy gate: enqueue the
@@ -130,7 +160,8 @@ module Agent
             if direct_image_edit_request?
               generate_image_called = true
               direct_result = dispatch_direct_image_edit
-              return direct_result unless Agent::ErrorReporter.tool_error_result?(direct_result)
+              return finalize_output(direct_result, messages: messages, system_prompt: system_prompt,
+                                     tools: tools, iteration: i + 1) unless Agent::ErrorReporter.tool_error_result?(direct_result)
               append_user_nudge(messages, direct_image_error_nudge(direct_result))
               next
             end
@@ -146,6 +177,20 @@ module Agent
             next
           end
 
+          # A status answer without task_status is necessarily a guess. For a
+          # narrow, explicit current-user status question, perform the missing
+          # read-only lookup once and feed its trusted result back to the model.
+          status_args = task_status_request_args unless task_status_called || status_watchdog_fired
+          if status_args
+            status_watchdog_fired = true
+            alog :warn, "watchdog: explicit task-status request without task_status call — checking#{status_args['task_id'] ? " ##{status_args['task_id']}" : ' recent tasks'}"
+            call_id = "task_status_watchdog_#{i + 1}"
+            messages << build_task_status_watchdog_call(call_id, status_args)
+            result = execute_tool('task_status', status_args)
+            messages << build_tool_result_message(call_id, result)
+            next
+          end
+
           # Image watchdog: the agent sometimes promises/describes an image but
           # never calls generate_image — either imitating the `🎨 <caption>`
           # format from chat history, or answering an explicit draw directive
@@ -156,7 +201,8 @@ module Agent
             if direct_image_edit_request?
               generate_image_called = true
               direct_result = dispatch_direct_image_edit
-              return direct_result unless Agent::ErrorReporter.tool_error_result?(direct_result)
+              return finalize_output(direct_result, messages: messages, system_prompt: system_prompt,
+                                     tools: tools, iteration: i + 1) unless Agent::ErrorReporter.tool_error_result?(direct_result)
               messages << build_assistant_message(raw)
               append_user_nudge(messages, direct_image_error_nudge(direct_result))
               next
@@ -171,8 +217,12 @@ module Agent
           end
 
           alog :info, "DONE (#{i + 1} iteration#{i > 0 ? 's' : ''}, stop=#{stop}, no tools, took=#{iter_ms}ms)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
-          return text
+          return finalize_output(text, messages: messages, system_prompt: system_prompt,
+                                 tools: tools, iteration: i + 1, raw: raw)
         end
+
+
+        task_status_called ||= tool_calls.any? { |tc| tc[:name] == 'task_status' }
 
         # `tools: []` is advisory at the provider boundary: a malformed or
         # prompt-injected response can still contain fabricated tool calls.
@@ -216,10 +266,11 @@ module Agent
       text = new_gpt(messages, system_prompt).call
       if text.nil? || text.strip.empty?
         alog :warn, "forced-final produced empty reply even with explicit instruction — falling back to stub"
-        text = 'жпт не жпт'
+        text = SAFE_FAILURE_REPLY
       end
       alog :info, "DONE (#{MAX_ITERATIONS} iterations, forced final)\nRESPONSE: #{text[0..500]}#{text.length > 500 ? '...' : ''}"
-      text
+      finalize_output(text, messages: messages, system_prompt: system_prompt,
+                      tools: tools, iteration: MAX_ITERATIONS)
     end
 
     # Synthetic user turn appended before the forced-final call so the model
@@ -313,6 +364,47 @@ module Agent
       end
     end
 
+    # Returns task_status arguments only for an explicit lifecycle question in
+    # the current request. Quoted/code/example/history fragments are excluded;
+    # ordinary uses of "status" or "готово" without a background-task subject
+    # do not qualify. Multiple IDs are ambiguous and deliberately do nothing.
+    def task_status_request_args
+      return unless @user_initiated && @tools_enabled && Agent::ToolRegistry.find('task_status')
+
+      value = status_request_prose(@text)
+      return if value.empty?
+      return if value.match?(/(?:\b(?:example|quote|quoted|translate|git|http)\b|пример|цитат|перевед|что\s+значит|объясни|в\s+истори|из\s+истори|history\s+(?:says|said)|previous\s+message)/i)
+
+      subject = /(?:задач|генераци|картинк|изображени|песн|трек|кавер|аудио)\w*|\b(?:task|job|generation|image|song|track|cover|audio)\b/i
+      explicit_status = /(?:статус|состоян|прогресс|очеред|выполня|обрабаты|достав|что\s+(?:там\s+)?с|(?:как|где)\s+(?:там\s+)?(?:задач|генераци|картинк|изображени|песн|трек|кавер|аудио)|\b(?:status|state|progress|queued|running|processing|delivered)\b|\b(?:how|where)\s+is\b|\bwhat(?:'s|\s+is)\s+happening\s+with\b)/i
+      completion = /(?:готов|заверш|сделан|закончен|упал|ошибк)\w*|\b(?:done|ready|finished|complete|failed)\b/i
+      request_frame = /\?|(?:^|\s)(?:проверь|скажи|покажи|узнай|что|как|где|есть\s+ли|готова?\s+ли)\b|\b(?:check|show|tell|is|are|was|were|what|how|where)\b/i
+      return unless value.match?(subject)
+      return unless value.match?(explicit_status) || (value.match?(completion) && value.match?(request_frame))
+
+      ids = value.scan(/(?:задач\w*|task)\s*#?\s*(\d+)|#\s*(\d+)/i)
+                 .flatten.compact.map(&:to_i).select(&:positive?).uniq
+      return if ids.length > 1
+      ids.empty? ? {} : { 'task_id' => ids.first }
+    end
+
+    def status_request_prose(text)
+      text.to_s
+          .gsub(/```.*?```/m, ' ')
+          .gsub(/`[^`]*`/, ' ')
+          .gsub(/«[^»]*»|“[^”]*”|"[^"]*"|'[^']*'/m, ' ')
+          .lines.reject { |line| line.match?(/^\s*>/) }.join(' ').strip
+    end
+
+    def build_task_status_watchdog_call(call_id, args)
+      if anthropic?
+        { role: 'assistant', content: [{ type: 'tool_use', id: call_id, name: 'task_status', input: args }] }
+      else
+        { role: 'assistant', content: nil, tool_calls: [{ id: call_id, type: 'function',
+          function: { name: 'task_status', arguments: JSON.generate(args) } }] }
+      end
+    end
+
     # Add a synthetic user instruction without an assistant turn in between.
     # Anthropic forbids two consecutive user turns, so there the text is
     # merged into the last user message (initial request or tool_result turn);
@@ -337,6 +429,7 @@ module Agent
     end
 
     def new_gpt(messages, system_prompt)
+      @turn_llm_calls += 1 if @turn_metrics_active
       GptMaster.new(messages, setting: @setting,
                     chat_id: @chat_id, user_uid: @user&.uid, purpose: 'agent',
                     system_prompt: system_prompt, report_errors: @report_errors)
@@ -424,6 +517,7 @@ module Agent
     end
 
     def execute_tool(name, input)
+      @turn_tool_calls += 1 if @turn_metrics_active
       unless @tools_enabled
         alog :warn, "blocked tool #{name} while tools are disabled"
         return JSON.generate(status: 'error', source: "tool.#{name}",
@@ -442,7 +536,9 @@ module Agent
       end
 
       result = tool.handler.call(input, @tool_ctx)
-      truncate(materialize_result(result))
+      materialized = materialize_result(result)
+      record_task_status_evidence(materialized) if name == 'task_status'
+      truncate(materialized)
     rescue => e
       alog :error, "tool #{name} error: #{e.class}: #{e.message}"
       Agent::ErrorReporter.tool_result(source: "tool.#{name}", error: e)
@@ -505,17 +601,501 @@ module Agent
         @pending_images << result.image
         return result.user_text
       end
+      if result.action?
+        payload = result.action_payload
+        register_trusted_action(payload)
+        return JSON.generate(payload)
+      end
       return result.user_text unless result.deferred?
 
       due_at = result.retry_in_min ? (Time.now + result.retry_in_min * 60) : nil
       Agent::Scratchpad.add(@chat_id, category: 'intentions',
                             content: result.deferred_intent, due_at: due_at)
       alog :info, "auto-remember (deferred): #{result.deferred_intent[0..120]}"
-      retry_part = result.retry_in_min ? " retry_in=#{result.retry_in_min}min" : ''
-      "[deferred#{retry_part}, intent saved to scratchpad] #{result.user_text}"
+      payload = {
+        status: 'deferred', action: 'retry_later', retry_in_min: result.retry_in_min,
+        intent_saved: true, message: result.user_text
+      }.compact
+      register_trusted_action(payload)
+      JSON.generate(payload)
     rescue => e
       alog :warn, "scratchpad add failed: #{e.class}: #{e.message}"
       result.user_text
+    end
+
+    # Final user-visible text is a trust boundary. Providers occasionally emit
+    # their private scratchpad syntax or serialize a tool call as prose. Give a
+    # real user turn one bounded rewrite attempt, but never execute tool calls
+    # from that attempt. Synthetic agent_event/cron turns stay silent.
+    def finalize_output(text, messages:, system_prompt:, tools:, iteration:, raw: nil, correction_allowed: true)
+      text = text.to_s
+      action_text = action_outcome_message(text)
+      return append_trusted_task_ids(action_text) if action_text
+      return append_trusted_task_ids(text) unless integrity_violation?(text)
+
+      alog :warn, "final-output integrity violation (iteration #{iteration})"
+      return '' unless @user_initiated
+
+      if correction_allowed && raw && iteration < MAX_ITERATIONS
+        @turn_corrections += 1 if @turn_metrics_active
+        correction_messages = messages.dup
+        correction_messages << build_assistant_message(raw)
+        append_user_nudge(correction_messages, INTEGRITY_NUDGE)
+        corrected_raw = new_gpt(correction_messages, system_prompt).call_raw(tools: tools)
+        if corrected_raw && extract_tool_calls(corrected_raw).empty?
+          corrected = extract_text(corrected_raw).to_s
+          return finalize_output(corrected, messages: correction_messages, system_prompt: system_prompt,
+                                 tools: tools, iteration: iteration + 1, raw: corrected_raw,
+                                 correction_allowed: false)
+        else
+          alog :warn, 'integrity correction returned a tool call or no response; tool call not executed'
+        end
+      end
+
+      append_trusted_task_ids(deterministic_safe_output(text))
+    rescue => e
+      alog :warn, "final-output integrity gate failed: #{e.class}: #{e.message}"
+      @user_initiated ? SAFE_FAILURE_REPLY : ''
+    end
+
+    def reset_turn_metrics
+      @turn_metrics_active = true
+      @turn_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      @turn_iterations = 0
+      @turn_llm_calls = 0
+      @turn_tool_calls = 0
+      @turn_corrections = 0
+      @turn_status = 'unknown'
+      @last_turn_metrics = nil
+    end
+
+    def classify_turn_status(result)
+      return 'silence' if result.to_s.empty?
+      return 'fallback' if result == SAFE_FAILURE_REPLY
+      return 'unknown_status' if result == UNKNOWN_STATUS_REPLY
+      'ok'
+    end
+
+    def emit_turn_metrics
+      return unless @turn_metrics_active && @turn_started_at
+      @turn_metrics_active = false
+      @last_turn_metrics = {
+        event: 'agent_turn',
+        setting: @setting,
+        took_ms: ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - @turn_started_at) * 1000).round,
+        iterations: @turn_iterations,
+        llm_calls: @turn_llm_calls,
+        tool_calls: @turn_tool_calls,
+        corrections: @turn_corrections,
+        status: @turn_status
+      }
+      alog :info, "METRIC #{JSON.generate(@last_turn_metrics)}"
+    rescue => e
+      LOGGER.warn "[chat=#{@chat_id}] [AGENT] metric emission failed: #{e.class}: #{e.message}" if defined?(LOGGER)
+    end
+
+    def integrity_violation?(text)
+      value = text.to_s
+      return true if value.strip.empty?
+      return true if value.match?(/жпт\s+не\s+жпт/i)
+      return true if value.match?(/(?:internal[\s_-]*monologue|внутренн(?:ий|ее)\s+(?:монолог|рассуждени\w*))\s*:?/i)
+      return true if value.match?(/\.fullname\b/i)
+      return true if value.match?(/\[deferred(?:\s|\]|,)/i)
+      return true if value.match?(/<\/?(?:tool_call|think)(?:\s|>)/i)
+      return true if value.match?(/\banalysis\s*:|assistant(?:\s+to|[-_]to)\s*[=:]/i)
+      return true if value.match?(/\b(?:remember|forget)\s*\(/i)
+      return true if tool_payload_json?(value)
+      return true if operational_claim_unverified?(value)
+
+      prose = value
+      tool_names = Agent::ToolRegistry.tools.map(&:name).reject { |name| name.to_s.empty? }
+      return false if tool_names.empty?
+
+      prose.match?(/(?:\A|[\s`'"*:;,>\-])(?:#{tool_names.map { |name| Regexp.escape(name) }.join('|')})\s*\(/i)
+    end
+
+    def tool_payload_json?(text)
+      json_candidates(text).any? do |candidate|
+        parsed = JSON.parse(candidate)
+        tool_payload_node?(parsed)
+      rescue JSON::ParserError
+        false
+      end
+    end
+
+    def action_outcome_message(text)
+      parsed = JSON.parse(text)
+      return unless parsed.is_a?(Hash)
+      return unless Agent::ToolResult::ACTION_STATUSES.include?(parsed['status'].to_s)
+      return unless parsed['action'].is_a?(String)
+      canonical = canonical_json(parsed)
+      identities = @trusted_action_payloads[canonical]
+      return unless identities && identities.all? { |identity| @latest_evidence[identity]&.dig(:canonical) == canonical }
+
+      message = parsed['message'].to_s.strip
+      return if message.empty? || integrity_violation?(message)
+      message
+    rescue JSON::ParserError
+      nil
+    end
+
+    def deterministic_safe_output(text)
+      stripped = text.to_s.sub(/\A\s*\[deferred[^\]]*\]\s*/i, '').strip
+      return stripped unless stripped.empty? || integrity_violation?(stripped)
+
+      operational_claims(text).empty? ? SAFE_FAILURE_REPLY : UNKNOWN_STATUS_REPLY
+    end
+
+    def register_trusted_action(payload)
+      normalized = JSON.parse(JSON.generate(payload))
+      canonical = canonical_json(normalized)
+      @evidence_sequence += 1
+      records = evidence_records(normalized, canonical: canonical, sequence: @evidence_sequence)
+      identities = records.map { |record| record[:identity] }
+      @trusted_action_payloads[canonical] = identities
+      records.each { |record| @latest_evidence[record[:identity]] = record }
+      @latest_evidence_batch = records
+    end
+
+    def record_task_status_evidence(text)
+      payload = JSON.parse(text)
+      return unless payload.is_a?(Hash) && payload['status'] == 'ok' && payload['tasks'].is_a?(Array)
+
+      states = payload['tasks'].flat_map do |task|
+        next [] unless task.is_a?(Hash)
+        states_from_task(task['status'], task['phase'])
+      end
+      @latest_evidence_batch = [] if states.empty?
+    rescue JSON::ParserError
+      nil
+    end
+
+    def evidence_records(payload, canonical:, sequence:)
+      items = Array(payload['items'])
+      sources = if items.empty?
+        [{
+          'action' => payload['action'], 'task_id' => payload['task_id'],
+          'task_type' => payload['task_type'], 'status' => payload['status'],
+          'phase' => payload['phase'], 'delivery' => payload['delivery'],
+        }]
+      else
+        items
+      end
+
+      sources.filter_map do |item|
+        action = item['action'].to_s
+        task_id = item['task_id']
+        task_type = item['task_type']&.to_s
+        next unless task_id.is_a?(Integer) && task_id.positive?
+
+        identity = [action, task_id, task_type]
+        {
+          identity: identity, action: action, task_id: task_id, task_type: task_type,
+          states: states_from_evidence(item), canonical: canonical, sequence: sequence,
+        }
+      end.tap do |records|
+        # Non-task deferred/error outcomes can still be trusted for exact
+        # unwrapping, but never authorize a task-state claim.
+        if records.empty?
+          records << {
+            identity: [payload['action'].to_s, nil, payload['task_type']&.to_s],
+            action: payload['action'].to_s, task_id: nil, task_type: payload['task_type']&.to_s,
+            states: states_from_evidence(payload), canonical: canonical, sequence: sequence,
+          }
+        end
+      end
+    end
+
+    # Specific phase/delivery always outranks coarse action status. In
+    # particular processing is not queued, and completed+unknown is not sent.
+    def states_from_evidence(payload)
+      phase = payload['phase'].to_s
+      delivery = payload['delivery'].to_s
+      states = case phase
+      when 'queued' then [:queued]
+      when 'processing', 'delivering', 'persisting_delivery' then [:running]
+      when 'retrying' then %i[running retrying]
+      when 'completed' then [:completed]
+      when 'failed' then [:failed]
+      when 'deferred' then [:deferred]
+      else
+        case payload['status'].to_s
+        when 'pending', 'queued' then [:queued]
+        when 'done', 'sent' then [:completed]
+        when 'failed' then [:failed]
+        when 'deferred' then [:deferred]
+        else []
+        end
+      end
+      states << :sent if delivery == 'delivered'
+      states << :failed if delivery == 'failed'
+      states << :running if delivery == 'pending' && !states.include?(:completed)
+      states.uniq
+    end
+
+    def states_from_task(status, phase)
+      values = [status, phase].compact.map(&:to_s)
+      states = []
+      states << :queued if values.include?('queued')
+      states << :running if (values & %w[processing delivering persisting_delivery]).any?
+      states << :retrying if values.include?('retrying')
+      states << :completed if (values & %w[done completed]).any?
+      states << :failed if values.include?('failed')
+      states
+    end
+
+    def operational_claim_unverified?(text)
+      claims = operational_claims(text)
+      return false if claims.empty?
+
+      allowed = {
+        queued: [:queued], running: %i[running retrying], retrying: [:retrying],
+        completed: %i[completed sent], delivered: [:sent], failed: [:failed]
+      }
+      claims.any? do |claim|
+        evidence = evidence_for_claim(claim)
+        evidence.nil? || (allowed.fetch(claim[:kind]) & evidence[:states]).empty?
+      end
+    end
+
+    def operational_claims(text)
+      value = text.to_s
+      segments = value.split(/(?<=[.!?])\s+|[;\n]+/).reject(&:empty?)
+      claims = segments.flat_map do |segment|
+        operational_claim_kinds(segment).map do |kind|
+          {
+            kind: kind,
+            task_id: explicit_task_id(segment),
+            task_type: claim_task_type(segment) || claim_task_type(@text.to_s),
+          }
+        end
+      end
+
+      if operational_followup_request?
+        claims << { kind: :completed, task_id: explicit_task_id(value),
+                    task_type: claim_task_type(value) || claim_task_type(@text.to_s) } if value.match?(/\A\s*(?:готов[оа]?|сделано)[!?.\s]*\z/i)
+        claims << { kind: :delivered, task_id: explicit_task_id(value),
+                    task_type: claim_task_type(value) || claim_task_type(@text.to_s) } if value.match?(/(?:смотри\s+выше|я\s+уже\s+отправил|она\s+пришла|вс[её]\s+есть|уже\s+в\s+чате|в\s+чате)[!?.\s]*\z/i)
+      end
+
+      (claims + structured_operational_claims(value)).uniq
+    end
+
+    def operational_claim_kinds(value)
+      kinds = []
+      subject = '(?:картинк|изображени|задач|трек|генераци)\\w*'
+      en_subject = '(?:image|task|track|generation)'
+      kinds << :queued if value.match?(/#{en_subject}.{0,40}\b(?:queued|enqueued)\b|#{subject}.{0,50}(?:в\s+очеред|поставлен\w*\s+в\s+очеред)|поставил\w*\s+в\s+очеред/i)
+      kinds << :retrying if value.match?(/#{en_subject}.{0,40}\bretrying\b|#{subject}.{0,50}(?:повторн\w*\s+попыт|перезапущ)/i)
+      kinds << :running if value.match?(/#{en_subject}.{0,40}\b(?:running|processing|still\s+in\s+(?:the\s+)?oven)\b|#{subject}.{0,60}(?:в\s+работ|обрабаты|генериру(?:ется|ю|ем)|рису(?:ется|ю|ем)|в\s+печ)|(?:ещ[её]|вс[её])\s+(?:в\s+)?печ/i)
+      completion_link = '(?:\\s+|\\s*[,—:-]\\s*)' \
+                        '(?:(?:задача\\s*)?#?\\d+\\s*[,—:-]?\\s*)?' \
+                        '(?:(?:уже|успешно|полностью|наконец|теперь)\\s+){0,2}'
+      completed_ru = '(?:' \
+                     "картинка\\b#{completion_link}(?<!будет\\s)(?:готова|сгенерирована|завершена)|" \
+                     "изображение\\b#{completion_link}(?<!будет\\s)(?:готово|сгенерировано|завершено)|" \
+                     "задача\\b#{completion_link}(?<!будет\\s)(?:готова|завершена)|" \
+                     "трек\\b#{completion_link}(?<!будет\\s)(?:готов|сгенерирован|заверш[её]н)|" \
+                     "генерация\\b#{completion_link}(?<!будет\\s)(?:готова|завершена)" \
+                     ')\\b'
+      kinds << :completed if value.match?(/#{en_subject}.{0,40}\b(?:completed|generated|done)\b|#{completed_ru}/i)
+      kinds << :delivered if value.match?(/#{en_subject}.{0,40}\b(?:delivered|sent)\b|#{subject}.{0,60}(?<!будет\s)(?:отправлен|доставлен|уже.{0,20}(?:выше|в\s+чат))/i)
+      kinds << :failed if value.match?(/#{en_subject}.{0,40}\bfailed\b|#{subject}.{0,50}(?:упал|не\s+удал|ошибк)/i)
+      kinds.uniq
+    end
+
+    # JSON examples are allowed as syntax examples, but a literal that carries
+    # a task identity plus lifecycle fields is still an operational claim. Parse
+    # those fields instead of exempting the whole code/JSON block by context.
+    def structured_operational_claims(text)
+      json_candidates(text).flat_map do |candidate|
+        structured_claim_nodes(JSON.parse(candidate))
+      rescue JSON::ParserError
+        []
+      end.uniq
+    end
+
+    def structured_claim_nodes(node)
+      case node
+      when Array
+        node.flat_map { |item| structured_claim_nodes(item) }
+      when Hash
+        hash = node.transform_keys(&:to_s)
+        nested = hash.values.select { |value| value.is_a?(Hash) || value.is_a?(Array) }
+                     .flat_map { |value| structured_claim_nodes(value) }
+        task_id = hash['task_id'] || hash['id']
+        action = hash['action'].to_s
+        task_type = hash['task_type'].to_s.empty? ? hash['type'].to_s : hash['task_type'].to_s
+        identified = task_id.is_a?(Integer) && task_id.positive?
+        identified ||= action.match?(/\A(?:generate_image|compose_song|add_vocals|cover_audio|cover_art|convert_to_wav|separate_vocals)\z/)
+        identified ||= task_type.match?(/\A(?:image_generate|suno_[a-z0-9_]+)\z/)
+        return nested unless identified
+
+        phase = hash['phase'].to_s
+        status = hash['status'].to_s
+        delivery = hash['delivery'].to_s
+        kinds = case phase
+        when 'queued' then [:queued]
+        when 'processing', 'delivering', 'persisting_delivery' then [:running]
+        when 'retrying' then [:retrying]
+        when 'completed' then [:completed]
+        when 'failed' then [:failed]
+        else
+          case status
+          when 'queued', 'pending' then [:queued]
+          when 'sent', 'done', 'completed' then [:completed]
+          when 'failed' then [:failed]
+          else []
+          end
+        end
+        kinds << :delivered if delivery == 'delivered'
+        kinds << :failed if delivery == 'failed'
+        inferred_type = if task_type == 'image_generate' || task_type == 'suno_cover_art' || action == 'generate_image' || action == 'cover_art'
+          :image
+        elsif task_type.start_with?('suno_') || %w[compose_song add_vocals cover_audio convert_to_wav separate_vocals].include?(action)
+          :audio
+        else
+          claim_task_type(task_type) || claim_task_type(action)
+        end
+        own = kinds.uniq.map do |kind|
+          { kind: kind, task_id: task_id.is_a?(Integer) && task_id.positive? ? task_id : nil,
+            task_type: inferred_type }
+        end
+        own + nested
+      else
+        []
+      end
+    end
+
+    def evidence_for_claim(claim)
+      candidates = if claim[:task_id]
+        @latest_evidence.values.select { |record| record[:task_id] == claim[:task_id] }
+      else
+        @latest_evidence_batch.select { |record| record[:task_id] }
+      end
+      candidates = candidates.select { |record| task_type_matches?(record[:task_type], claim[:task_type]) } if claim[:task_type]
+      candidates.uniq { |record| record[:identity] }.one? ? candidates.first : nil
+    end
+
+    def explicit_task_id(text)
+      match = text.to_s.match(/(?:задач[аи]?|task)\s*#?\s*(\d+)|#(\d+)/i)
+      (match&.captures&.compact&.first || 0).to_i.then { |id| id.positive? ? id : nil }
+    end
+
+    def claim_task_type(text)
+      value = text.to_s
+      return :image if value.match?(/картинк|изображени|image|рисунк/i)
+      return :audio if value.match?(/трек|песн|аудио|song|track|music/i)
+      nil
+    end
+
+    def task_type_matches?(actual, requested)
+      return true unless requested
+      value = actual.to_s
+      case requested
+      when :image then value.include?('image') || value.include?('cover_art')
+      when :audio
+        return false if value == 'suno_cover_art' || value.include?('cover_art')
+        value.include?('suno') || value.include?('audio') || value.include?('vocal') || value.include?('separation')
+      else value == requested.to_s
+      end
+    end
+
+    def operational_followup_request?
+      @text.to_s.match?(/(?:где|готов|пришл|пришла|отправ|достав|статус|задач|картинк|изображени|трек|ещ[её]|what.*status|where.*(?:image|task|track))/i)
+    end
+
+    def append_trusted_task_ids(text)
+      claims = operational_claims(text)
+      matched = claims.filter_map { |claim| evidence_for_claim(claim) }
+      records = claims.empty? || matched.empty? ? @latest_evidence_batch : matched
+      ids = records.filter_map { |record| record[:task_id] }.uniq
+      return text if ids.empty?
+      missing = ids.reject { |id| text.match?(/(?:задач[аи]?\s*#?\s*|#)#{Regexp.escape(id.to_s)}\b/i) }
+      return text if missing.empty?
+
+      label = missing.length == 1 ? "задача ##{missing.first}" : "задачи: #{missing.map { |id| "##{id}" }.join(', ')}"
+      "#{text.rstrip} (#{label})"
+    end
+
+    def tool_payload_node?(node)
+      case node
+      when Array
+        node.any? { |item| tool_payload_node?(item) }
+      when Hash
+        keys = node.keys.map(&:to_s)
+        return true if (keys & %w[tool_call tool_calls function_call tool_use tool_use_id]).any?
+        return true if keys.include?('function') && node['function'].is_a?(Hash)
+        return true if %w[tool_use tool_call function_call].include?((node['type'] || node[:type]).to_s)
+        return true if keys.include?('name') && (keys & %w[arguments input]).any?
+        name = node['name'] || node[:name] || node['action'] || node[:action]
+        return true if name && Agent::ToolRegistry.find(name.to_s)
+        node.values.any? { |value| value.is_a?(Hash) || value.is_a?(Array) ? tool_payload_node?(value) : false }
+      else
+        false
+      end
+    end
+
+    def json_candidates(text)
+      candidates = [text.to_s.strip]
+      text.to_s.scan(/```(?:json)?\s*(.*?)```/mi) { |match| candidates << match.first.strip }
+      candidates.concat(balanced_json_fragments(text.to_s))
+      candidates.reject(&:empty?).uniq
+    end
+
+    def balanced_json_fragments(text)
+      fragments = []
+      stack = []
+      start = nil
+      quote = false
+      escaped = false
+      text.each_char.with_index do |char, index|
+        if quote
+          if escaped
+            escaped = false
+          elsif char == '\\'
+            escaped = true
+          elsif char == '"'
+            quote = false
+          end
+          next
+        end
+        if char == '"'
+          quote = true unless stack.empty?
+        elsif char == '{' || char == '['
+          start = index if stack.empty?
+          stack << char
+        elsif char == '}' || char == ']'
+          next if stack.empty?
+          expected = char == '}' ? '{' : '['
+          if stack.last == expected
+            stack.pop
+            if stack.empty? && start
+              fragments << text[start..index]
+              start = nil
+            end
+          else
+            stack.clear
+            start = nil
+          end
+        end
+      end
+      fragments
+    end
+
+    def canonical_json(value)
+      normalized = case value
+      when Hash
+        value.keys.map(&:to_s).sort.each_with_object({}) do |key, out|
+          original_key = value.key?(key) ? key : value.keys.find { |candidate| candidate.to_s == key }
+          out[key] = JSON.parse(canonical_json(value[original_key]))
+        end
+      when Array
+        value.map { |item| JSON.parse(canonical_json(item)) }
+      else
+        value
+      end
+      JSON.generate(normalized)
     end
 
     def truncate(str)

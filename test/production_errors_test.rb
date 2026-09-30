@@ -121,6 +121,7 @@ class BackgroundTaskTest < BotTest
     task.mark_failed!('timeout')
     task.reload
     assert_equal 'failed', task.status
+    assert_equal 'failed', task.lifecycle_phase
     assert_equal 'timeout', task.result_hash['error']
   end
 
@@ -131,6 +132,8 @@ class BackgroundTaskTest < BotTest
     task.mark_done!({ clips: 2 })
     task.reload
     assert_equal 'done', task.status
+    assert_equal 'completed', task.lifecycle_phase
+    assert_equal 'unknown', task.delivery_status
     assert_equal 2, task.result_hash['clips']
   end
 
@@ -228,6 +231,8 @@ class TaskRunnerTest < BotTest
     task.reload
     assert_equal 1, task.attempts
     assert_equal 'pending', task.status  # not yet timed out, still pending
+    assert_equal 'retrying', task.lifecycle_phase
+    assert_equal 1, task.retry_count
   end
 
   # Handler exception when at max_attempts — marks failed and notifies chat
@@ -263,6 +268,7 @@ class TaskRunnerTest < BotTest
 
     task.reload
     assert_equal 'done', task.status
+    assert_equal 'completed', task.lifecycle_phase
   end
 
   def test_poll_cycle_reports_global_dispatch_error
@@ -501,49 +507,6 @@ class SunoFilenameTest < BotTest
     assert_equal 'Just_Title.mp3', name
   end
 
-  # Regression: each clip from sendMediaGroup must be saved as a bot Message row
-  # so later user replies pointing at the clip's message_id resolve cleanly.
-  def test_persist_bot_media_rows_creates_row_per_clip
-    handler = SunoTaskHandler.new
-    messages = [OpenStruct.new(message_id: 1001, message_thread_id: nil),
-                OpenStruct.new(message_id: 1002, message_thread_id: 50)]
-    before = Message.count
-    handler.send(:persist_bot_media_rows, -100, messages, 'Прогулки', { 'lyrics' => 'x' })
-    assert_equal before + 2, Message.count
-    rows = Message.where(chat_id: -100).order(:message_id).last(2)
-    assert_equal 'bot', rows.first.role
-    assert_equal 1001, rows.first.message_id
-    assert_equal 1002, rows.last.message_id
-    assert_equal 50,   rows.last.message_thread_id
-    assert_match(/Прогулки/, rows.first.body)
-    assert_match(%r{\(1/2\)}, rows.first.body)
-    assert_match(%r{\(2/2\)}, rows.last.body)
-  end
-
-  # persist_bot_media_rows: hash-style response (Net::HTTP response) works too
-  def test_persist_bot_media_rows_handles_hash_response
-    handler = SunoTaskHandler.new
-    messages = [{ 'message_id' => 2001, 'message_thread_id' => nil }]
-    before = Message.count
-    handler.send(:persist_bot_media_rows, -100, messages, 'Test', {})
-    assert_equal before + 1, Message.count
-    assert_equal 2001, Message.order(:id).last.message_id
-  end
-
-  # Regression: suno AUDIO media-group rows must never be flagged as photos.
-  # persist_bot_reply (the centralized write path) extracts photo file_ids
-  # from photo sends — an audio message has photo nil (or, defensively, an
-  # empty array if Telegram's shape ever changes), so attachment_photo_file_id
-  # must stay nil and the row must not serialize with `photo: true`.
-  def test_persist_bot_media_rows_audio_rows_have_no_photo_file_id
-    handler = SunoTaskHandler.new
-    messages = [OpenStruct.new(message_id: 3001, message_thread_id: nil, photo: nil),
-                OpenStruct.new(message_id: 3002, message_thread_id: nil, photo: [])]
-    handler.send(:persist_bot_media_rows, -100, messages, 'Track', {})
-    rows = Message.where(chat_id: -100, message_id: [3001, 3002]).order(:message_id)
-    assert_equal 2, rows.size
-    rows.each { |r| assert_nil r.attachment_photo_file_id }
-  end
 end
 
 # ==========================================================================
@@ -617,7 +580,7 @@ class RunnerContentFilterTest < BotTest
       text: 'something inappropriate', context: '[]', knowledge: '',
       radio: nil, chat_id: 100, user: @user
     )
-    assert_equal 'жпт не жпт', runner.run
+    assert_equal Agent::Runner::SAFE_FAILURE_REPLY, runner.run
   end
 
   # Overloaded: all retries exhausted, call_raw returns nil → Runner returns fallback
@@ -628,7 +591,7 @@ class RunnerContentFilterTest < BotTest
       text: 'hi', context: '[]', knowledge: '',
       radio: nil, chat_id: 100, user: @user
     )
-    assert_equal 'жпт не жпт', runner.run
+    assert_equal Agent::Runner::SAFE_FAILURE_REPLY, runner.run
   end
 
   # Tool call followed by content filtering on second call → forced final returns fallback
@@ -642,7 +605,7 @@ class RunnerContentFilterTest < BotTest
       text: 'go', context: '[]', knowledge: '',
       radio: nil, chat_id: 100, user: @user
     )
-    assert_equal 'жпт не жпт', runner.run
+    assert_equal Agent::Runner::SAFE_FAILURE_REPLY, runner.run
   end
 end
 
@@ -896,22 +859,35 @@ class ChatContextTest < BotTest
     assert_equal '', result
   end
 
-  # Regression: context must NOT be filtered by message_thread_id.
+  # Regression: normal groups keep full-chat context when no confirmed forum
+  # topic is supplied. Telegram can still store reply-root thread metadata on
+  # individual messages in these chats.
   # In non-forum supergroups Telegram auto-tags any reply with the root
   # message's id as thread_id, which collapsed the context window to one
   # reply chain. See 2026-04-19 incident (gpt.log showed context = 1 msg).
-  def test_context_is_not_filtered_by_thread_id
+  def test_non_forum_context_is_not_filtered_by_reply_root_metadata
     user_message(chat_id: 100, body: 'hello 1', user: @user)
     user_message(chat_id: 100, body: 'hello 2', user: @user, attrs: { message_thread_id: 999 })
     user_message(chat_id: 100, body: 'hello 3', user: @user, attrs: { message_thread_id: 888 })
 
     obj = Object.new
     obj.extend(ChatContext)
-    # Even when we're nominally "in" thread 999, we must still see messages
-    # from other threads — thread_id is advisory, not a filter.
-    result = obj.get_chat_context(100, thread_id: 999)
+    result = obj.get_chat_context(100)
     bodies = JSON.parse(result).map { |m| m['msg'] }
     assert_equal ['hello 1', 'hello 2', 'hello 3'], bodies
+  end
+
+  def test_forum_context_is_scoped_to_confirmed_topic
+    user_message(chat_id: 100, body: 'general', user: @user)
+    user_message(chat_id: 100, body: 'topic 999', user: @user, attrs: { message_thread_id: 999 })
+    user_message(chat_id: 100, body: 'topic 888', user: @user, attrs: { message_thread_id: 888 })
+
+    obj = Object.new
+    obj.extend(ChatContext)
+    rows = JSON.parse(obj.get_chat_context(100, thread_id: 999))
+
+    assert_equal ['topic 999'], rows.map { |m| m['msg'] }
+    assert_equal [999], rows.map { |m| m['thread'] }
   end
 
   # get_relevant_knowledge returns empty string when knowledge is not configured
@@ -960,6 +936,30 @@ class GptHelpersWrapperTest < BotTest
     bodies = parsed.map { |m| m['msg'] }
     assert_includes bodies, 'hello'
     refute_includes bodies, 'other chat'
+  end
+
+  def test_get_chat_context_only_scopes_thread_for_confirmed_forum
+    user_message(chat_id: 100, body: 'general', user: @user)
+    user_message(chat_id: 100, body: 'forum topic', user: @user,
+                 attrs: { message_thread_id: 999 })
+    user_message(chat_id: 100, body: 'other topic', user: @user,
+                 attrs: { message_thread_id: 888 })
+
+    build_command = lambda do |is_forum|
+      msg = OpenStruct.new(text: 'бот привет', message_id: 1, reply_to_message: nil,
+                           message_thread_id: 999,
+                           chat: OpenStruct.new(is_forum: is_forum))
+      Commands::GptChat.new(CommandContext.new(
+        bot: nil, message: msg, user: @user, chat_id: 100, radio: nil,
+        reply_master: OpenStruct.new, cmd: 'бот привет'
+      ))
+    end
+
+    non_forum = JSON.parse(build_command.call(false).send(:get_chat_context)).map { |m| m['msg'] }
+    forum = JSON.parse(build_command.call(true).send(:get_chat_context)).map { |m| m['msg'] }
+
+    assert_equal ['general', 'forum topic', 'other topic'], non_forum
+    assert_equal ['forum topic'], forum
   end
 
   # MessageResponder#deliver persists bot reply with Telegram message_id
@@ -1436,39 +1436,74 @@ class SunoSendAudioDeliveryTest < BotTest
                   .select { |t| t.params_hash['event_type'] == 'song_delivery_failed' }
   end
 
+  def cache_song(task)
+    @handler.send(:cache_suno_delivery_result, task, clips)
+  end
+
+  def cycle(task, api)
+    @handler.call(BackgroundTask.find(task.id), api)
+  end
+
   def test_timeout_exhausts_retries_then_notifies_chat_and_agent
     api = make_api(media_group_failures: 99)
     task = make_task
-    @handler.send(:send_audio, api, task, clips, 'Тянем', task.params_hash)
+    cache_song(task)
+    2.times { assert_equal :pending, cycle(task, api) }
+    assert_equal :failed, cycle(task, api)
 
-    assert_equal 4, api.calls.count { |c| c[0] == :sendMediaGroup }, '1 attempt + 3 retries'
+    assert_equal 3, api.calls.count { |c| c[0] == :sendMediaGroup }, 'one attempt per worker cycle'
     notify = api.calls.find { |c| c[0] == :sendMessage }
     assert notify, 'chat must be told the delivery failed'
     assert_match(/не вышло/, notify[1][:text])
     events = delivery_failed_events
     assert_equal 1, events.size
     assert_match(/Тянем/, events.first.params_hash['summary'])
+    assert_equal task.id, events.first.parent_task_id
+    assert_equal 'failed', task.reload.delivery_status
   end
 
   def test_timeout_then_success_delivers_without_failure_event
     api = make_api(media_group_failures: 1)
     task = make_task
-    @handler.send(:send_audio, api, task, clips, 'Тянем', task.params_hash)
+    cache_song(task)
+    assert_equal :pending, cycle(task, api)
+    assert_equal :pending, cycle(task, api)
+    assert_equal :done, cycle(task, api)
 
     assert_equal 2, api.calls.count { |c| c[0] == :sendMediaGroup }, 'timeout must be retried'
     assert_empty delivery_failed_events
+    assert_equal 'delivered', task.reload.delivery_status
+    assert_equal 'completed', task.lifecycle_phase
     assert Message.where(chat_id: CHAT, role: 'bot').where('body LIKE ?', '%Тянем%').exists?,
            'delivered media-group row must be persisted'
   end
 
-  def test_no_clips_downloaded_notifies_instead_of_silent_skip
+  def test_truthy_malformed_media_group_response_is_not_delivery_evidence
+    api = make_api(media_group_failures: 0)
+    api.define_singleton_method(:sendMediaGroup) do |**_kw|
+      api.calls << [:sendMediaGroup]
+      { 'ok' => true, 'result' => [{ 'message_id' => '901' }] }
+    end
+    task = make_task
+    cache_song(task)
+    2.times { assert_equal :pending, cycle(task, api) }
+    assert_equal :failed, cycle(task, api)
+
+    assert_equal 'failed', task.reload.delivery_status
+    assert_equal 1, delivery_failed_events.size
+    refute Message.where(chat_id: CHAT, role: 'bot').where('body LIKE ?', '%Тянем%').exists?
+  end
+
+  def test_no_clips_downloaded_retries_across_cycles_then_notifies
     @handler.define_singleton_method(:download_to_tempfile) { |*_args, **_kw| nil }
     api = make_api(media_group_failures: 0)
     task = make_task
-    @handler.send(:send_audio, api, task, clips, 'Тянем', task.params_hash)
+    cache_song(task)
+    2.times { assert_equal :pending, cycle(task, api) }
+    assert_equal :failed, cycle(task, api)
 
     assert_equal 0, api.calls.count { |c| c[0] == :sendMediaGroup }
-    assert_equal 1, delivery_failed_events.size
+    assert_equal 'song_download_failed', BackgroundTask.find(task.id).result_hash['error']
   end
 
   # notify_delivery_failed must be non-raising: if emit_agent_event blew up
@@ -1478,22 +1513,33 @@ class SunoSendAudioDeliveryTest < BotTest
     @handler.define_singleton_method(:emit_agent_event) { |*_args, **_kw| raise 'db lock' }
     api = make_api(media_group_failures: 99)
     task = make_task
-    @handler.send(:send_audio, api, task, clips, 'Тянем', task.params_hash)
+    cache_song(task)
+    3.times { cycle(task, api) }
 
     assert_equal 1, api.calls.count { |c| c[0] == :sendMessage },
                  'exactly one failure notification despite emit_agent_event raising'
   end
 
-  # A failure AFTER a successful sendMediaGroup (persist/lyrics follow-ups)
-  # means the user HAS the song — must not produce a delivery-failed event.
-  def test_post_delivery_failure_does_not_notify
-    @handler.define_singleton_method(:persist_bot_media_rows) { |*_args, **_kw| raise 'boom' }
+  # Telegram acceptance alone is not durable delivery evidence. If the bot
+  # cannot persist every confirmed message ID, the paid generation stays
+  # terminal but delivery is failed and surfaced; it is never regenerated.
+  def test_persistence_failure_never_marks_delivered_or_resends_generation
     api = make_api(media_group_failures: 0)
     task = make_task
-    @handler.send(:send_audio, api, task, clips, 'Тянем', task.params_hash)
+    cache_song(task)
+    assert_equal :pending, cycle(task, api)
+    Message.stub(:persist_bot_reply, nil) do
+      2.times { assert_equal :pending, cycle(task, api) }
+      assert_equal :failed, cycle(task, api)
+    end
 
-    assert_empty delivery_failed_events
-    assert_equal 0, api.calls.count { |c| c[0] == :sendMessage }
+    persisted = BackgroundTask.find(task.id)
+    assert_equal 'delivered', persisted.delivery_status
+    assert_equal 'failed', persisted.lifecycle_phase
+    event = BackgroundTask.where(chat_id: CHAT, task_type: 'agent_event').last
+    assert_equal 'song_persistence_failed', event.params_hash['event_type']
+    assert_equal 1, api.calls.count { |c| c[0] == :sendMediaGroup }, 'must not resend accepted media'
+    assert_equal 0, api.calls.count { |c| c[0] == :sendMessage }, 'must not claim accepted media was not sent'
   end
 end
 

@@ -104,7 +104,7 @@ Agent::ToolRegistry.register(
     end
 
     PendingAudioRequest.clear_for(ctx) # a task is being created — the follow-up is moot
-    BackgroundTask.create!(
+    task = BackgroundTask.create!(
       task_type: 'suno_cover_audio',
       chat_id: ctx[:chat_id],
       max_attempts: 60,
@@ -123,10 +123,15 @@ Agent::ToolRegistry.register(
         with_cover_art:   args['with_cover_art'] == true,
         model:            model, # validated; a retry keeps the failed task's model unless overridden
         retry_of_task_id: retry_src&.id,
+        forum_thread_id:  ctx[:forum_thread_id] || rp['forum_thread_id'],
         user_uid:         ctx[:user]&.uid,
       }.to_json
     )
     suffix = args['with_cover_art'] == true ? ' (после трека придёт обложка)' : ''
-    "Делаю кавер — скоро будут 2 варианта в чате#{suffix}"
+    Agent::ToolResult.action(
+      status: :queued, action: 'cover_audio', task_id: task.id, task_type: task.task_type,
+      phase: :queued, delivery: :pending,
+      user_text: "Делаю кавер — скоро будут 2 варианта в чате#{suffix}"
+    )
   }
 )

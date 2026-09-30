@@ -1,4 +1,5 @@
 require 'httparty'
+require_relative 'agent/error_reporter'
 
 # Generic Bearer+JSON HTTP client for model-provider APIs. Stateless except
 # for config; thin wrapper over HTTParty with shared auth + logging.
@@ -26,7 +27,7 @@ class ModelProviderClient
     resp = HTTParty.post("#{@base_url}#{path}",
       body: body.to_json, headers: headers, timeout: timeout)
     log("POST #{path}", t0, resp.code)
-    raise "#{@tag} POST #{path}: #{resp.code} #{redact_body(resp.body)}" unless resp.code.between?(200, 299)
+    raise "#{safe(@tag)} POST #{safe(path)}: #{resp.code} #{redact_body(resp.body)}" unless resp.code.between?(200, 299)
     resp.parsed_response
   end
 
@@ -37,7 +38,7 @@ class ModelProviderClient
     log("GET #{path}", t0, resp.code)
     [resp.code, resp.parsed_response]
   rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
-    LOGGER.warn "#{@tag} GET #{path}: #{e.class}: #{e.message}"
+    LOGGER.warn "#{safe(@tag)} GET #{safe(path)}: #{e.class}: #{safe(e.message)}"
     [nil, nil]
   end
 
@@ -51,7 +52,11 @@ class ModelProviderClient
 
   def log(label, t0, code)
     ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round
-    LOGGER.debug "#{@tag} #{label} took=#{ms}ms code=#{code}"
+    LOGGER.debug "#{safe(@tag)} #{safe(label)} took=#{ms}ms code=#{safe(code)}"
+  end
+
+  def safe(value)
+    Agent::ErrorReporter.sanitize(value)
   end
 
   # Redact + truncate a response body for safe inclusion in a raised exception
@@ -62,8 +67,8 @@ class ModelProviderClient
   # via TaskRunner's notify_chat. Same defensive pattern as
   # SunoClient#format_suno_error.
   def redact_body(body)
-    s = body.to_s
-    s = s.gsub(%r{data:[^,]+;base64,[A-Za-z0-9+/=]+}, '<base64-redacted>')
+    s = body.to_s.gsub(%r{data:[^,]+;base64,[A-Za-z0-9+/=]+}, '<base64-redacted>')
+    s = safe(s)
     s.length > 400 ? "#{s[0..400]}...(truncated)" : s
   end
 end

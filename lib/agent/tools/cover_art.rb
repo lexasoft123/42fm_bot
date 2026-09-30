@@ -47,16 +47,21 @@ Agent::ToolRegistry.register(
     end
 
     source_title = source&.params_hash&.dig('title')
-    BackgroundTask.create!(
+    task = BackgroundTask.create!(
       task_type: 'suno_cover_art',
       chat_id: ctx[:chat_id],
       max_attempts: 60,
       params: {
         source_task_id: suno_task_id,
         source_title:   source_title,
+        forum_thread_id: ctx[:forum_thread_id],
         user_uid:       ctx[:user]&.uid,
       }.to_json
     )
-    "Рисую обложку для «#{source_title || suno_task_id}» — скоро будет в чате"
+    Agent::ToolResult.action(
+      status: :queued, action: 'cover_art', task_id: task.id, task_type: task.task_type,
+      phase: :queued, delivery: :pending,
+      user_text: "Рисую обложку для «#{source_title || suno_task_id}» — скоро будет в чате"
+    )
   }
 )

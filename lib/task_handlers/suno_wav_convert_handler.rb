@@ -1,4 +1,5 @@
 require_relative 'agent_event_emitter'
+require_relative 'suno_delivery'
 require_relative '../media_download'
 
 # Handles `suno_wav_convert` tasks: fetch the audio_id for a given clip of
@@ -13,11 +14,14 @@ require_relative '../media_download'
 class SunoWavConvertHandler
   include AgentEventEmitter
   include MediaDownload
+  include SunoDelivery
 
   MAX_SUBMIT_FAILURES    = 3
   MAX_GENERATION_RETRIES = 3
 
   def call(task, api)
+    return persist_wav_receipt(task) if suno_delivery_receipt(task)
+    return deliver_cached_wav(task, api) if suno_delivery_result(task)
     task.external_id.nil? ? submit(task, api) : poll_and_deliver(task, api)
   end
 
@@ -38,7 +42,7 @@ class SunoWavConvertHandler
       idx = (p['clip_index'] || 1).to_i.clamp(1, [ids.size, 1].max)
       audio_id = ids[idx - 1].to_s
       if audio_id.empty?
-        LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: cannot resolve audio_id for source #{source_task_id} (clip_index=#{idx} ids=#{ids.inspect})"
+        LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: cannot resolve audio_id for requested clip_index=#{idx}"
         mark_failed_and_notify(task, api, 'wav_unknown_audio_id')
         return :failed
       end
@@ -57,24 +61,25 @@ class SunoWavConvertHandler
       end
       attempts = (p['submit_failures'] || 0) + 1
       p['submit_failures'] = attempts
-      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
       if attempts >= MAX_SUBMIT_FAILURES
-        LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submit_failures=#{attempts} (max #{MAX_SUBMIT_FAILURES}), giving up: #{e.message}"
+        ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
+        LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submit_failures=#{attempts} (max #{MAX_SUBMIT_FAILURES}), giving up: #{safe_suno_detail(e.message)}"
         mark_failed_and_notify(task, api, 'wav_submit_failed_after_retries')
         return :failed
       end
-      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submit_failures=#{attempts}/#{MAX_SUBMIT_FAILURES} — will retry: #{e.message}"
+      ActiveRecord::Base.connection_pool.with_connection { task.mark_retrying!(params: p.to_json) }
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submit_failures=#{attempts}/#{MAX_SUBMIT_FAILURES} — will retry: #{safe_suno_detail(e.message)}"
       raise e
     end
 
-    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted wav-convert #{wav_task_id} for source #{source_task_id} audio #{audio_id}"
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted wav-convert"
     ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: wav_task_id) }
     :pending
   end
 
   def poll_and_deliver(task, api)
     result = SunoClient.new.poll_wav_once(task.external_id)
-    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: polling #{task.external_id} (attempt #{task.attempts + 1}/#{task.max_attempts}) → #{result.inspect}"
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: poll attempt #{task.attempts + 1}/#{task.max_attempts} → #{result.is_a?(Hash) && result[:wav_url] ? 'wav ready' : safe_suno_detail(result.inspect)}"
 
     case result
     when :pending
@@ -87,7 +92,7 @@ class SunoWavConvertHandler
       LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno transient failure for #{task.external_id} (retry #{retries}/#{MAX_GENERATION_RETRIES})"
       if retries <= MAX_GENERATION_RETRIES
         ActiveRecord::Base.connection_pool.with_connection do
-          task.update!(external_id: nil, params: p.to_json)
+          task.mark_retrying!(external_id: nil, params: p.to_json)
         end
         return :pending
       end
@@ -107,22 +112,58 @@ class SunoWavConvertHandler
         mark_failed_and_notify(task, api, 'wav_failed', error_detail: result[:error])
         :failed
       elsif result[:wav_url]
-        LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result[:wav_url]}"
-        delivered = send_wav(api, task.chat_id, result[:wav_url], task.params_hash, bg_task_external_id: task.external_id)
-        if delivered
-          ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
-          :done
-        else
-          mark_failed_and_notify(task, api, 'wav_delivery_failed')
-          :failed
-        end
+        LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generation complete"
+        cache_suno_delivery_result(task, result)
       else
-        LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: unknown poll_wav_once Hash shape: #{result.inspect}"
+        LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: unknown poll_wav_once Hash shape: #{safe_suno_detail(result.inspect)}"
         mark_failed_and_notify(task, api, 'wav_unknown_response_shape',
-                               error_detail: "unexpected poll Hash: #{result.inspect}")
+                               error_detail: "unexpected poll Hash: #{safe_suno_detail(result.inspect)}")
         :failed
       end
     end
+  end
+
+  def deliver_cached_wav(task, api)
+    p = task.params_hash
+    result = p['delivery_result']
+    response = send_wav(api, task.chat_id, result['wav_url'], p)
+    messages = telegram_messages(response, expected_count: 1)
+    if messages && cache_suno_delivery_receipt(task, messages)
+      :pending
+    elsif retry_suno_delivery(task, 'delivery_failures')
+      :pending
+    else
+      mark_failed_and_notify(task, api, 'wav_delivery_failed')
+      :failed
+    end
+  end
+
+  def persist_wav_receipt(task)
+    p = task.params_hash
+    receipt = p.fetch('delivery_receipt').first
+    title = p['source_title'].to_s
+    existing = Message.find_by(chat_id: task.chat_id, message_id: receipt['message_id'])
+    row = existing || Message.persist_bot_reply(chat_id: task.chat_id, body: "[wav: #{title}]",
+      response: receipt_response(receipt), bg_task_external_id: task.external_id,
+      message_thread_id: p['forum_thread_id'])
+    unless row&.persisted?
+      return :pending if retry_suno_delivery(task, 'persistence_failures', delivery_status: 'delivered')
+      ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!('wav_persistence_failed', delivery_status: 'delivered') }
+      emit_agent_event(task, 'wav_persistence_failed',
+        summary: 'WAV принят Telegram, но не сохранён локально; не отправляй его повторно.')
+      return :failed
+    end
+    ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(p['delivery_result'], delivery_status: 'delivered') }
+    :done
+  rescue => e
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}: WAV persistence failed: #{e.class}: #{safe_suno_detail(e.message)}"
+    return :pending if retry_suno_delivery(task, 'persistence_failures', delivery_status: 'delivered')
+    ActiveRecord::Base.connection_pool.with_connection do
+      task.mark_failed!('wav_persistence_failed', delivery_status: 'delivered')
+    end
+    emit_agent_event(task, 'wav_persistence_failed',
+      summary: 'WAV принят Telegram, но не сохранён локально; не отправляй его повторно.')
+    :failed
   end
 
   def send_wav(api, chat_id, wav_url, params, bg_task_external_id: nil)
@@ -135,36 +176,37 @@ class SunoWavConvertHandler
     return false unless tmp
 
     LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_wav: sendAudio → #{File.size(tmp.path)} bytes"
-    retries = 0
     result = begin
-      api.sendAudio(
+      send_params = {
         chat_id: chat_id,
         audio: Faraday::UploadIO.new(tmp.path, 'audio/wav', filename),
         title: title,
         performer: performer.empty? ? '42FM Bot' : performer,
         caption: "🎵 #{title} (WAV)"
-      )
-    rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed, Faraday::TimeoutError => e
-      retries += 1
-      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendAudio retry #{retries}: #{e.class}: #{e.message}"
-      if retries <= 3
-        sleep 3
-        retry
-      end
-      LOGGER.error "[chat=#{chat_id}] #{self.class.name} sendAudio gave up after #{retries} retries"
+      }.merge(forum_send_params(params))
+      api.sendAudio(**send_params)
+    rescue => e
+      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendAudio failed: #{e.class}: #{safe_suno_detail(e.message)}"
       nil
     ensure
       tmp.close
       tmp.unlink rescue nil
     end
 
-    return false unless result
-
-    persist_bot_media_row(chat_id, result, title, bg_task_external_id: bg_task_external_id)
-    true
+    result
   rescue => e
-    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_wav failed: #{e.class}: #{e.message}"
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_wav failed: #{e.class}: #{safe_suno_detail(e.message)}"
     false
+  end
+
+  def telegram_message_id(response)
+    message = response.is_a?(Hash) && response.key?('result') ? response['result'] : response
+    value = if message.respond_to?(:message_id)
+              message.message_id
+            elsif message.is_a?(Hash)
+              message['message_id'] || message[:message_id]
+            end
+    value if value.is_a?(Integer) && value.positive?
   end
 
   # Mirrors SunoTaskHandler#build_filename — Performer_-_Title.wav, Telegram-safe.
@@ -175,24 +217,23 @@ class SunoWavConvertHandler
     "#{name}.wav"
   end
 
-  # Delegates to Message.persist_bot_reply (the centralized bot-side
-  # persistence path), which handles the 'result' envelope itself.
-  def persist_bot_media_row(chat_id, response, title, bg_task_external_id: nil)
-    Message.persist_bot_reply(chat_id: chat_id, body: "[wav: #{title}]", response: response,
-                              bg_task_external_id: bg_task_external_id)
-  end
-
   # See SunoTaskHandler#mark_failed_and_notify for `error_detail` rationale.
   def mark_failed_and_notify(task, api, reason, error_detail: nil)
-    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: WAV #{reason} for #{task.external_id}#{error_detail ? " (#{error_detail})" : ''}"
-    ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(reason) }
+    error_detail = safe_suno_detail(error_detail) if error_detail
+    scrub_terminal_delivery_result!(task)
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: WAV #{reason}#{error_detail ? " (#{error_detail})" : ''}"
+    delivery = reason.to_s.include?('delivery_failed') ? 'failed' : nil
+    ActiveRecord::Base.connection_pool.with_connection do
+      task.mark_failed!(reason, delivery_status: delivery)
+    end
 
     text = 'Не удалось сконвертировать в WAV'
     begin
-      resp = api.sendMessage(chat_id: task.chat_id, text: text)
-      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)
+      resp = api.sendMessage(chat_id: task.chat_id, text: text, **forum_send_params(task.params_hash))
+      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp,
+                                message_thread_id: task.params_hash['forum_thread_id'])
     rescue => e
-      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{safe_suno_detail(e.message)}"
     end
 
     p = task.params_hash

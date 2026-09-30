@@ -8,13 +8,12 @@ module ChatContext
                 'users.uid, users.name, users.first_name, users.last_name'.freeze
 
   def get_chat_context(chat_id, thread_id: nil)
-    # thread_id kept for signature stability; not used as a filter.
-    # Telegram auto-tags any reply in a non-forum supergroup with the root
-    # message_id as thread_id, which is reply-chain metadata — not a topic
-    # marker. Filtering on it collapses context to a single reply thread.
-    # The thread field is still surfaced via serialize_msg for the LLM to use.
-    _ = thread_id
     scope = Message.left_outer_joins(:user).select(ChatContext::SELECT_COLS).where(chat_id: chat_id)
+    # Callers pass thread_id only after confirming that the live Telegram chat
+    # is a forum. A nil value preserves the full-chat behavior needed by normal
+    # groups, where Telegram may use message_thread_id for reply roots rather
+    # than forum topics.
+    scope = scope.where(message_thread_id: thread_id) if thread_id
 
     rows = scope
       .order('messages.created_at DESC')
@@ -25,8 +24,10 @@ module ChatContext
     present = rows.map(&:message_id).compact.to_set
     missing = rows.map(&:reply_to_message_id).compact.reject { |id| present.include?(id) }.uniq
 
-    backfill = missing.empty? ? [] : Message.left_outer_joins(:user).select(ChatContext::SELECT_COLS)
-      .where(chat_id: chat_id, message_id: missing).to_a
+    backfill_scope = Message.left_outer_joins(:user).select(ChatContext::SELECT_COLS)
+      .where(chat_id: chat_id, message_id: missing)
+    backfill_scope = backfill_scope.where(message_thread_id: thread_id) if thread_id
+    backfill = missing.empty? ? [] : backfill_scope.to_a
 
     (backfill + rows).map { |r| ChatContext.serialize_msg(r) }.to_json
   rescue => e

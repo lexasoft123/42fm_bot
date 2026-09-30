@@ -213,6 +213,7 @@ Agent::ToolRegistry.register(
 
     params = { type: type, stem_name: stem_name, mode: mode,
                source_title: source[:title], source_performer: source[:performer],
+               forum_thread_id: ctx[:forum_thread_id],
                user_uid: ctx[:user]&.uid }
     case source[:kind]
     when :suno
@@ -227,7 +228,7 @@ Agent::ToolRegistry.register(
     end
 
     PendingAudioRequest.clear_for(ctx) # a task is being created — the follow-up is moot
-    BackgroundTask.create!(
+    task = BackgroundTask.create!(
       task_type: 'suno_separate_vocals',
       chat_id: ctx[:chat_id],
       max_attempts: 60,
@@ -235,10 +236,14 @@ Agent::ToolRegistry.register(
     )
 
     title = source[:title].to_s.empty? ? 'трек' : "«#{source[:title]}»"
-    case type
-    when 'separate_vocal'      then "Разделяю #{title} на вокал и минус — скоро пришлю 2 дорожки"
-    when 'split_stem'          then "Раскладываю #{title} на все дорожки (до 12) — скоро пришлю"
-    else                            "Вытаскиваю из #{title} дорожку #{stem_name} — скоро пришлю"
-    end
+    user_text = case type
+                when 'separate_vocal' then "Разделяю #{title} на вокал и минус — скоро пришлю 2 дорожки"
+                when 'split_stem' then "Раскладываю #{title} на все дорожки (до 12) — скоро пришлю"
+                else "Вытаскиваю из #{title} дорожку #{stem_name} — скоро пришлю"
+                end
+    Agent::ToolResult.action(
+      status: :queued, action: 'separate_vocals', task_id: task.id, task_type: task.task_type,
+      phase: :queued, delivery: :pending, user_text: user_text
+    )
   }
 )

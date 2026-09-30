@@ -720,7 +720,7 @@ class RunnerBlankReplyOpenaiTest < BotTest
 
   def test_length_stop_returns_stub_without_repeating_the_runaway
     ViFakeGptMaster.enqueue(deepseek_blank('length'))
-    assert_equal 'жпт не жпт', build_runner(text: 'go', user: @user).run
+    assert_equal Agent::Runner::SAFE_FAILURE_REPLY, build_runner(text: 'go', user: @user).run
     assert_equal 1, ViFakeGptMaster.calls.size
   end
 

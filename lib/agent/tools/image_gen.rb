@@ -62,16 +62,19 @@ Agent::ToolRegistry.register(
     end
 
     params = { request: args['prompt'], user_uid: ctx[:user]&.uid, model: model_key }
+    params[:forum_thread_id]    = ctx[:forum_thread_id] if ctx[:forum_thread_id]
     params[:input_images]       = inline.map { |i| { data: i[:data], media_type: i[:media_type] } } if inline.any?
     params[:source_message_ids] = source_ids if source_ids.any?
 
-    BackgroundTask.create!(
+    task = BackgroundTask.create!(
       task_type: 'image_generate',
       chat_id: ctx[:chat_id],
       max_attempts: 60,
       params: params.to_json
     )
-    total.positive? ? 'Редактирование картинки поставлено в очередь и скоро будет отправлено в чат' \
-                    : 'Картинка поставлена в очередь генерации и скоро будет отправлено в чат'
+    user_text = total.positive? ? 'Редактирование картинки поставлено в очередь и скоро будет отправлено в чат' \
+                                : 'Картинка поставлена в очередь генерации и скоро будет отправлена в чат'
+    Agent::ToolResult.action(status: :queued, action: 'generate_image',
+                             task_id: task.id, task_type: 'image_generate', user_text: user_text)
   }
 )

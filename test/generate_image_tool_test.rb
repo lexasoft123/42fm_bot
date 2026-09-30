@@ -65,9 +65,21 @@ class GenerateImageToolTest < BotTest
   end
 
   def test_valid_model_key_persisted
-    call_tool('prompt' => 'кот', 'model' => 'wan-2.7')
+    result = call_tool('prompt' => 'кот', 'model' => 'wan-2.7')
     assert_equal 'wan-2.7', last_params['model']
     assert_equal 'кот',     last_params['request']
+    assert_kind_of Agent::ToolResult, result
+    assert result.action?
+    assert_equal 'queued', result.action_status
+    assert_equal 'generate_image', result.action
+    assert_equal BackgroundTask.where(chat_id: CHAT, task_type: 'image_generate').last.id, result.task_id
+    assert_match(/очеред/, result.user_text)
+  end
+
+  def test_forum_thread_id_is_persisted_for_background_delivery
+    @tool.handler.call({ 'prompt' => 'кот' },
+                       { chat_id: CHAT, user: @user, forum_thread_id: 71 })
+    assert_equal 71, last_params['forum_thread_id']
   end
 
   def test_omitted_model_defaults_to_catalog_default

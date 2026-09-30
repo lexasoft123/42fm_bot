@@ -1,0 +1,12 @@
+#!/usr/bin/env ruby
+require 'bundler/setup'
+require 'ostruct'
+require 'logger'
+require_relative '../lib/settings'
+
+Settings.load!(File.expand_path('../config/settings.yml', __dir__))
+LOGGER = Logger.new($stderr) unless defined?(LOGGER)
+require_relative '../lib/gpt_master'
+require_relative '../lib/agent/model_canary'
+
+puts JSON.pretty_generate(Agent::ModelCanary.new.run)

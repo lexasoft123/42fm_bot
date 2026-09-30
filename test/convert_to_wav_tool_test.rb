@@ -40,18 +40,29 @@ class ConvertToWavToolTest < BotTest
                     bg_task_external_id: bg_task_external_id)
   end
 
-  def call_tool(args, reply_to_message_id: nil)
-    ctx = { chat_id: CHAT, user: @user, reply_to_message_id: reply_to_message_id }
+  def call_tool(args, reply_to_message_id: nil, forum_thread_id: nil)
+    ctx = { chat_id: CHAT, user: @user, reply_to_message_id: reply_to_message_id,
+            forum_thread_id: forum_thread_id }
     @tool.handler.call(args, ctx)
+  end
+
+  def test_forum_thread_is_persisted
+    call_tool({ 'suno_task_id' => 'thread-source' }, forum_thread_id: 43)
+    assert_equal 43, BackgroundTask.where(task_type: 'suno_wav_convert').last.params_hash['forum_thread_id']
   end
 
   def test_explicit_suno_task_id_wins
     make_song(external_id: 'recent-id', title: 'Recent')
     result = call_tool({ 'suno_task_id' => 'explicit-id-123' })
-    assert_match(/Делаю WAV/, result)
+    assert_match(/Делаю WAV/, result.user_text)
     wav = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_wav_convert').last
     assert_equal 'explicit-id-123', wav.params_hash['source_task_id']
     assert_equal 1, wav.params_hash['clip_index'], 'default clip_index is 1'
+    assert_equal 'convert_to_wav', result.action
+    assert_equal wav.id, result.task_id
+    assert_equal 'suno_wav_convert', result.task_type
+    assert_equal 'queued', result.phase
+    assert_equal 'pending', result.delivery
   end
 
   def test_reply_resolution_picks_song_via_bg_task_external_id

@@ -93,14 +93,24 @@ class SeparateVocalsToolTest < BotTest
     BackgroundTask.where(chat_id: CHAT, task_type: 'suno_separate_vocals').last
   end
 
+  def test_forum_thread_is_persisted
+    call_tool({}, audio: audio(source: :message), forum_thread_id: 46)
+    assert_equal 46, last_task.params_hash['forum_thread_id']
+  end
+
   def test_default_mode_separates_vocals_of_attached_audio
     result = call_tool({}, audio: audio(source: :message))
-    assert_match(/вокал и минус/, result)
+    assert_match(/вокал и минус/, result.user_text)
     p = last_task.params_hash
     assert_equal 'separate_vocal', p['type']
     assert_equal TG_URL, p['audio_url']
     assert_nil p['source_task_id']
     assert_equal 'Демо', p['source_title']
+    assert_equal 'separate_vocals', result.action
+    assert_equal last_task.id, result.task_id
+    assert_equal 'suno_separate_vocals', result.task_type
+    assert_equal 'queued', result.phase
+    assert_equal 'pending', result.delivery
   end
 
   def test_modes_map_to_suno_types

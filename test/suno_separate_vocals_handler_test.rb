@@ -26,7 +26,7 @@ class SunoSeparateVocalsHandlerTest < BotTest
 
   class FakeApi
     attr_reader :sent_messages, :media_groups
-    attr_accessor :on_media_group
+    attr_accessor :on_media_group, :media_group_result
 
     def initialize; @sent_messages = []; @media_groups = []; end
 
@@ -39,6 +39,7 @@ class SunoSeparateVocalsHandlerTest < BotTest
       on_media_group&.call(kw)
       media = JSON.parse(kw[:media])
       @media_groups << media
+      return media_group_result unless media_group_result.nil?
       { 'ok' => true, 'result' => media.each_index.map { |i| { 'message_id' => 1000 + @media_groups.size * 20 + i } } }
     end
   end
@@ -128,7 +129,10 @@ class SunoSeparateVocalsHandlerTest < BotTest
     with_client(separate_vocals: ->(**_) { raise 'Suno /api/v1/vocal-removal/generate failed: code=455 maintenance' }) do
       (SunoSeparateVocalsHandler::MAX_SUBMIT_FAILURES - 1).times do |i|
         assert_raises(RuntimeError) { @handler.call(fresh(task), @api) }
-        assert_equal i + 1, fresh(task).params_hash['submit_failures']
+        persisted = fresh(task)
+        assert_equal i + 1, persisted.params_hash['submit_failures']
+        assert_equal 'retrying', persisted.lifecycle_phase
+        assert_equal i + 1, persisted.retry_count
       end
       assert_equal :failed, @handler.call(fresh(task), @api)
     end
@@ -139,7 +143,7 @@ class SunoSeparateVocalsHandlerTest < BotTest
   # --- poll ---
 
   def test_poll_failure_emits_separation_failed_with_detail
-    task = make_task(external_id: 'sep-1', audio_url: 'https://example.com/a.mp3')
+    task = make_task(external_id: 'sep-1', audio_url: 'https://example.com/a.mp3', forum_thread_id: 321)
     with_client(poll_separation_once: ->(_id) { { failed: true, error: 'Suno [500]: separation engine error' } }) do
       assert_equal :failed, @handler.call(task, @api)
     end
@@ -161,15 +165,22 @@ class SunoSeparateVocalsHandlerTest < BotTest
     n.times.map { |i| { name: "Stem#{i + 1}", url: "https://cdn/stem#{i + 1}.mp3" } }
   end
 
-  def test_success_marks_done_before_delivery_and_sends_group
-    task = make_task(external_id: 'sep-1', audio_url: 'https://example.com/a.mp3')
+  def test_success_marks_done_after_confirmed_persisted_delivery
+    task = make_task(external_id: 'sep-1', audio_url: 'https://example.com/a.mp3', forum_thread_id: 606)
     status_at_send = nil
-    @api.on_media_group = ->(_kw) { status_at_send = BackgroundTask.find(task.id).status }
+    thread_at_send = nil
+    @api.on_media_group = lambda do |kw|
+      status_at_send = BackgroundTask.find(task.id).status
+      thread_at_send = kw[:message_thread_id]
+    end
     result = { stems: [{ name: 'Vocals', url: 'https://cdn/v.mp3' }, { name: 'Instrumental', url: 'https://cdn/i.mp3' }] }
     with_client(poll_separation_once: ->(_id) { result }) do
-      assert_equal :done, @handler.call(task, @api)
+      assert_equal :pending, @handler.call(task, @api)
     end
-    assert_equal 'done', status_at_send, 'stem URLs must be in result before the Telegram send'
+    assert_equal :pending, @handler.call(fresh(task), @api)
+    assert_equal :done, @handler.call(fresh(task), @api)
+    assert_equal 'pending', status_at_send, 'completion must not be claimed before Telegram delivery'
+    assert_equal 606, thread_at_send
     assert_equal 1, @api.media_groups.size
     group = @api.media_groups.first
     assert_equal ['Демо (Vocals)', 'Демо (Instrumental)'], group.map { |m| m['title'] }
@@ -178,6 +189,21 @@ class SunoSeparateVocalsHandlerTest < BotTest
     assert_includes bodies, '[стем: Демо — Vocals]'
     assert_includes bodies, '[стем: Демо — Instrumental]'
     assert_empty events, 'full delivery emits no event'
+    persisted = fresh(task)
+    assert_equal 'done', persisted.status
+    assert_equal 'completed', persisted.lifecycle_phase
+    assert_equal 'delivered', persisted.delivery_status
+    assert Message.where(chat_id: CHAT, role: 'bot').all? { |row| row.message_thread_id == 606 }
+  end
+
+  def test_terminal_provider_result_resets_poll_attempt_budget
+    task = make_task(external_id: 'sep-1', audio_url: 'https://example.com/a.mp3')
+    task.update!(attempts: 59)
+    result = { stems: [{ name: 'Vocals', url: 'https://cdn/v.mp3' }] }
+    with_client(poll_separation_once: ->(_id) { result }) do
+      assert_equal :pending, @handler.call(task, @api)
+    end
+    assert_equal 0, fresh(task).attempts
   end
 
   def test_twelve_stems_are_split_into_groups_of_at_most_ten
@@ -186,36 +212,86 @@ class SunoSeparateVocalsHandlerTest < BotTest
     with_client(poll_separation_once: ->(_id) { result }) do
       @handler.call(task, @api)
     end
+    @handler.call(fresh(task), @api)
+    @handler.call(fresh(task), @api)
+    @handler.call(fresh(task), @api)
     assert_equal [10, 2], @api.media_groups.map(&:size)
     assert @api.media_groups[0].first.key?('caption'), 'caption on the first stem of the first group'
     refute @api.media_groups[1].first.key?('caption'), 'no repeated caption on later groups'
   end
 
-  def test_send_failure_after_done_keeps_task_done_and_reports
-    task = make_task(external_id: 'sep-1', audio_url: 'https://example.com/a.mp3')
+  def test_later_batch_failure_keeps_first_receipts_and_never_resends_first_batch
+    task = make_task(external_id: 'sep-1', type: 'split_stem', mode: 'stems',
+                     audio_url: 'https://example.com/a.mp3')
+    result = { stems: stems(11) }
+    @api.on_media_group = ->(_kw) { raise 'second batch failed' if @api.media_groups.size == 1 }
+    with_client(poll_separation_once: ->(_id) { result }) { @handler.call(task, @api) }
+    assert_equal :pending, @handler.call(fresh(task), @api) # first batch accepted
+    assert_equal :pending, @handler.call(fresh(task), @api) # receipts persisted
+    assert_equal :pending, @handler.call(fresh(task), @api)
+    retrying = fresh(task)
+    assert_equal 'pending', retrying.status
+    assert_equal 'retrying', retrying.lifecycle_phase
+    assert_equal 'pending', retrying.delivery_status,
+                 'a bounded retry after partial delivery is not terminal failure evidence'
+    assert_equal :pending, @handler.call(fresh(task), @api)
+    assert_equal :failed, @handler.call(fresh(task), @api)
+
+    assert_equal [10], @api.media_groups.map(&:size), 'accepted first batch must not be resent'
+    assert_equal 10, Message.where(chat_id: CHAT, bg_task_external_id: 'sep-1').count
+    ev = events.last
+    assert_equal 'separation_delivery_failed', ev['event_type']
+    assert_match(/Stem11/, ev['summary'])
+    assert_match(/Stem1/, ev['summary'])
+  end
+
+  def test_send_failure_retries_across_cycles_then_fails_truthfully
+    task = make_task(external_id: 'sep-1', audio_url: 'https://example.com/a.mp3', forum_thread_id: 321)
     @api.on_media_group = ->(_kw) { raise 'Telegram exploded' }
     result = { stems: stems(2) }
     with_client(poll_separation_once: ->(_id) { result }) do
-      assert_equal :done, @handler.call(task, @api)
+      assert_equal :pending, @handler.call(task, @api)
     end
-    assert_equal 'done', fresh(task).status, 'a delivery failure must not flip :done to :failed'
+    2.times { assert_equal :pending, @handler.call(fresh(task), @api) }
+    assert_equal :failed, @handler.call(fresh(task), @api)
+    assert_equal 'failed', fresh(task).status
+    assert_equal 'failed', fresh(task).delivery_status
     ev = events.last
     assert_equal 'separation_delivery_failed', ev['event_type']
     assert_match(/Stem1, Stem2/, ev['summary'])
     assert_match(/отправить их в чат не вышло/, @api.sent_messages.last[:text])
+    assert_equal 321, @api.sent_messages.last[:message_thread_id]
+    assert_equal 321, ev['forum_thread_id']
+    assert_equal 321, Message.find_by(chat_id: CHAT, body: @api.sent_messages.last[:text]).message_thread_id
   end
 
-  def test_partial_delivery_reports_only_missing_stems
+  def test_missing_download_prevents_partial_group_delivery
     task = make_task(external_id: 'sep-1', audio_url: 'https://example.com/a.mp3')
     result = { stems: [{ name: 'Vocals', url: 'https://cdn/v.mp3' }, { name: 'Instrumental', url: 'https://cdn/broken.mp3' }] }
     with_client(poll_separation_once: ->(_id) { result }) do
       @handler.call(task, @api)
     end
-    assert_equal 1, @api.media_groups.first.size
+    2.times { assert_equal :pending, @handler.call(fresh(task), @api) }
+    assert_equal :failed, @handler.call(fresh(task), @api)
+    assert_empty @api.media_groups
     ev = events.last
     assert_equal 'separation_delivery_failed', ev['event_type']
-    assert_match(/не доставлены дорожки Instrumental/, ev['summary'])
-    assert_match(/доставлены: Vocals/, ev['summary'])
-    assert_empty @api.sent_messages, 'no "nothing arrived" chat notice when some stems were delivered'
+    assert_match(/Stem|Vocals|Instrumental/, ev['summary'])
+    assert_equal 'failed', fresh(task).delivery_status
+  end
+
+  def test_truthy_malformed_media_group_response_is_not_delivered
+    task = make_task(external_id: 'sep-1', audio_url: 'https://example.com/a.mp3')
+    @api.media_group_result = { 'ok' => true, 'result' => [{ 'message_id' => '123' }] }
+    result = { stems: [{ name: 'Vocals', url: 'https://cdn/v.mp3' }] }
+    with_client(poll_separation_once: ->(_id) { result }) { @handler.call(task, @api) }
+    2.times { assert_equal :pending, @handler.call(fresh(task), @api) }
+    assert_equal :failed, @handler.call(fresh(task), @api)
+
+    persisted = fresh(task)
+    assert_equal 'failed', persisted.status
+    assert_equal 'failed', persisted.delivery_status
+    assert_equal 'separation_delivery_failed', events.last['event_type']
+    refute Message.where(chat_id: CHAT, role: 'bot').where('body LIKE ?', '[стем:%').exists?
   end
 end

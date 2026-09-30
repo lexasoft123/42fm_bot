@@ -26,19 +26,39 @@ class AwardToolTest < BotTest
     @user = OpenStruct.new(uid: 7, role: 'member')
   end
 
-  def call_tool(args)
-    @tool.handler.call(args, { chat_id: CHAT, user: @user })
+  def call_tool(args = nil, forum_thread_id: nil, **keyword_args)
+    args ||= keyword_args
+    ctx = { chat_id: CHAT, user: @user }
+    ctx[:forum_thread_id] = forum_thread_id if forum_thread_id
+    @tool.handler.call(args, ctx)
   end
 
   def test_enqueues_image_generate_with_award_params
     out = call_tool('recipient' => '@kat', 'reason' => 'провал апелляции')
-    assert_includes out, '@kat'
+    assert_instance_of Agent::ToolResult, out
+    assert out.action?
+    assert_equal 'queued', out.action_status
+    assert_equal 'generate_image', out.action
+    assert_equal 'image_generate', out.task_type
+    assert_equal 'queued', out.phase
+    assert_equal 'pending', out.delivery
+    assert_includes out.user_text, '@kat'
     task = BackgroundTask.where(chat_id: CHAT, task_type: 'image_generate').last
+    assert_equal task.id, out.task_id
     p = task.params_hash
     assert_equal true, p['award']
     assert_equal '@kat', p['recipient']
     assert_includes p['request'], '@kat — за провал апелляции'
     assert_equal 7, p['user_uid']
+    refute p.key?('forum_thread_id')
+  end
+
+  def test_forum_thread_is_propagated_to_award_image_task
+    result = call_tool({ 'recipient' => '@kat', 'reason' => 'победу' }, forum_thread_id: 77)
+
+    task = BackgroundTask.where(chat_id: CHAT, task_type: 'image_generate').last
+    assert_equal 77, task.params_hash['forum_thread_id']
+    assert_equal task.id, result.task_id
   end
 
   def test_rides_image_rate_limit_bucket_with_deferred_result

@@ -56,7 +56,7 @@ Agent::ToolRegistry.register(
     source_title = source&.params_hash&.dig('title')
     source_performer = source&.params_hash&.dig('artist').to_s
 
-    BackgroundTask.create!(
+    task = BackgroundTask.create!(
       task_type: 'suno_wav_convert',
       chat_id: ctx[:chat_id],
       max_attempts: 60,
@@ -65,9 +65,14 @@ Agent::ToolRegistry.register(
         source_title:      source_title,
         source_performer:  source_performer,
         clip_index:        clip_index,
+        forum_thread_id:   ctx[:forum_thread_id],
         user_uid:          ctx[:user]&.uid,
       }.to_json
     )
-    "Делаю WAV для «#{source_title || suno_task_id}» (клип #{clip_index}) — скоро придёт в чат"
+    Agent::ToolResult.action(
+      status: :queued, action: 'convert_to_wav', task_id: task.id, task_type: task.task_type,
+      phase: :queued, delivery: :pending,
+      user_text: "Делаю WAV для «#{source_title || suno_task_id}» (клип #{clip_index}) — скоро придёт в чат"
+    )
   }
 )

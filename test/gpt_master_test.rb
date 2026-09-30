@@ -25,6 +25,11 @@ module Settings
 end unless Settings.respond_to?(:chat_gpt)
 
 LOGGER = Logger.new(IO::NULL) unless defined?(LOGGER)
+unless defined?(GPT_LOGGER)
+  GPT_LOGGER = Object.new
+  def GPT_LOGGER.info(message); (@messages ||= []) << message; end
+  def GPT_LOGGER.messages; @messages ||= []; end
+end
 
 require 'httparty'
 require_relative '../models/api_usage'
@@ -206,6 +211,24 @@ class GptMasterOpenAIUsageTest < BotTest
 end
 
 class GptMasterBodyBuildingTest < BotTest
+  def test_structured_dump_keeps_per_call_latency
+    GPT_LOGGER.messages.clear
+    HTTParty.define_singleton_method(:post) do |_url, _opts|
+      FakeResponse.new(200,
+        'choices' => [{ 'message' => { 'content' => 'ok' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 })
+    end
+    begin
+      GptMaster.new([{ role: 'user', content: 'hi' }], setting: 'openai',
+                    chat_id: 1, purpose: 'agent').call
+    ensure
+      HTTParty.singleton_class.remove_method(:post) rescue nil
+    end
+    dump = JSON.parse(GPT_LOGGER.messages.last)
+    assert_kind_of Integer, dump['took_ms']
+    assert_operator dump['took_ms'], :>=, 0
+  end
+
   def test_anthropic_body_includes_system_with_cache_control_when_given
     captured = nil
     HTTParty.define_singleton_method(:post) do |_url, opts|

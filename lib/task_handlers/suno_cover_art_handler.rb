@@ -1,15 +1,21 @@
 require_relative 'agent_event_emitter'
+require_relative 'suno_delivery'
 require_relative '../media_download'
 
 class SunoCoverArtHandler
   include AgentEventEmitter
   include MediaDownload
+  include SunoDelivery
 
   MAX_SUBMIT_FAILURES = 3
   MAX_GENERATION_RETRIES = 3
 
   def call(task, api)
-    if task.external_id.nil?
+    if suno_delivery_receipt(task)
+      persist_images_receipt(task)
+    elsif suno_delivery_result(task)
+      deliver_cached_images(task, api)
+    elsif task.external_id.nil?
       submit(task, api)
     else
       poll_and_deliver(task, api)
@@ -38,24 +44,25 @@ class SunoCoverArtHandler
       end
       attempts = (p['submit_failures'] || 0) + 1
       p['submit_failures'] = attempts
-      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
       if attempts >= MAX_SUBMIT_FAILURES
-        LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submit_failures=#{attempts} (max #{MAX_SUBMIT_FAILURES}), giving up: #{e.message}"
+        ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
+        LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submit_failures=#{attempts} (max #{MAX_SUBMIT_FAILURES}), giving up: #{safe_suno_detail(e.message)}"
         mark_failed_and_notify(task, api, 'cover_art_submit_failed_after_retries')
         return :failed
       end
-      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submit_failures=#{attempts}/#{MAX_SUBMIT_FAILURES} — will retry: #{e.message}"
+      ActiveRecord::Base.connection_pool.with_connection { task.mark_retrying!(params: p.to_json) }
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submit_failures=#{attempts}/#{MAX_SUBMIT_FAILURES} — will retry: #{safe_suno_detail(e.message)}"
       raise e
     end
 
-    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted cover_art #{cover_task_id} for source #{source_task_id}"
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted cover_art"
     ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: cover_task_id) }
     :pending
   end
 
   def poll_and_deliver(task, api)
     result = SunoClient.new.poll_cover_art_once(task.external_id)
-    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: polling #{task.external_id} (attempt #{task.attempts + 1}/#{task.max_attempts}) → #{result.inspect}"
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: poll attempt #{task.attempts + 1}/#{task.max_attempts} → #{result.is_a?(Array) ? "#{result.size} images" : safe_suno_detail(result.inspect)}"
 
     case result
     when :pending
@@ -70,7 +77,7 @@ class SunoCoverArtHandler
       LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno transient failure for #{task.external_id} (retry #{retries}/#{MAX_GENERATION_RETRIES})"
       if retries <= MAX_GENERATION_RETRIES
         ActiveRecord::Base.connection_pool.with_connection do
-          task.update!(external_id: nil, params: p.to_json)
+          task.mark_retrying!(external_id: nil, params: p.to_json)
         end
         return :pending
       end
@@ -85,19 +92,49 @@ class SunoCoverArtHandler
       :failed
     when Array
       LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result.size} images"
-      delivered = send_images(api, task.chat_id, result, task.params_hash, bg_task_external_id: task.external_id)
-      if delivered
-        ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
-        :done
-      else
-        # Suno produced clips but we couldn't get them to the chat (download
-        # error / Telegram rejection). Don't mark `done` — that would lie
-        # about delivery and leave the user with no recourse. Mark failed +
-        # notify (chat msg + agent_event) so the agent can apologize.
-        mark_failed_and_notify(task, api, 'cover_art_delivery_failed')
-        :failed
-      end
+      cache_suno_delivery_result(task, result)
     end
+  end
+
+  def deliver_cached_images(task, api)
+    p = task.params_hash
+    response = send_images(api, task.chat_id, p['delivery_result'], p)
+    messages = telegram_messages(response, expected_count: p['delivery_result'].size)
+    return :pending if messages && cache_suno_delivery_receipt(task, messages)
+    return :pending if retry_suno_delivery(task, 'delivery_failures')
+    mark_failed_and_notify(task, api, 'cover_art_delivery_failed')
+    :failed
+  end
+
+  def persist_images_receipt(task)
+    p = task.params_hash
+    title = p['source_title']
+    caption = title ? "🎨 обложка для «#{title}»" : '🎨 обложка'
+    persisted = p.fetch('delivery_receipt').all? do |receipt|
+      row = Message.find_by(chat_id: task.chat_id, message_id: receipt['message_id']) ||
+        Message.persist_bot_reply(chat_id: task.chat_id, body: "[#{caption}]",
+          response: receipt_response(receipt), bg_task_external_id: task.external_id,
+          message_thread_id: p['forum_thread_id'])
+      row&.persisted?
+    end
+    unless persisted
+      return :pending if retry_suno_delivery(task, 'persistence_failures', delivery_status: 'delivered')
+      ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!('cover_art_persistence_failed', delivery_status: 'delivered') }
+      emit_agent_event(task, 'cover_art_persistence_failed',
+        summary: "Обложка принята Telegram, но не сохранена локально; не отправляй её повторно.")
+      return :failed
+    end
+    ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(p['delivery_result'], delivery_status: 'delivered') }
+    :done
+  rescue => e
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}: cover-art persistence failed: #{e.class}: #{safe_suno_detail(e.message)}"
+    return :pending if retry_suno_delivery(task, 'persistence_failures', delivery_status: 'delivered')
+    ActiveRecord::Base.connection_pool.with_connection do
+      task.mark_failed!('cover_art_persistence_failed', delivery_status: 'delivered')
+    end
+    emit_agent_event(task, 'cover_art_persistence_failed',
+      summary: 'Обложка принята Telegram, но не сохранена локально; не отправляй её повторно.')
+    :failed
   end
 
   def send_images(api, chat_id, clips, params, bg_task_external_id: nil)
@@ -113,7 +150,7 @@ class SunoCoverArtHandler
     temp_files = []
     media = []
     clips.each do |clip|
-      tmp = download_to_tempfile(clip[:image_url], "cover_#{temp_files.size}.png", chat_id: chat_id, suffix: '.png')
+      tmp = download_to_tempfile(clip['image_url'] || clip[:image_url], "cover_#{temp_files.size}.png", chat_id: chat_id, suffix: '.png')
       next unless tmp
       i = temp_files.size
       temp_files << tmp
@@ -122,69 +159,70 @@ class SunoCoverArtHandler
       media << entry
     end
 
-    if media.empty?
+    if media.size != clips.size
       LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_images: no clips downloaded — skipping send"
-      return false
+      return nil
     end
 
     LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_images: sendMediaGroup → #{media.size} images"
 
-    retries = 0
     result = begin
       send_params = { chat_id: chat_id, media: media.to_json }
+      send_params.merge!(forum_send_params(params))
       temp_files.each_with_index { |tf, i| send_params[:"photo#{i}"] = Faraday::UploadIO.new(tf.path, 'image/png', "cover_#{i}.png") }
       api.sendMediaGroup(**send_params)
-    rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed, Faraday::TimeoutError => e
-      retries += 1
-      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendMediaGroup retry #{retries}: #{e.class}: #{e.message}"
-      if retries <= 3
-        sleep 3
-        retry
-      end
-      LOGGER.error "[chat=#{chat_id}] #{self.class.name} sendMediaGroup gave up after #{retries} retries"
+    rescue => e
+      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendMediaGroup failed: #{e.class}: #{safe_suno_detail(e.message)}"
       nil
     ensure
       temp_files.each { |tf| tf.close; tf.unlink rescue nil }
     end
 
-    return false unless result
-
-    persist_bot_media_rows(chat_id, result, caption, bg_task_external_id: bg_task_external_id)
-    true
+    result
   rescue => e
-    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_images failed: #{e.class}: #{e.message}"
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_images failed: #{e.class}: #{safe_suno_detail(e.message)}"
     false
   end
 
-  # One bot row per media-group image via Message.persist_bot_reply (the
-  # centralized bot-side persistence path) — which also captures each
-  # photo's file_id so the agent can re-view the generated cover art via
-  # the view_image tool.
-  def persist_bot_media_rows(chat_id, result, caption, bg_task_external_id: nil)
-    messages = result.is_a?(Hash) ? result['result'] : result
-    return unless messages.is_a?(Array)
-    messages.each do |msg|
-      Message.persist_bot_reply(chat_id: chat_id, body: "[#{caption}]", response: msg,
-                                bg_task_external_id: bg_task_external_id)
-    end
+  def telegram_media_messages(response, expected_count:)
+    messages = response.is_a?(Hash) ? response['result'] : response
+    return unless messages.is_a?(Array) && messages.size == expected_count
+    return unless messages.all? { |message| telegram_message_id(message) }
+
+    messages
+  end
+
+  def telegram_message_id(message)
+    value = if message.respond_to?(:message_id)
+              message.message_id
+            elsif message.is_a?(Hash)
+              message['message_id'] || message[:message_id]
+            end
+    value if value.is_a?(Integer) && value.positive?
   end
 
   # See SunoTaskHandler#mark_failed_and_notify for `error_detail` rationale —
   # threads Suno's actual errorCode/errorMessage into the agent_event
   # summary so the agent can pick a meaningful next move.
   def mark_failed_and_notify(task, api, reason, error_detail: nil)
-    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: cover-art #{reason} for #{task.external_id}#{error_detail ? " (#{error_detail})" : ''}"
-    ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(reason) }
+    error_detail = safe_suno_detail(error_detail) if error_detail
+    scrub_terminal_delivery_result!(task)
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: cover-art #{reason}#{error_detail ? " (#{error_detail})" : ''}"
+    delivery = reason.to_s.include?('delivery_failed') ? 'failed' : nil
+    ActiveRecord::Base.connection_pool.with_connection do
+      task.mark_failed!(reason, delivery_status: delivery)
+    end
 
     # User-facing chat notification — same two-channel pattern as
     # SunoTaskHandler so the user always hears something even if the agent
     # event hits the 10/hour cap or the agent picks (skip).
     text = 'Не удалось нарисовать обложку'
     begin
-      resp = api.sendMessage(chat_id: task.chat_id, text: text)
-      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)
+      resp = api.sendMessage(chat_id: task.chat_id, text: text, **forum_send_params(task.params_hash))
+      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp,
+                                message_thread_id: task.params_hash['forum_thread_id'])
     rescue => e
-      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{safe_suno_detail(e.message)}"
     end
 
     p = task.params_hash

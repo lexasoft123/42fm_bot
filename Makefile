@@ -9,10 +9,12 @@ TEST_FILES := \
 	test/song_search_test.rb \
 	test/agent_test.rb \
 	test/bot_state_tool_test.rb \
+	test/task_status_tool_test.rb \
 	test/production_errors_test.rb \
 	test/listen_supervisor_test.rb \
 	test/api_usage_test.rb \
 	test/gpt_master_test.rb \
+	test/agent_model_canary_test.rb \
 	test/model_settings_test.rb \
 	test/cost_report_test.rb \
 	test/e2e_telemetry_test.rb \

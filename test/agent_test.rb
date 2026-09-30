@@ -11,6 +11,7 @@ require_relative '../lib/command_result'
 require_relative '../lib/command_context'
 require_relative '../lib/agent/tool_registry'
 require_relative '../lib/agent/runner'
+require_relative '../lib/agent/tools/task_status'
 require_relative '../lib/commands/base'
 require_relative '../lib/chat_context'
 require_relative '../lib/commands/gpt_helpers'
@@ -294,15 +295,18 @@ class RunnerTest < BotTest
   # API returns text-only response — Runner returns it directly
   def test_text_response
     FakeGptMaster.enqueue(anthropic_text('Hello world'))
-    result = build_runner(text: 'hi', user: @user).run
+    runner = build_runner(text: 'hi', user: @user)
+    result = runner.run
     assert_equal 'Hello world', result
+    assert_equal({ iterations: 1, llm_calls: 1, tool_calls: 0, corrections: 0, status: 'ok' },
+                 runner.last_turn_metrics.slice(:iterations, :llm_calls, :tool_calls, :corrections, :status))
   end
 
   # API returns nil (failure) — Runner returns fallback string
   def test_nil_response_fallback
     FakeGptMaster.enqueue(nil)
     result = build_runner(text: 'hi', user: @user).run
-    assert_equal 'жпт не жпт', result
+    assert_equal Agent::Runner::SAFE_FAILURE_REPLY, result
   end
 
   # API returns one tool call, then text — tool is executed and final text returned
@@ -316,9 +320,13 @@ class RunnerTest < BotTest
       anthropic_tool_call('echo', { 'msg' => 'test' }),
       anthropic_text('Done')
     )
-    result = build_runner(text: 'do it', user: @user).run
+    runner = build_runner(text: 'do it', user: @user)
+    result = runner.run
     assert called, 'tool handler should have been called'
     assert_equal 'Done', result
+    assert_equal 2, runner.last_turn_metrics[:iterations]
+    assert_equal 2, runner.last_turn_metrics[:llm_calls]
+    assert_equal 1, runner.last_turn_metrics[:tool_calls]
   end
 
   def test_tools_disabled_blocks_fabricated_provider_tool_call
@@ -385,9 +393,113 @@ class RunnerTest < BotTest
     second_call = FakeGptMaster.calls[1]
     tool_result_msg = second_call[:messages].last
     content = tool_result_msg[:content].first[:content]
-    assert_includes content, '[deferred retry_in=5min'
-    assert_includes content, 'intent saved to scratchpad'
-    assert_includes content, 'Wait 5 min'
+    payload = JSON.parse(content)
+    assert_equal 'deferred', payload['status']
+    assert_equal 'retry_later', payload['action']
+    assert_equal 5, payload['retry_in_min']
+    assert_equal true, payload['intent_saved']
+    assert_equal 'Wait 5 min', payload['message']
+  end
+
+  def test_action_tool_result_is_machine_readable_for_model
+    Agent::ToolRegistry.register(
+      name: 'queue_it', description: 'queue',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :queued, action: 'queue_it', task_id: 42,
+                                 task_type: 'demo_task', sent_count: 0,
+                                 user_text: 'Поставлено в очередь')
+      }
+    )
+    FakeGptMaster.enqueue(anthropic_tool_call('queue_it', {}), anthropic_text('Принято'))
+
+    assert_equal 'Принято (задача #42)', build_runner(text: 'go', user: @user).run
+    content = FakeGptMaster.calls[1][:messages].last[:content].first[:content]
+    assert_equal({
+      'status' => 'queued', 'action' => 'queue_it', 'task_id' => 42,
+      'task_type' => 'demo_task', 'sent_count' => 0, 'message' => 'Поставлено в очередь'
+    }, JSON.parse(content))
+  end
+
+  def test_action_tool_result_carries_validated_safe_phase
+    result = Agent::ToolResult.action(status: :queued, action: 'task_status', task_id: 7,
+                                      task_type: 'image_generate',
+                                      phase: :processing, delivery: :pending,
+                                      user_text: 'Задача выполняется')
+    assert_equal 'processing', result.phase
+    assert_equal 'processing', result.action_payload[:phase]
+    assert_equal 'pending', result.delivery
+    assert_raises(ArgumentError) do
+      Agent::ToolResult.action(status: :queued, action: 'task_status', phase: 'raw-secret-phase',
+                               user_text: 'x')
+    end
+    assert_raises(ArgumentError) do
+      Agent::ToolResult.action(status: :queued, action: 'task_status', task_id: -1, user_text: 'x')
+    end
+
+    batch = Agent::ToolResult.action(
+      status: :sent, action: 'task_status', user_text: 'checked',
+      items: [{ action: 'generate_image', task_id: 7, task_type: 'image_generate',
+                status: 'pending', phase: 'processing', delivery: 'pending' }]
+    )
+    assert_equal 'generate_image', batch.action_payload[:items].first[:action]
+    assert_raises(ArgumentError) do
+      Agent::ToolResult.action(status: :sent, action: 'task_status', user_text: 'x',
+                               items: [{ action: 'generate_image', task_id: 7,
+                                         task_type: 'image_generate', status: 'invented' }])
+    end
+  end
+
+  def test_trusted_action_outcome_return_boundary_exposes_only_user_safe_message
+    payload = JSON.generate(status: 'queued', action: 'generate_image', task_id: 42,
+                            task_type: 'image_generate',
+                            message: 'Картинка поставлена в очередь')
+    Agent::ToolRegistry.register(
+      name: 'queue_image', description: 'queue',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 42,
+                                 task_type: 'image_generate',
+                                 user_text: 'Картинка поставлена в очередь')
+      }
+    )
+    FakeGptMaster.enqueue(anthropic_tool_call('queue_image', {}), anthropic_text(payload))
+
+    assert_equal 'Картинка поставлена в очередь (задача #42)', build_runner(text: 'status', user: @user).run
+  end
+
+  def test_provider_cannot_fabricate_authoritative_queued_json
+    payload = JSON.generate(status: 'queued', action: 'generate_image', task_id: 666,
+                            message: 'Картинка поставлена в очередь')
+    FakeGptMaster.enqueue(anthropic_text(payload), anthropic_text('Не могу подтвердить текущий статус.'))
+
+    assert_equal 'Не могу подтвердить текущий статус.', build_runner(text: 'где картинка?', user: @user).run
+    assert_equal 2, FakeGptMaster.calls.size
+  end
+
+  def test_queued_evidence_allows_future_delivery_wording_but_not_false_delivery
+    Agent::ToolRegistry.register(
+      name: 'queue_image', description: 'queue',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 42,
+                                 task_type: 'image_generate',
+                                 user_text: 'Картинка поставлена в очередь')
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('queue_image', {}),
+      anthropic_text('Картинка поставлена в очередь и будет отправлена после генерации.')
+    )
+
+    result = build_runner(text: 'status', user: @user).run
+    assert_equal 'Картинка поставлена в очередь и будет отправлена после генерации. (задача #42)', result
+    assert_equal 2, FakeGptMaster.calls.size
+  end
+
+  def test_legitimate_status_action_json_example_is_unchanged
+    payload = '{"status":"queued","action":"demo","message":"example"}'
+    FakeGptMaster.enqueue(anthropic_text(payload))
+
+    assert_equal payload, build_runner(text: 'покажи пример JSON статуса', user: @user).run
+    assert_equal 1, FakeGptMaster.calls.size
   end
 
   # Plain ToolResult.text passes through unchanged, no scratchpad write
@@ -517,14 +629,595 @@ class RunnerTest < BotTest
 
   def test_blank_after_output_budget_exhausted_returns_stub_without_retry
     FakeGptMaster.enqueue({ 'content' => [], 'stop_reason' => 'max_tokens' })
-    assert_equal 'жпт не жпт', build_runner(text: 'go', user: @user).run
+    assert_equal Agent::Runner::SAFE_FAILURE_REPLY, build_runner(text: 'go', user: @user).run
     assert_equal 1, FakeGptMaster.calls.size
   end
 
   def test_second_blank_reply_returns_stub
     FakeGptMaster.enqueue(anthropic_text(''), anthropic_text('  '))
-    assert_equal 'жпт не жпт', build_runner(text: 'go', user: @user).run
+    assert_equal Agent::Runner::SAFE_FAILURE_REPLY, build_runner(text: 'go', user: @user).run
     assert_equal 2, FakeGptMaster.calls.size
+  end
+
+  def test_integrity_gate_rewrites_internal_tool_syntax_once
+    Agent::ToolRegistry.register(name: 'remember', description: 'memory', handler: ->(_a, _c) { 'ok' })
+    FakeGptMaster.enqueue(
+      anthropic_text('remember(note="секрет")'),
+      anthropic_text('Запомнил важную деталь.')
+    )
+
+    result = build_runner(text: 'запомни', user: @user).run
+
+    assert_equal 'Запомнил важную деталь.', result
+    assert_equal 2, FakeGptMaster.calls.size
+    assert FakeGptMaster.calls.last[:tools].any?, 'corrective pass keeps tool definitions available'
+    correction = FakeGptMaster.calls.last[:messages].last[:content].map { |b| b[:text] }.join
+    assert_includes correction, 'внутренний синтаксис'
+  end
+
+  def test_integrity_gate_does_not_execute_tool_from_corrective_pass
+    executed = false
+    Agent::ToolRegistry.register(name: 'remember', description: 'memory', handler: ->(_a, _c) { executed = true; 'ok' })
+    FakeGptMaster.enqueue(
+      anthropic_text('*internal monologue:* надо вызвать remember(note="x")'),
+      anthropic_tool_call('remember', { 'note' => 'x' })
+    )
+
+    result = build_runner(text: 'hi', user: @user).run
+
+    refute executed
+    assert_equal Agent::Runner::SAFE_FAILURE_REPLY, result
+    assert_equal 2, FakeGptMaster.calls.size
+  end
+
+  def test_corrective_text_passes_through_same_integrity_boundary
+    FakeGptMaster.enqueue(
+      anthropic_text('<think>first leak</think>'),
+      anthropic_text('assistant-to=generate_image .FullNAME')
+    )
+
+    assert_equal Agent::Runner::SAFE_FAILURE_REPLY, build_runner(text: 'hi', user: @user).run
+    assert_equal 2, FakeGptMaster.calls.size, 'only one corrective pass is allowed'
+  end
+
+  def test_integrity_gate_suppresses_invalid_synthetic_output
+    FakeGptMaster.enqueue(anthropic_text('.FullName *internal monologue:* secret'))
+    result = build_runner(text: 'event', user: @user, user_initiated: false).run
+    assert_equal '', result
+    assert_equal 1, FakeGptMaster.calls.size
+  end
+
+  def test_integrity_gate_blocks_raw_tool_json_in_fence
+    Agent::ToolRegistry.register(name: 'echo', description: 'echo', handler: ->(_a, _c) { 'ok' })
+    leaked = "```json\n{\"name\":\"echo\",\"arguments\":{\"msg\":\"x\"}}\n```"
+    FakeGptMaster.enqueue(anthropic_text(leaked), anthropic_text('Нормальный ответ.'))
+    assert_equal 'Нормальный ответ.', build_runner(text: 'hi', user: @user).run
+  end
+
+  def test_integrity_gate_blocks_inline_nested_and_array_tool_json
+    Agent::ToolRegistry.register(name: 'echo', description: 'echo', handler: ->(_a, _c) { 'ok' })
+    leaked = 'Служебное: [{"type":"tool_call","function":{"name":"echo","arguments":"{}"}}].'
+    FakeGptMaster.enqueue(anthropic_text(leaked), anthropic_text('Обычный ответ.'))
+
+    assert_equal 'Обычный ответ.', build_runner(text: 'hi', user: @user).run
+  end
+
+  def test_integrity_gate_blocks_tag_marker_and_case_bypasses
+    [
+      '<tool_call>{"name":"echo"}</tool_call>',
+      '<think>скрытое рассуждение</think> ответ',
+      'analysis: вызываю инструмент',
+      'assistant-to=functions.generate_image',
+      'user.FullNAME',
+      'Internal_Monologue: secret',
+    ].each do |leaked|
+      FakeGptMaster.reset!
+      FakeGptMaster.enqueue(anthropic_text(leaked), anthropic_text('Чистый ответ.'))
+      assert_equal 'Чистый ответ.', build_runner(text: 'hi', user: @user).run, leaked
+    end
+  end
+
+  def test_integrity_gate_blocks_backticked_punctuated_tool_call
+    Agent::ToolRegistry.register(name: 'echo', description: 'echo', handler: ->(_a, _c) { 'ok' })
+    ['Вот: `echo({"msg":"x"})`', "```text\necho({\"msg\":\"x\"})\n```"].each do |leaked|
+      FakeGptMaster.reset!
+      FakeGptMaster.enqueue(anthropic_text(leaked), anthropic_text('Готово без внутренностей.'))
+      assert_equal 'Готово без внутренностей.', build_runner(text: 'hi', user: @user).run
+    end
+  end
+
+  def test_unverified_stale_running_claim_is_corrected
+    FakeGptMaster.enqueue(
+      anthropic_text('Картинка всё ещё в печи, скоро выползет.'),
+      anthropic_text('Не могу подтвердить текущий статус картинки.')
+    )
+
+    assert_equal 'Не могу подтвердить текущий статус картинки.', build_runner(text: 'где картинка?', user: @user).run
+  end
+
+  def test_trusted_task_status_allows_matching_running_claim
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 7,
+                                 task_type: 'image_generate', phase: :processing,
+                                 delivery: :pending, user_text: 'checked')
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('task_status', { 'task_id' => 7 }),
+      anthropic_text('Картинка сейчас генерируется.')
+    )
+
+    assert_equal 'Картинка сейчас генерируется. (задача #7)', build_runner(text: 'где картинка?', user: @user).run
+  end
+
+  def register_watchdog_task_status(calls, task_id: 42)
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(args, _ctx) {
+        calls << args
+        Agent::ToolResult.action(status: :queued, action: 'generate_image',
+                                 task_id: args['task_id'] || task_id,
+                                 task_type: 'image_generate', phase: :processing,
+                                 delivery: :pending, user_text: 'checked')
+      }
+    )
+  end
+
+  def test_status_watchdog_checks_explicit_russian_task_id
+    calls = []
+    register_watchdog_task_status(calls)
+    FakeGptMaster.enqueue(
+      anthropic_text('Наверное, ещё делается.'),
+      anthropic_text('Задача #42 сейчас обрабатывается.')
+    )
+
+    runner = build_runner(text: 'Какой статус задачи #42?', user: @user)
+    assert_equal 'Задача #42 сейчас обрабатывается.', runner.run
+    assert_equal [{ 'task_id' => 42 }], calls
+    assert_equal 2, runner.last_turn_metrics[:llm_calls]
+    assert_equal 1, runner.last_turn_metrics[:tool_calls]
+  end
+
+  def test_status_watchdog_checks_explicit_english_task_id
+    calls = []
+    register_watchdog_task_status(calls, task_id: 73)
+    FakeGptMaster.enqueue(anthropic_text('Probably done.'), anthropic_text('Task #73 is processing.'))
+
+    assert_equal 'Task #73 is processing.',
+                 build_runner(text: 'What is the status of task #73?', user: @user).run
+    assert_equal [{ 'task_id' => 73 }], calls
+  end
+
+  def test_status_watchdog_checks_recent_tasks_without_id
+    calls = []
+    register_watchdog_task_status(calls)
+    FakeGptMaster.enqueue(anthropic_text('Скорее всего готовы.'), anthropic_text('Последняя задача ещё выполняется.'))
+
+    assert_equal 'Последняя задача ещё выполняется. (задача #42)',
+                 build_runner(text: 'Покажи прогресс моих последних задач', user: @user).run
+    assert_equal [{}], calls
+  end
+
+  def test_status_watchdog_ignores_quotes_code_examples_and_history
+    calls = []
+    register_watchdog_task_status(calls)
+    requests = [
+      'Что значит «статус задачи #42»?',
+      "Покажи пример: `what is the status of task #42?`",
+      "Разбери код:\n```text\nstatus of task #42\n```",
+      'В истории написано: задача #42 готова?',
+      'Переведи "task #42 is done"'
+    ]
+    requests.each do |request|
+      FakeGptMaster.reset!
+      FakeGptMaster.enqueue(anthropic_text('Это просто текст.'))
+      assert_equal 'Это просто текст.', build_runner(text: request, user: @user).run
+    end
+    assert_empty calls
+  end
+
+  def test_status_watchdog_uses_only_current_request_not_context
+    calls = []
+    register_watchdog_task_status(calls)
+    FakeGptMaster.enqueue(anthropic_text('Привет!'))
+
+    assert_equal 'Привет!', build_runner(text: 'привет', context: 'user: Какой статус задачи #42?', user: @user).run
+    assert_empty calls
+  end
+
+  def test_status_watchdog_ignores_ordinary_status_and_ready_words
+    calls = []
+    register_watchdog_task_status(calls)
+    ['Напиши статус для соцсетей', 'Ужин готов?', 'Что означает HTTP status 404?'].each do |request|
+      FakeGptMaster.reset!
+      FakeGptMaster.enqueue(anthropic_text('Обычный ответ.'))
+      assert_equal 'Обычный ответ.', build_runner(text: request, user: @user).run
+    end
+    assert_empty calls
+  end
+
+  def test_status_watchdog_does_not_duplicate_model_task_status_call
+    calls = []
+    register_watchdog_task_status(calls)
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('task_status', { 'task_id' => 42 }),
+      anthropic_text('Задача #42 сейчас обрабатывается.')
+    )
+
+    assert_equal 'Задача #42 сейчас обрабатывается.',
+                 build_runner(text: 'Статус задачи #42?', user: @user).run
+    assert_equal [{ 'task_id' => 42 }], calls
+    assert_equal 2, FakeGptMaster.calls.length
+  end
+
+  def test_status_watchdog_does_not_guess_between_multiple_ids
+    calls = []
+    register_watchdog_task_status(calls)
+    FakeGptMaster.enqueue(anthropic_text('Уточни одну задачу.'))
+
+    assert_equal 'Уточни одну задачу.',
+                 build_runner(text: 'Какой статус задач #41 и #42?', user: @user).run
+    assert_empty calls
+  end
+
+  def test_status_watchdog_builds_valid_openai_tool_pair
+    original_resolve = FakeGptMaster.method(:resolve_setting)
+    FakeGptMaster.define_singleton_method(:resolve_setting) do |_name|
+      { api_key: 'fake', api_type: 'openai', api_url: 'http://fake', model: 'deepseek-flash' }
+    end
+    calls = []
+    register_watchdog_task_status(calls)
+    FakeGptMaster.enqueue(
+      { 'choices' => [{ 'message' => { 'role' => 'assistant', 'content' => 'Probably done.' },
+                         'finish_reason' => 'stop' }] },
+      { 'choices' => [{ 'message' => { 'role' => 'assistant', 'content' => 'Task #42 is processing.' },
+                         'finish_reason' => 'stop' }] }
+    )
+
+    assert_equal 'Task #42 is processing.',
+                 build_runner(text: 'Where is task #42?', user: @user).run
+    history = FakeGptMaster.calls.last[:messages]
+    assistant = history.find { |message| message[:role] == 'assistant' }
+    tool_result = history.find { |message| message[:role] == 'tool' }
+    assert_equal 'task_status', assistant.dig(:tool_calls, 0, :function, :name)
+    assert_equal({ 'task_id' => 42 }, JSON.parse(assistant.dig(:tool_calls, 0, :function, :arguments)))
+    assert_equal assistant.dig(:tool_calls, 0, :id), tool_result[:tool_call_id]
+  ensure
+    FakeGptMaster.define_singleton_method(:resolve_setting, original_resolve) if original_resolve
+  end
+
+  def test_latest_status_replaces_stale_action_evidence_and_keeps_delivery_distinct
+    Agent::ToolRegistry.register(
+      name: 'queue_image', description: 'queue',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 7,
+                                 task_type: 'image_generate', phase: :queued, user_text: 'queued')
+      }
+    )
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :sent, action: 'generate_image', task_id: 7,
+                                 task_type: 'image_generate', phase: :completed,
+                                 delivery: :unknown, user_text: 'checked')
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('queue_image', {}),
+      anthropic_tool_call('task_status', { 'task_id' => 7 }),
+      anthropic_text('Картинка уже доставлена в чат.'),
+      anthropic_text('Генерация завершена, но доставку подтвердить не могу.')
+    )
+
+    result = build_runner(text: 'где картинка?', user: @user).run
+    assert_equal 'Генерация завершена, но доставку подтвердить не могу. (задача #7)', result
+  end
+
+  def test_award_queue_evidence_is_superseded_by_matching_image_task_status
+    Agent::ToolRegistry.register(
+      name: 'make_award', description: 'award',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 77,
+                                 task_type: 'image_generate', phase: :queued,
+                                 delivery: :pending, user_text: 'Награда поставлена в очередь')
+      }
+    )
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :sent, action: 'generate_image', task_id: 77,
+                                 task_type: 'image_generate', phase: :completed,
+                                 delivery: :delivered, user_text: 'Награда доставлена')
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('make_award', { 'recipient' => '@kat', 'reason' => 'стойкость' }, id: 'award'),
+      anthropic_tool_call('task_status', { 'task_id' => 77 }, id: 'status'),
+      anthropic_text('Картинка с наградой поставлена в очередь.'),
+      anthropic_text('Картинка с наградой уже доставлена.')
+    )
+
+    assert_equal 'Картинка с наградой уже доставлена. (задача #77)',
+                 build_runner(text: 'Награди @kat и проверь задачу #77', user: @user).run
+  end
+
+  def test_exact_old_action_payload_is_rejected_after_fresher_status_for_same_identity
+    old_payload = JSON.generate(status: 'queued', action: 'generate_image', task_id: 7,
+                                task_type: 'image_generate', phase: 'queued', message: 'queued')
+    Agent::ToolRegistry.register(
+      name: 'queue_image', description: 'queue',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 7,
+                                 task_type: 'image_generate', phase: :queued, user_text: 'queued')
+      }
+    )
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 7,
+                                 task_type: 'image_generate', phase: :processing,
+                                 delivery: :pending, user_text: 'checked')
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('queue_image', {}, id: 'queue'),
+      anthropic_tool_call('task_status', { 'task_id' => 7 }, id: 'status'),
+      anthropic_text(old_payload),
+      anthropic_text('Картинка сейчас генерируется.')
+    )
+
+    assert_equal 'Картинка сейчас генерируется. (задача #7)',
+                 build_runner(text: 'где картинка?', user: @user).run
+    assert_equal 4, FakeGptMaster.calls.size
+  end
+
+  def test_no_id_multi_task_status_makes_unnumbered_claim_ambiguous
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(
+          status: :sent, action: 'task_status', phase: :completed, delivery: :unknown,
+          user_text: 'checked', items: [
+            { action: 'generate_image', task_id: 11, task_type: 'image_generate',
+              status: 'pending', phase: 'processing', delivery: 'pending' },
+            { action: 'generate_image', task_id: 12, task_type: 'image_generate',
+              status: 'pending', phase: 'processing', delivery: 'pending' },
+          ]
+        )
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('task_status', {}),
+      anthropic_text('Картинка генерируется.'),
+      anthropic_text('Не могу однозначно определить, о какой задаче речь.')
+    )
+
+    assert_equal 'Не могу однозначно определить, о какой задаче речь. (задачи: #11, #12)',
+                 build_runner(text: 'где мои картинки?', user: @user).run
+  end
+
+  def test_explicit_task_id_selects_one_item_from_multi_task_status
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(
+          status: :sent, action: 'task_status', phase: :completed, delivery: :unknown,
+          user_text: 'checked', items: [
+            { action: 'generate_image', task_id: 11, task_type: 'image_generate',
+              status: 'pending', phase: 'queued', delivery: 'pending' },
+            { action: 'generate_image', task_id: 12, task_type: 'image_generate',
+              status: 'pending', phase: 'processing', delivery: 'pending' },
+          ]
+        )
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('task_status', {}),
+      anthropic_text('Картинка, задача #12, сейчас генерируется.')
+    )
+
+    assert_equal 'Картинка, задача #12, сейчас генерируется.',
+                 build_runner(text: 'что с задачей #12?', user: @user).run
+  end
+
+  def test_cross_type_evidence_cannot_authorize_image_delivery_claim
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(
+          status: :sent, action: 'task_status', phase: :completed, delivery: :unknown,
+          user_text: 'checked', items: [
+            { action: 'generate_image', task_id: 21, task_type: 'image_generate',
+              status: 'pending', phase: 'processing', delivery: 'pending' },
+            { action: 'compose_song', task_id: 22, task_type: 'suno_generate',
+              status: 'done', phase: 'completed', delivery: 'delivered' },
+          ]
+        )
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('task_status', {}),
+      anthropic_text('Картинка, задача #22, доставлена.'),
+      anthropic_text('Не могу подтвердить доставку картинки.')
+    )
+
+    assert_equal 'Не могу подтвердить доставку картинки. (задачи: #21, #22)',
+                 build_runner(text: 'где картинка?', user: @user).run
+  end
+
+  def test_cover_art_evidence_is_image_only_not_audio
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :sent, action: 'cover_art', task_id: 23,
+                                 task_type: 'suno_cover_art', phase: :completed,
+                                 delivery: :delivered, user_text: 'checked')
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('task_status', { 'task_id' => 23 }),
+      anthropic_text('Трек, задача #23, доставлен.'),
+      anthropic_text('Не могу подтвердить доставку трека.')
+    )
+    assert_equal 'Не могу подтвердить доставку трека. (задача #23)',
+                 build_runner(text: 'где трек?', user: @user).run
+
+    FakeGptMaster.reset!
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('task_status', { 'task_id' => 23 }),
+      anthropic_text('Картинка, задача #23, доставлена.')
+    )
+    assert_equal 'Картинка, задача #23, доставлена.',
+                 build_runner(text: 'где обложка?', user: @user).run
+  end
+
+  def test_mixed_task_claims_bind_each_sentence_to_its_own_id_and_type
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(
+          status: :sent, action: 'task_status', phase: :completed, delivery: :unknown,
+          user_text: 'checked', items: [
+            { action: 'generate_image', task_id: 21, task_type: 'image_generate',
+              status: 'pending', phase: 'processing', delivery: 'pending' },
+            { action: 'compose_song', task_id: 22, task_type: 'suno_generate',
+              status: 'done', phase: 'completed', delivery: 'delivered' },
+          ]
+        )
+      }
+    )
+    answer = 'Картинка, задача #21, генерируется. Трек, задача #22, доставлен.'
+    FakeGptMaster.enqueue(anthropic_tool_call('task_status', {}), anthropic_text(answer))
+
+    assert_equal answer, build_runner(text: 'что с картинкой и треком?', user: @user).run
+  end
+
+  def test_phase_overrides_coarse_queued_status
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 31,
+                                 task_type: 'image_generate', phase: :processing,
+                                 delivery: :pending, user_text: 'checked')
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('task_status', { 'task_id' => 31 }),
+      anthropic_text('Картинка поставлена в очередь.'),
+      anthropic_text('Картинка сейчас обрабатывается.')
+    )
+
+    assert_equal 'Картинка сейчас обрабатывается. (задача #31)',
+                 build_runner(text: 'где картинка?', user: @user).run
+  end
+
+  def test_elliptical_followup_claim_requires_and_uses_matching_evidence
+    FakeGptMaster.enqueue(anthropic_text('Всё есть.'), anthropic_text('Не могу подтвердить доставку.'))
+    assert_equal 'Не могу подтвердить доставку.', build_runner(text: 'где картинка?', user: @user).run
+
+    FakeGptMaster.reset!
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :sent, action: 'generate_image', task_id: 41,
+                                 task_type: 'image_generate', phase: :completed,
+                                 delivery: :delivered, user_text: 'checked')
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('task_status', { 'task_id' => 41 }),
+      anthropic_text('Смотри выше.')
+    )
+    assert_equal 'Смотри выше. (задача #41)', build_runner(text: 'где картинка?', user: @user).run
+  end
+
+  def test_technical_request_does_not_exempt_provider_or_tool_syntax
+    FakeGptMaster.enqueue(
+      anthropic_text("```json\n{\"tool_calls\":[{\"function\":{\"name\":\"task_status\"}}]}\n```"),
+      anthropic_text('Это служебный формат, я его не показываю.')
+    )
+    assert_equal 'Это служебный формат, я его не показываю.',
+                 build_runner(text: 'покажи пример JSON', user: @user).run
+
+    FakeGptMaster.reset!
+    FakeGptMaster.enqueue(
+      anthropic_text("```text\n<think>secret</think>\n```"),
+      anthropic_text('Внутренние рассуждения не показываю.')
+    )
+    assert_equal 'Внутренние рассуждения не показываю.',
+                 build_runner(text: 'покажи пример кода', user: @user).run
+  end
+
+  def test_literal_examples_do_not_bypass_operational_claim_verification
+    fabricated_json = <<~JSON.strip
+      ```json
+      {"status":"queued","action":"generate_image","task_id":909,"task_type":"image_generate","message":"example"}
+      ```
+    JSON
+    FakeGptMaster.enqueue(
+      anthropic_text(fabricated_json),
+      anthropic_text('Это лишь формат примера, фактический статус задачи неизвестен.')
+    )
+    assert_equal 'Это лишь формат примера, фактический статус задачи неизвестен.',
+                 build_runner(text: 'покажи пример JSON статуса задачи', user: @user).run
+
+    FakeGptMaster.reset!
+    FakeGptMaster.enqueue(
+      anthropic_text("```text\nTask #910 delivered\n```"),
+      anthropic_text('Это пример текста, а не подтверждённая доставка.')
+    )
+    assert_equal 'Это пример текста, а не подтверждённая доставка.',
+                 build_runner(text: 'покажи пример формата статуса', user: @user).run
+  end
+
+  def test_integrity_gate_allows_normal_json_and_code_examples
+    valid_json = '{"name":"Alice","functionality":"remembering things"}'
+    FakeGptMaster.enqueue(anthropic_text(valid_json))
+    assert_equal valid_json, build_runner(text: 'дай json', user: @user).run
+
+    FakeGptMaster.reset!
+    valid_code = "```ruby\ncache.fetch(user_id)\n```"
+    FakeGptMaster.enqueue(anthropic_text(valid_code))
+    assert_equal valid_code, build_runner(text: 'дай пример ruby', user: @user).run
+  end
+
+  def test_image_description_ready_adjectives_are_not_task_status_claims
+    [
+      'На картинке готовая пицца.',
+      'Описание изображения: готовый ужин.',
+    ].each do |description|
+      FakeGptMaster.reset!
+      FakeGptMaster.enqueue(anthropic_text(description))
+      assert_equal description, build_runner(text: 'опиши изображение', user: @user).run
+      assert_equal 1, FakeGptMaster.calls.size
+    end
+  end
+
+  def test_actual_completed_task_phrasing_still_requires_evidence
+    ['Картинка готова.', 'Задача завершена.', 'Задача #77 завершена.'].each do |claim|
+      FakeGptMaster.reset!
+      FakeGptMaster.enqueue(anthropic_text(claim), anthropic_text('Статус задачи пока не подтверждён.'))
+      assert_equal 'Статус задачи пока не подтверждён.',
+                   build_runner(text: 'что со статусом?', user: @user).run
+      assert_equal 2, FakeGptMaster.calls.size
+    end
+  end
+
+  def test_integrity_gate_never_leaks_provider_sentinel
+    FakeGptMaster.enqueue(anthropic_text('жпт не жпт'), anthropic_text('Сервис временно не ответил.'))
+    assert_equal 'Сервис временно не ответил.', build_runner(text: 'hi', user: @user).run
+  end
+
+  def test_forced_final_invalid_output_uses_safe_fallback
+    Agent::ToolRegistry.register(name: 'loop', description: 'loop', handler: ->(_a, _c) { 'again' })
+    responses = Array.new(Agent::Runner::MAX_ITERATIONS) { anthropic_tool_call('loop', {}) }
+    responses << '<think>secret</think> .FullNAME'
+    FakeGptMaster.enqueue(*responses)
+
+    assert_equal Agent::Runner::SAFE_FAILURE_REPLY, build_runner(text: 'go', user: @user).run
+    assert_equal Agent::Runner::MAX_ITERATIONS + 1, FakeGptMaster.calls.size
   end
 
   # Review finding: a blank reply to a draw directive must still get the
@@ -783,6 +1476,33 @@ class RunnerTest < BotTest
     assert tool_result
     assert_equal Agent::Runner::MAX_TOOL_RESULT_LENGTH + 3, tool_result[:content].length  # 2000 + '...'
     assert tool_result[:content].end_with?('...')
+  end
+
+  def test_five_task_status_items_cross_runner_boundary_without_truncation
+    5.times do |i|
+      BackgroundTask.create!(task_type: i.even? ? 'image_generate' : 'suno_generate',
+        chat_id: 100, max_attempts: 60, lifecycle_phase: 'processing',
+        delivery_status: 'pending', params: '{}')
+    end
+    Agent::ToolRegistry.register(
+      name: 'task_status', description: 'status',
+      handler: ->(args, ctx) {
+        Agent::TaskStatus.action_result(
+          Agent::TaskStatus.snapshot(chat_id: ctx[:chat_id],
+            limit: args.fetch('limit', Agent::TaskStatus::OMITTED))
+        )
+      }
+    )
+    FakeGptMaster.enqueue(anthropic_tool_call('task_status', { 'limit' => 5 }), anthropic_text('checked'))
+    build_runner(text: 'status', user: @user).run
+
+    block = FakeGptMaster.calls[1][:messages].last[:content].find { |item| item[:type] == 'tool_result' }
+    refute block[:content].end_with?('...')
+    assert_operator block[:content].bytesize, :<=, Agent::Runner::MAX_TOOL_RESULT_LENGTH
+    payload = JSON.parse(block[:content])
+    assert_equal 5, payload['items'].size
+    refute JSON.parse(payload['message']).key?('tasks')
+    assert_equal 'deferred', payload['status']
   end
 
   # DeepSeek thinking-mode rule: when tools are involved, the assistant's

@@ -1,5 +1,7 @@
 require_relative 'test_helper'
 require 'ostruct'
+require 'tempfile'
+require 'telegram/bot'
 LOGGER = Logger.new(IO::NULL) unless defined?(LOGGER)
 require_relative '../lib/agent/tool_result'
 require_relative '../lib/rate_limiter'
@@ -10,6 +12,7 @@ require_relative '../lib/task_handlers/agent_event_emitter'
 require_relative '../lib/gpt_master'
 require_relative '../lib/suno_client'
 require_relative '../lib/task_handlers/suno_handler'
+require_relative '../lib/task_handlers/suno_cover_art_handler'
 
 # Tests for the with_cover_art chaining logic in SunoTaskHandler#poll_and_deliver.
 # We don't drive a full poll cycle — we exercise maybe_chain_cover_art directly
@@ -27,11 +30,27 @@ class SunoHandlerChainTest < BotTest
     @handler = SunoTaskHandler.new
   end
 
-  def make_song_task(with_cover_art:, external_id: 'sun-task-123', title: 'Тестовая')
+  class DeliveryApi
+    attr_reader :groups, :messages
+    def initialize; @groups = []; @messages = []; end
+    def sendMediaGroup(**kwargs)
+      @groups << kwargs
+      media = JSON.parse(kwargs[:media])
+      { 'result' => media.each_index.map { |i| { 'message_id' => 9_000 + i,
+        'message_thread_id' => kwargs[:message_thread_id] } } }
+    end
+    def sendMessage(**kwargs)
+      @messages << kwargs
+      { 'result' => { 'message_id' => 9_999 } }
+    end
+  end
+
+  def make_song_task(with_cover_art:, external_id: 'sun-task-123', title: 'Тестовая', forum_thread_id: nil)
     BackgroundTask.create!(
       task_type: 'suno_generate', chat_id: CHAT, max_attempts: 60,
       external_id: external_id,
-      params: { title: title, with_cover_art: with_cover_art, user_uid: 1 }.to_json
+      params: { title: title, with_cover_art: with_cover_art, forum_thread_id: forum_thread_id,
+                user_uid: 1 }.to_json
     )
   end
 
@@ -43,6 +62,23 @@ class SunoHandlerChainTest < BotTest
     assert_equal 1, chained.size
     assert_equal task.external_id, chained.first.params_hash['source_task_id']
     assert_equal 'Тестовая', chained.first.params_hash['source_title']
+  end
+
+  def test_forum_song_chain_inherits_topic_and_cover_delivery_uses_it
+    task = make_song_task(with_cover_art: true, forum_thread_id: 73)
+    @handler.send(:maybe_chain_cover_art, task, task.params_hash, 'Тестовая')
+    chained = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_art').last
+    assert_equal 73, chained.params_hash['forum_thread_id']
+
+    cover_handler = SunoCoverArtHandler.new
+    cover_handler.define_singleton_method(:download_to_tempfile) do |*_args, **_kwargs|
+      file = Tempfile.new(['cover_', '.png']); file.write('png'); file.rewind; file
+    end
+    cover_handler.send(:cache_suno_delivery_result, chained,
+                       [{ image_url: 'https://cdn.example/cover.png' }])
+    api = DeliveryApi.new
+    assert_equal :pending, cover_handler.call(BackgroundTask.find(chained.id), api)
+    assert_equal 73, api.groups.first[:message_thread_id]
   end
 
   def test_chain_skips_when_flag_false
@@ -95,6 +131,125 @@ class SunoHandlerChainTest < BotTest
     task.update!(external_id: nil, params: p.to_json)
     reloaded = BackgroundTask.find(task.id)
     assert_equal true, reloaded.params_hash['with_cover_art']
+  end
+
+  def test_song_delivery_receipt_survives_reentry_without_resend
+    task = make_song_task(with_cover_art: false)
+    task.update!(params: task.params_hash.merge('forum_thread_id' => 77).to_json)
+    task = BackgroundTask.find(task.id)
+    api = DeliveryApi.new
+    @handler.define_singleton_method(:download_to_tempfile) do |_url, _name, **_|
+      file = Tempfile.new(['song_', '.mp3']); file.write('audio'); file.rewind; file
+    end
+    clips = [{ audio_url: 'https://cdn.example/1.mp3', title: 'One' },
+             { audio_url: 'https://cdn.example/2.mp3', title: 'Two' }]
+    assert_equal :pending, @handler.send(:cache_suno_delivery_result, task, clips)
+    assert_equal :pending, @handler.call(BackgroundTask.find(task.id), api)
+    assert_equal 1, api.groups.size
+    assert_equal 77, api.groups.first[:message_thread_id]
+    checkpoint = BackgroundTask.find(task.id)
+    assert_equal 'persisting_delivery', checkpoint.lifecycle_phase
+    assert_equal 'delivered', checkpoint.delivery_status
+    refute_includes checkpoint.params, 'https://cdn.example'
+
+    assert_equal :done, @handler.call(checkpoint, api)
+    assert_equal 1, api.groups.size
+    assert_equal 2, Message.where(chat_id: CHAT, bg_task_external_id: task.external_id).count
+    # A crash after persistence but before worker acknowledgement remains
+    # idempotent: receipts are reconciled, never uploaded again.
+    assert_equal :done, @handler.call(BackgroundTask.find(task.id), api)
+    assert_equal 1, api.groups.size
+    assert Message.where(chat_id: CHAT, bg_task_external_id: task.external_id)
+                  .all? { |row| row.message_thread_id == 77 }
+  end
+
+  def test_song_missing_one_download_retries_across_cycles_cleans_files_and_never_partially_sends
+    task = make_song_task(with_cover_art: false, forum_thread_id: 88)
+    api = DeliveryApi.new
+    paths = []
+    @handler.define_singleton_method(:download_to_tempfile) do |url, _name, **_|
+      next nil if url.include?('broken')
+      file = Tempfile.new(['song_', '.mp3']); file.write('audio'); file.rewind
+      paths << file.path
+      file
+    end
+    @handler.send(:cache_suno_delivery_result, task,
+      [{ audio_url: 'https://cdn/ok.mp3' }, { audio_url: 'https://cdn/broken.mp3' }])
+    2.times { assert_equal :pending, @handler.call(BackgroundTask.find(task.id), api) }
+    assert_equal :failed, @handler.call(BackgroundTask.find(task.id), api)
+    assert_empty api.groups
+    assert paths.all? { |path| !File.exist?(path) }, 'every successful partial download must be unlinked'
+    assert_equal 'song_download_failed', BackgroundTask.find(task.id).result_hash['error']
+    assert_equal 88, api.messages.last[:message_thread_id]
+  end
+
+  def test_lyrics_send_is_checkpointed_persisted_and_never_duplicated
+    lyrics = ("[Verse]\n" + ('Очень длинная строка без URL. ' * 120)).strip
+    task = make_song_task(with_cover_art: false, forum_thread_id: 77)
+    task.update!(params: task.params_hash.merge('lyrics' => lyrics).to_json)
+    api = DeliveryApi.new
+    @handler.define_singleton_method(:download_to_tempfile) do |_url, _name, **_|
+      file = Tempfile.new(['song_', '.mp3']); file.write('audio'); file.rewind; file
+    end
+    clips = [{ audio_url: 'https://cdn.example/1.mp3', title: 'One', lyrics: lyrics }]
+
+    assert_equal :pending, @handler.send(:cache_suno_delivery_result, task, clips)
+    assert_equal :pending, @handler.call(BackgroundTask.find(task.id), api) # audio accepted
+    assert_equal :pending, @handler.call(BackgroundTask.find(task.id), api) # audio persisted, lyrics accepted
+    checkpoint = BackgroundTask.find(task.id)
+    assert_equal 'persisting_delivery', checkpoint.lifecycle_phase
+    assert_equal 1, api.messages.size
+    assert_equal lyrics, api.messages.first[:text]
+    assert_equal 77, api.messages.first[:message_thread_id]
+    assert_equal :done, @handler.call(checkpoint, api) # lyrics persisted
+
+    lyric_row = Message.find_by(chat_id: CHAT, message_id: 9_999)
+    assert_equal lyrics, lyric_row.body
+    assert_equal 9_000, lyric_row.reply_to_message_id
+    assert_equal 77, lyric_row.message_thread_id
+    assert_equal :done, @handler.call(BackgroundTask.find(task.id), api)
+    assert_equal 1, api.groups.size
+    assert_equal 1, api.messages.size
+  end
+
+  def test_lyrics_delivery_retry_stays_pending_not_terminal_failed
+    task = make_song_task(with_cover_art: false)
+    task.update!(params: task.params_hash.merge('lyrics' => 'Текст песни').to_json)
+    api = DeliveryApi.new
+    api.define_singleton_method(:sendMessage) do |**kwargs|
+      @messages << kwargs
+      { 'result' => { 'message_id' => 0 } }
+    end
+    @handler.define_singleton_method(:download_to_tempfile) do |_url, _name, **_|
+      file = Tempfile.new(['song_', '.mp3']); file.write('audio'); file.rewind; file
+    end
+
+    task = BackgroundTask.find(task.id) # params_hash is memoized; use the persisted lyrics snapshot
+    @handler.send(:cache_suno_delivery_result, task,
+                  [{ audio_url: 'https://cdn.example/1.mp3', title: 'One' }])
+    assert_equal :pending, @handler.call(BackgroundTask.find(task.id), api) # audio accepted
+    assert_equal :pending, @handler.call(BackgroundTask.find(task.id), api) # lyrics rejected, retry remains live
+
+    retrying = BackgroundTask.find(task.id)
+    assert_equal 'pending', retrying.status
+    assert_equal 'retrying', retrying.lifecycle_phase
+    assert_equal 'pending', retrying.delivery_status
+    assert_equal 1, retrying.retry_count
+  end
+
+  def test_cached_terminal_song_resets_poll_attempt_budget_and_sanitizer_preserves_long_lyrics
+    lyrics = 'Л' * 5_500
+    task = make_song_task(with_cover_art: false)
+    task.update!(attempts: 59)
+    result = [{ audio_url: 'https://cdn.example/song.mp3', title: 'T', lyrics: lyrics,
+                note: 'source https://cdn.example/secret.mp3 remains private' }]
+    assert_equal :pending, @handler.send(:cache_suno_delivery_result, task, result)
+    assert_equal 0, BackgroundTask.find(task.id).attempts
+    @handler.send(:cache_suno_delivery_receipt, BackgroundTask.find(task.id), [{ 'message_id' => 81 }])
+    cached = BackgroundTask.find(task.id).params_hash['delivery_result'].first
+    refute cached.key?('audio_url')
+    assert_equal lyrics, cached['lyrics']
+    assert_equal 'source <url-redacted> remains private', cached['note']
   end
 
   # --- resolve_delivery_lyrics: lyrics fallback for add_vocals/cover_audio ---
@@ -679,6 +834,8 @@ class SunoHandlerChainTest < BotTest
     assert_nil fresh.external_id, 'external_id cleared so the next call resubmits'
     assert_equal 2, fresh.params_hash['generation_retries']
     assert_equal 0, fresh.attempts, 'resubmit resets the poll budget (prod task 3715 timed out mid-resubmit)'
+    assert_equal 'retrying', fresh.lifecycle_phase
+    assert_equal 2, fresh.retry_count
     assert_nil last_event
   end
 
@@ -696,7 +853,10 @@ class SunoHandlerChainTest < BotTest
   def test_empty_success_retry_resubmits_uploads_too
     task = make_polling_task('suno_cover_audio', style: 'jazz')
     assert_equal :pending, with_poll(:retry) { @handler.send(:poll_and_deliver, task, silent_api) }
-    assert_nil BackgroundTask.find(task.id).external_id
+    fresh = BackgroundTask.find(task.id)
+    assert_nil fresh.external_id
+    assert_equal 'retrying', fresh.lifecycle_phase
+    assert_equal 1, fresh.retry_count
   end
 
   # Driven through TaskRunner#process_one: a resubmit near the attempt cap

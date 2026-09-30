@@ -1,4 +1,6 @@
 require_relative 'test_helper'
+require 'tempfile'
+require 'telegram/bot'
 LOGGER = Logger.new(IO::NULL) unless defined?(LOGGER)
 
 unless Settings.respond_to?(:suno)
@@ -19,20 +21,30 @@ class SunoCoverArtHandlerTest < BotTest
   CHAT = -1234567891
 
   class FakeApi
-    attr_reader :sent_messages
-    def initialize; @sent_messages = []; end
+    attr_reader :sent_messages, :media_group_calls
+    attr_accessor :media_group_result
+    def initialize; @sent_messages = []; @media_group_calls = []; end
     def sendMessage(**kw); @sent_messages << kw; { 'ok' => true, 'result' => { 'message_id' => 1 } }; end
+    def sendMediaGroup(**kw)
+      @media_group_calls << kw
+      count = JSON.parse(kw[:media]).size
+      media_group_result || { 'ok' => true, 'result' => count.times.map { |i| { 'message_id' => 100 + i } } }
+    end
   end
 
   def setup
     super
     @handler = SunoCoverArtHandler.new
     @api = FakeApi.new
+    @handler.define_singleton_method(:download_to_tempfile) do |*_args, **_kwargs|
+      tmp = Tempfile.new(['cover', '.png']); tmp.write('png'); tmp.rewind; tmp
+    end
   end
 
-  def make_task(external_id: 'cov-task-1', generation_retries: nil)
+  def make_task(external_id: 'cov-task-1', generation_retries: nil, forum_thread_id: nil)
     p = { source_task_id: 'sun-source-1', source_title: 'Тестовая' }
     p[:generation_retries] = generation_retries if generation_retries
+    p[:forum_thread_id] = forum_thread_id if forum_thread_id
     BackgroundTask.create!(
       task_type: 'suno_cover_art', chat_id: CHAT, max_attempts: 60,
       external_id: external_id, params: p.to_json
@@ -56,6 +68,8 @@ class SunoCoverArtHandlerTest < BotTest
     task.reload
     assert_nil task.external_id, ':retry must clear external_id so next call re-submits'
     assert_equal 1, task.params_hash['generation_retries']
+    assert_equal 'retrying', task.lifecycle_phase
+    assert_equal 1, task.retry_count
   end
 
   def test_retry_capped_marks_failed_and_notifies
@@ -133,5 +147,67 @@ class SunoCoverArtHandlerTest < BotTest
       with_raising_cover_art('Suno /api/v1/suno/cover/generate failed: 503 upstream') { @handler.send(:submit, task, @api) }
     end
     assert_equal 1, BackgroundTask.find(task.id).params_hash['submit_failures']
+    assert_equal 'retrying', BackgroundTask.find(task.id).lifecycle_phase
+    assert_equal 1, BackgroundTask.find(task.id).retry_count
+  end
+
+  def test_success_requires_valid_ids_and_marks_delivered_after_persistence
+    task = make_task
+    clips = [{ image_url: 'https://cdn/one.png' }, { image_url: 'https://cdn/two.png' }]
+    assert_equal :pending, stub_poll(clips) { @handler.send(:poll_and_deliver, task, @api) }
+    assert_equal :pending, @handler.call(BackgroundTask.find(task.id), @api)
+    assert_equal :done, @handler.call(BackgroundTask.find(task.id), @api)
+
+    persisted = BackgroundTask.find(task.id)
+    assert_equal 'done', persisted.status
+    assert_equal 'completed', persisted.lifecycle_phase
+    assert_equal 'delivered', persisted.delivery_status
+    assert_equal 2, Message.where(chat_id: CHAT, role: 'bot').count
+  end
+
+  def test_receipt_reentry_persists_without_resending_and_keeps_forum_thread
+    task = make_task(forum_thread_id: 404)
+    clips = [{ image_url: 'https://cdn/one.png' }]
+    assert_equal :pending, stub_poll(clips) { @handler.call(task, @api) }
+    assert_equal :pending, @handler.call(BackgroundTask.find(task.id), @api)
+
+    checkpoint = BackgroundTask.find(task.id)
+    assert_equal 'persisting_delivery', checkpoint.lifecycle_phase
+    assert_equal 404, @api.media_group_calls.first[:message_thread_id]
+    assert_equal :done, @handler.call(checkpoint, @api)
+    assert_equal 1, @api.media_group_calls.size, 'durable receipt must prevent a Telegram resend'
+    assert_equal 404, Message.where(chat_id: CHAT, role: 'bot').last.message_thread_id
+  end
+
+  def test_terminal_provider_result_resets_attempt_budget_and_photo_receipt_stays_viewable
+    task = make_task(forum_thread_id: 404)
+    task.update!(attempts: 59)
+    clips = [{ image_url: 'https://cdn/one.png' }]
+    assert_equal :pending, stub_poll(clips) { @handler.call(task, @api) }
+    assert_equal 0, BackgroundTask.find(task.id).attempts
+    @api.media_group_result = { 'result' => [{ 'message_id' => 123, 'photo' => [
+      { 'file_id' => 'SMALL', 'width' => 320 }, { 'file_id' => 'VIEWABLE', 'width' => 1280 }
+    ] }] }
+    assert_equal :pending, @handler.call(BackgroundTask.find(task.id), @api)
+    receipt = BackgroundTask.find(task.id).params_hash['delivery_receipt'].first
+    assert_equal 'VIEWABLE', receipt['photo'].last['file_id']
+    assert_equal :done, @handler.call(BackgroundTask.find(task.id), @api)
+    row = Message.find_by(chat_id: CHAT, message_id: 123)
+    assert_equal 'VIEWABLE', row.attachment_photo_file_id
+    assert_equal 404, row.message_thread_id
+  end
+
+  def test_truthy_malformed_media_group_response_is_delivery_failure
+    task = make_task
+    @api.media_group_result = { 'ok' => true, 'result' => [{ 'message_id' => '1' }] }
+    clips = [{ image_url: 'https://cdn/one.png' }]
+    assert_equal :pending, stub_poll(clips) { @handler.send(:poll_and_deliver, task, @api) }
+    2.times { assert_equal :pending, @handler.call(BackgroundTask.find(task.id), @api) }
+    assert_equal :failed, @handler.call(BackgroundTask.find(task.id), @api)
+
+    persisted = BackgroundTask.find(task.id)
+    assert_equal 'failed', persisted.status
+    assert_equal 'failed', persisted.delivery_status
+    refute Message.where(chat_id: CHAT, role: 'bot').where('body LIKE ?', '%обложка для%').exists?
   end
 end

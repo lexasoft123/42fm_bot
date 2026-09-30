@@ -41,7 +41,7 @@ module Agent
 
       fingerprint = error_fingerprint(source, error)
       if parent_task.nil? && existing_parentless_event(chat_id, fingerprint)
-        LOGGER.warn "[chat=#{chat_id}] Agent::ErrorReporter: coalesced repeated #{source}" if defined?(LOGGER)
+        LOGGER.warn "[chat=#{chat_id}] Agent::ErrorReporter: coalesced repeated #{sanitize(source)}" if defined?(LOGGER)
         return nil
       end
 
@@ -54,8 +54,8 @@ module Agent
         fingerprint: fingerprint
       )
     rescue => reporter_error
-      LOGGER.warn "[chat=#{chat_id}] Agent::ErrorReporter: failed to report #{source}: " \
-                  "#{reporter_error.class}: #{reporter_error.message}" if defined?(LOGGER)
+      LOGGER.warn "[chat=#{chat_id}] Agent::ErrorReporter: failed to report #{sanitize(source)}: " \
+                  "#{reporter_error.class}: #{sanitize(reporter_error.message)}" if defined?(LOGGER)
       nil
     end
 
@@ -67,7 +67,7 @@ module Agent
       end
       ids.uniq.filter_map { |chat_id| report(chat_id: chat_id, source: source, error: error) }
     rescue => reporter_error
-      LOGGER.warn "Agent::ErrorReporter: failed global report #{source}: #{reporter_error.class}: #{reporter_error.message}" if defined?(LOGGER)
+      LOGGER.warn "Agent::ErrorReporter: failed global report #{sanitize(source)}: #{reporter_error.class}: #{sanitize(reporter_error.message)}" if defined?(LOGGER)
       []
     end
 
@@ -85,27 +85,37 @@ module Agent
 
     # Shared event creation primitive. Feature handlers keep their tailored
     # event types/prompts; generic failures use #report above.
-    def emit(chat_id:, event_type:, summary:, parent_task: nil, rate_limited: true, fingerprint: nil)
+    def emit(chat_id:, event_type:, summary:, parent_task: nil, rate_limited: true, fingerprint: nil,
+             user_notified: false, forum_thread_id: nil)
       return nil if chat_id.nil?
       return nil if parent_task&.task_type == 'agent_event'
 
       if rate_limited && recent_event_count(chat_id) >= AGENT_EVENT_HOUR_CAP
-        LOGGER.warn "[chat=#{chat_id}] agent_event rate limit (#{AGENT_EVENT_HOUR_CAP}/hour) — suppressing #{event_type}" if defined?(LOGGER)
+        LOGGER.warn "[chat=#{chat_id}] agent_event rate limit (#{AGENT_EVENT_HOUR_CAP}/hour) — suppressing #{sanitize(event_type)}" if defined?(LOGGER)
         return nil
       end
 
-      BackgroundTask.create!(
-        task_type: 'agent_event',
-        chat_id: chat_id,
-        max_attempts: 5,
-        params: {
-          event_type: event_type,
+      BackgroundTask.transaction do
+        delivery_failure = %w[song_delivery_failed separation_delivery_failed].include?(event_type.to_s)
+        event = BackgroundTask.create!(
+          task_type: 'agent_event',
+          chat_id: chat_id,
           parent_task_id: parent_task&.id,
-          parent_task_type: parent_task&.task_type,
-          error_fingerprint: fingerprint,
-          summary: sanitize(summary),
-        }.compact.to_json
-      )
+          max_attempts: 5,
+          delivery_status: delivery_failure ? 'failed' : 'unknown',
+          params: {
+            event_type: event_type,
+            parent_task_id: parent_task&.id,
+            parent_task_type: parent_task&.task_type,
+            error_fingerprint: fingerprint,
+            summary: sanitize(summary),
+            user_notified: (true if user_notified),
+            forum_thread_id: forum_thread_id,
+          }.compact.to_json
+        )
+        parent_task&.update!(delivery_status: 'failed') if delivery_failure
+        event
+      end
     end
 
     def existing_parentless_event(chat_id, fingerprint)
@@ -119,10 +129,9 @@ module Agent
 
     def existing_event_for(task)
       BackgroundTask.where(chat_id: task.chat_id, task_type: 'agent_event')
+        .where(parent_task_id: task.id)
         .where('created_at >= ?', task.created_at || Time.at(0))
-        .order(id: :desc).limit(25).find do |event|
-          event.params_hash['parent_task_id'].to_i == task.id.to_i
-        end
+        .order(id: :desc).first
     end
 
     def recent_event_count(chat_id)

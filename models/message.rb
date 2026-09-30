@@ -30,12 +30,14 @@ class Message < ActiveRecord::Base
     rel
   end
 
-  def self.persist_bot_reply(chat_id:, body:, response:, reply_to: nil, bg_task_external_id: nil)
+  def self.persist_bot_reply(chat_id:, body:, response:, reply_to: nil, bg_task_external_id: nil,
+                             message_thread_id: nil)
     return unless response
     mid = response.respond_to?(:message_id) ? response.message_id :
           (response.is_a?(Hash) ? (response.dig('result', 'message_id') || response['message_id']) : nil)
-    tid = response.respond_to?(:message_thread_id) ? response.message_thread_id :
+    response_tid = response.respond_to?(:message_thread_id) ? response.message_thread_id :
           (response.is_a?(Hash) ? (response.dig('result', 'message_thread_id') || response['message_thread_id']) : nil)
+    tid = message_thread_id || response_tid
     return unless mid
     ActiveRecord::Base.connection_pool.with_connection do
       create(role: 'bot', chat_id: chat_id, body: body, message_id: mid,

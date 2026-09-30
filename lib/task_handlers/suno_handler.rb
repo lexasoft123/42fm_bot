@@ -1,4 +1,5 @@
 require_relative 'agent_event_emitter'
+require_relative 'suno_delivery'
 require_relative '../media_download'
 require_relative '../telegram_file'
 
@@ -6,6 +7,7 @@ class SunoTaskHandler
   include ChatContext
   include AgentEventEmitter
   include MediaDownload
+  include SunoDelivery
 
   MAX_PROMPT_FAILURES = 3
   MAX_SUBMIT_FAILURES = 3
@@ -14,7 +16,11 @@ class SunoTaskHandler
   UPLOAD_TASK_TYPES = %w[suno_cover_audio suno_add_vocals].freeze
 
   def call(task, api)
-    if task.external_id.nil?
+    if suno_delivery_receipt(task)
+      persist_audio_receipt(task, api)
+    elsif suno_delivery_result(task)
+      deliver_cached_audio(task, api)
+    elsif task.external_id.nil?
       compose_and_submit(task, api)
     else
       poll_and_deliver(task, api)
@@ -46,7 +52,7 @@ class SunoTaskHandler
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit add_vocals: #{e.message}", raise_on_retry: e)
     end
-    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted add_vocals #{suno_task_id}"
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted add_vocals"
     ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: suno_task_id) }
     :pending
   end
@@ -74,7 +80,7 @@ class SunoTaskHandler
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit cover_audio: #{e.message}", raise_on_retry: e)
     end
-    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted cover_audio #{suno_task_id} mode=#{custom_mode ? 'custom' : 'auto'}"
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted cover_audio mode=#{custom_mode ? 'custom' : 'auto'}"
     ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: suno_task_id) }
     :pending
   end
@@ -181,7 +187,7 @@ class SunoTaskHandler
     rescue => e
       return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit: #{e.message}", raise_on_retry: e)
     end
-    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted #{suno_task_id} with tags '#{tags}'"
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted song generation"
 
     ActiveRecord::Base.connection_pool.with_connection do
       task.update!(external_id: suno_task_id, params: p.merge('title' => title).to_json)
@@ -192,26 +198,30 @@ class SunoTaskHandler
   # Increment a step-failure counter; if cap reached, fail+notify; otherwise re-raise so
   # TaskRunner retries on the next poll cycle.
   def bail_or_retry(task, api, params, counter, max, reason, raise_on_retry:)
+    safe_reason = safe_suno_detail(reason)
     # Permanent rejection (Suno 400/401/404/413/429 — see
     # SunoClient#submit_error): retrying can't help, and re-raising would let
     # TaskRunner fail the task with a raw "Ошибка: …" and no agent_event.
     # Fail here with the (URL-redacted) detail instead.
     if TaskRunner.permanent_error?(raise_on_retry)
-      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter} permanent rejection, not retrying: #{reason}"
-      mark_failed_and_notify(task, api, counter.sub(/_failures\z/, '_rejected'), error_detail: reason.to_s)
+      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter} permanent rejection, not retrying: #{safe_reason}"
+      mark_failed_and_notify(task, api, counter.sub(/_failures\z/, '_rejected'), error_detail: safe_reason)
       return :failed
     end
     params[counter] = (params[counter] || 0) + 1
-    ActiveRecord::Base.connection_pool.with_connection { task.update!(params: params.to_json) }
     if params[counter] >= max
-      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]} (max #{max}), giving up: #{reason}"
+      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: params.to_json) }
+      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]} (max #{max}), giving up: #{safe_reason}"
       # Pass the underlying exception/reason as error_detail so the agent
       # event summary distinguishes "Suno API rejected with 4xx" vs
       # "transient network failure" vs "submit_failed_after_retries".
-      mark_failed_and_notify(task, api, "#{counter}_after_retries", error_detail: reason.to_s)
+      mark_failed_and_notify(task, api, "#{counter}_after_retries", error_detail: safe_reason)
       return :failed
     end
-    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]}/#{max} — will retry: #{reason}"
+    ActiveRecord::Base.connection_pool.with_connection do
+      task.mark_retrying!(params: params.to_json)
+    end
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]}/#{max} — will retry: #{safe_reason}"
     raise raise_on_retry
   end
 
@@ -220,7 +230,7 @@ class SunoTaskHandler
   def poll_and_deliver(task, api)
     result = SunoClient.new.poll_once(task.external_id)
 
-    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: polling #{task.external_id} (attempt #{task.attempts + 1}/#{task.max_attempts}) → #{result.inspect}"
+    LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: poll attempt #{task.attempts + 1}/#{task.max_attempts} → #{result.is_a?(Array) ? "#{result.size} clips" : safe_suno_detail(result.inspect)}"
 
     case result
     when :pending
@@ -245,16 +255,7 @@ class SunoTaskHandler
       end
     when Array
       LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: complete! #{result.size} clips model_name=#{result.map { |c| c[:model_name] }.compact.uniq.join(',').presence || '?'}"
-      ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(result) }
-      p = task.params_hash
-      title = p['title'] || 'Песня от 42FM'
-      maybe_chain_cover_art(task, p, title)
-      send_audio(api, task, result, title, p)
-      if (p['generation_retries'] || 0) >= 1
-        emit_agent_event(task, 'song_succeeded_after_retries',
-          summary: "Песня '#{title}' получилась с #{p['generation_retries']}-й попытки.")
-      end
-      :done
+      cache_suno_delivery_result(task, result)
     end
   end
 
@@ -283,14 +284,15 @@ class SunoTaskHandler
     p = task.params_hash
     retries = (p['generation_retries'] || 0) + 1
     p['generation_retries'] = retries
-    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno transient failure for #{task.external_id} (retry #{retries}/#{MAX_GENERATION_RETRIES})#{detail ? " — #{detail}" : ''}"
+    safe_detail = safe_suno_detail(detail)
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno transient failure (retry #{retries}/#{MAX_GENERATION_RETRIES})#{detail ? " — #{safe_detail}" : ''}"
     if retries <= MAX_GENERATION_RETRIES
       ActiveRecord::Base.connection_pool.with_connection do
-        task.update!(external_id: nil, attempts: 0, params: p.to_json)
+        task.mark_retrying!(external_id: nil, attempts: 0, params: p.to_json)
       end
       return :pending
     end
-    mark_failed_and_notify(task, api, 'suno_failed_after_retries', error_detail: detail)
+    mark_failed_and_notify(task, api, 'suno_failed_after_retries', error_detail: safe_detail)
     :failed
   end
 
@@ -325,12 +327,13 @@ class SunoTaskHandler
         max_attempts: 60,
         params: { source_task_id: task.external_id,
                   source_title:   title,
+                  forum_thread_id: params['forum_thread_id'],
                   user_uid:       params['user_uid'] }.to_json
       )
     end
     LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: chained suno_cover_art for #{task.external_id}"
   rescue => e
-    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: chain cover_art failed: #{e.class}: #{e.message}"
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: chain cover_art failed: #{e.class}: #{safe_suno_detail(e.message)}"
   end
 
   # `error_detail` is the human-readable Suno error string (e.g. "Suno [413]:
@@ -352,14 +355,17 @@ class SunoTaskHandler
   # lives in AgentEventHandler::EVENT_DESCRIPTIONS, not in the summary, which
   # is cut at 600 chars.
   def mark_failed_and_notify(task, api, reason, error_detail: nil)
-    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno generation #{reason} for #{task.external_id}#{error_detail ? " (#{error_detail})" : ''}"
+    error_detail = safe_suno_detail(error_detail) if error_detail
+    scrub_terminal_delivery_result!(task)
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: Suno generation #{reason}#{error_detail ? " (#{error_detail})" : ''}"
     ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(reason) }
     text = FAILURE_NOTICES.fetch(task.task_type, 'Не удалось сгенерировать песню')
     begin
-      resp = api.sendMessage(chat_id: task.chat_id, text: text)
-      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)
+      resp = api.sendMessage(chat_id: task.chat_id, text: text, **forum_send_params(task.params_hash))
+      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp,
+                                message_thread_id: task.params_hash['forum_thread_id'])
     rescue => e
-      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{e.message}"
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{safe_suno_detail(e.message)}"
     end
     emit_agent_event(task, failure_event_type(task, reason), summary: failure_summary(task, reason, error_detail))
   end
@@ -408,7 +414,7 @@ class SunoTaskHandler
     LOGGER.debug "[chat=#{chat_id}] #{self.class.name}: resolved tags → '#{tags}'"
     tags.empty? ? (known || 'rock') : tags
   rescue => e
-    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} resolve_tags failed: #{e.message}"
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} resolve_tags failed: #{safe_suno_detail(e.message)}"
     known || 'rock'
   end
 
@@ -511,9 +517,11 @@ class SunoTaskHandler
     PROMPT
   end
 
-  def send_audio(api, task, clips, title, params)
+  def deliver_cached_audio(task, api)
+    params = task.params_hash
+    clips = params['delivery_result']
+    title = params['title'] || 'Песня от 42FM'
     chat_id = task.chat_id
-    delivered = false
     artist = params['artist'].to_s.strip
     performer = artist.empty? ? '42FM Bot' : artist
 
@@ -525,70 +533,165 @@ class SunoTaskHandler
     media = []
 
     clips.each_with_index do |clip, i|
-      filename = build_filename(performer, clip[:title] || title, i + 1, clips.size)
-      tmp = download_to_tempfile(clip[:audio_url], filename, chat_id: chat_id)
+      clip_title = clip['title'] || title
+      filename = build_filename(performer, clip_title, i + 1, clips.size)
+      tmp = download_to_tempfile(clip['audio_url'], filename, chat_id: chat_id)
       next unless tmp
 
       temp_files << { file: tmp, name: filename }
-      attach_key = "audio#{i}"
+      attach_key = "audio#{temp_files.size - 1}"
       entry = { type: 'audio', media: "attach://#{attach_key}",
-                title: clip[:title] || title, performer: performer }
+                title: clip_title, performer: performer }
       entry[:caption] = caption if i == 0
       entry[:parse_mode] = 'Markdown' if i == 0
       media << entry
     end
 
-    if media.empty?
-      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_audio: no clips downloaded — skipping send"
-      notify_delivery_failed(task, api, title)
-      return
+    if media.size != clips.size
+      LOGGER.warn "[chat=#{chat_id}] #{self.class.name}: downloaded #{media.size}/#{clips.size} clips"
+      cleanup_audio_tempfiles(temp_files)
+      return :pending if retry_suno_delivery(task, 'delivery_failures')
+      mark_failed_and_notify(task, api, 'song_download_failed')
+      return :failed
     end
 
     LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: sendMediaGroup → #{media.size} clips (#{temp_files.sum { |tf| File.size(tf[:file].path) }} bytes total)"
 
-    retries = 0
     result = begin
       send_params = { chat_id: chat_id, media: media.to_json }
+      send_params.merge!(forum_send_params(params))
       temp_files.each_with_index { |tf, i| send_params[:"audio#{i}"] = Faraday::UploadIO.new(tf[:file].path, 'audio/mpeg', tf[:name]) }
       api.sendMediaGroup(**send_params)
-    rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed, Faraday::TimeoutError => e
-      retries += 1
-      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendMediaGroup retry #{retries}: #{e.class}: #{e.message}"
-      if retries <= 3
-        sleep 3
-        retry
-      end
-      LOGGER.error "[chat=#{chat_id}] #{self.class.name} sendMediaGroup gave up after #{retries} retries"
+    rescue => e
+      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendMediaGroup failed: #{e.class}: #{safe_suno_detail(e.message)}"
       nil
     ensure
-      temp_files.each { |tf| tf[:file].close; tf[:file].unlink rescue nil }
+      cleanup_audio_tempfiles(temp_files)
     end
 
-    if result.nil?
+    messages = telegram_messages(result, expected_count: media.size)
+    if messages.nil?
+      return :pending if retry_suno_delivery(task, 'delivery_failures')
       notify_delivery_failed(task, api, title)
-      return
+      return :failed
     end
-    delivered = true
-
-    messages = result.is_a?(Hash) ? result['result'] : result
-    msg_id = messages&.first&.respond_to?(:message_id) ? messages.first.message_id : messages&.first&.dig('message_id')
-    LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: sendMediaGroup ok, first_message_id=#{msg_id.inspect}"
-
-    persist_bot_media_rows(chat_id, messages, title, params, bg_task_external_id: task.external_id)
-
-    lyrics = resolve_delivery_lyrics(params, clips)
-    return if lyrics.empty?
-
-    LOGGER.debug "[chat=#{chat_id}] #{self.class.name} send_audio: sending lyrics (#{lyrics.length} chars, reply_to=#{msg_id.inspect})"
-    lyrics_resp = api.sendMessage(chat_id: chat_id, text: lyrics, reply_to_message_id: msg_id)
-    persist_lyrics_row(chat_id, lyrics_resp, lyrics, msg_id)
-    LOGGER.info "[chat=#{chat_id}] #{self.class.name} send_audio: lyrics sent"
+    cache_suno_delivery_receipt(task, messages) ? :pending : :failed
   rescue => e
-    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} send_audio failed: #{e.class}: #{e.message} (#{e.backtrace&.first})"
-    # Only report a lost delivery when the media group itself never went
-    # out — a failure in the persist/lyrics follow-ups after a successful
-    # sendMediaGroup means the user HAS the song.
-    notify_delivery_failed(task, api, title) unless delivered
+    cleanup_audio_tempfiles(temp_files || [])
+    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} delivery failed: #{e.class}: #{safe_suno_detail(e.message)}"
+    return :pending if retry_suno_delivery(task, 'delivery_failures')
+    notify_delivery_failed(task, api, title)
+    :failed
+  end
+
+  def persist_audio_receipt(task, api)
+    params = task.params_hash
+    receipts = params['delivery_receipt']
+    title = params['title'] || 'Песня от 42FM'
+    persisted = receipts.each_with_index.all? do |receipt, i|
+      existing = Message.find_by(chat_id: task.chat_id, message_id: receipt['message_id'])
+      next true if existing
+      body = "[песня: #{title}#{receipts.size > 1 ? " (#{i + 1}/#{receipts.size})" : ''}]"
+      Message.persist_bot_reply(chat_id: task.chat_id, body: body,
+        response: receipt_response(receipt), bg_task_external_id: task.external_id,
+        message_thread_id: params['forum_thread_id'])&.persisted?
+    end
+    unless persisted
+      return :pending if retry_suno_delivery(task, 'persistence_failures', delivery_status: 'delivered')
+      ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!('song_persistence_failed', delivery_status: 'delivered') }
+      emit_agent_event(task, 'song_persistence_failed', summary: "Песня «#{title}» принята Telegram, но не сохранена локально; не отправляй её повторно.")
+      return :failed
+    end
+    lyrics = resolve_delivery_lyrics(params, params['delivery_result'])
+    unless lyrics.empty?
+      return persist_or_send_lyrics(task, api, params, receipts, lyrics)
+    end
+    finalize_audio_delivery(task, params, title)
+  rescue => e
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}: persistence failed: #{e.class}: #{safe_suno_detail(e.message)}"
+    return :pending if retry_suno_delivery(task, 'persistence_failures', delivery_status: 'delivered')
+    ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!('song_persistence_failed', delivery_status: 'delivered') }
+    emit_agent_event(task, 'song_persistence_failed',
+      summary: "Песня «#{title}» принята Telegram, но не сохранена локально; не отправляй её повторно.")
+    :failed
+  end
+
+  def persist_or_send_lyrics(task, api, params, audio_receipts, lyrics)
+    title = params['title'] || 'Песня от 42FM'
+    if (receipt = params['lyrics_delivery_receipt'])
+      existing = Message.find_by(chat_id: task.chat_id, message_id: receipt['message_id'])
+      row = existing || Message.persist_bot_reply(
+        chat_id: task.chat_id, body: lyrics, response: receipt_response(receipt),
+        reply_to: audio_receipts.first['message_id'],
+        message_thread_id: params['forum_thread_id']
+      )
+      unless row&.persisted?
+        return :pending if retry_suno_delivery(task, 'lyrics_persistence_failures', delivery_status: 'delivered')
+        ActiveRecord::Base.connection_pool.with_connection do
+          task.mark_failed!('song_lyrics_persistence_failed', delivery_status: 'delivered')
+        end
+        emit_agent_event(task, 'song_persistence_failed',
+          summary: "Песня «#{title}» и текст приняты Telegram, но текст не сохранён локально; не отправляй их повторно.")
+        return :failed
+      end
+      return finalize_audio_delivery(task, params, title)
+    end
+
+    response = api.sendMessage(chat_id: task.chat_id, text: lyrics,
+      reply_to_message_id: audio_receipts.first['message_id'], **forum_send_params(params))
+    message = telegram_messages(response, expected_count: 1)&.first
+    unless message
+      return :pending if retry_suno_delivery(task, 'lyrics_delivery_failures', delivery_status: 'pending')
+      ActiveRecord::Base.connection_pool.with_connection do
+        task.mark_failed!('song_lyrics_delivery_failed', delivery_status: 'failed')
+      end
+      emit_agent_event(task, 'song_delivery_failed',
+        summary: "Песня «#{title}» доставлена, но текст отправить не удалось; не отправляй аудио повторно.")
+      return :failed
+    end
+
+    receipt = telegram_receipt(message, forum_thread_id: params['forum_thread_id'])
+    params['lyrics_delivery_receipt'] = receipt
+    ActiveRecord::Base.connection_pool.with_connection do
+      task.update!(params: params.to_json, lifecycle_phase: 'persisting_delivery', delivery_status: 'delivered')
+    end
+    :pending
+  rescue => e
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}: lyrics stage failed: #{e.class}: #{safe_suno_detail(e.message)}"
+    return :pending if retry_suno_delivery(task, 'lyrics_delivery_failures', delivery_status: 'pending')
+    ActiveRecord::Base.connection_pool.with_connection do
+      task.mark_failed!('song_lyrics_delivery_failed', delivery_status: 'failed')
+    end
+    emit_agent_event(task, 'song_delivery_failed',
+      summary: "Песня «#{title}» доставлена, но текст отправить не удалось; не отправляй аудио повторно.")
+    :failed
+  end
+
+  def finalize_audio_delivery(task, params, title)
+    final = params['delivery_result']
+    ActiveRecord::Base.connection_pool.with_connection { task.mark_done!(final, delivery_status: 'delivered') }
+    maybe_chain_cover_art(task, params, title)
+    if params.fetch('generation_retries', 0).to_i >= 1
+      emit_agent_event(task, 'song_succeeded_after_retries', summary: "Песня '#{title}' получилась с #{params['generation_retries']}-й попытки.")
+    end
+    :done
+  end
+
+  def telegram_media_messages(response, expected_count:)
+    messages = response.is_a?(Hash) ? response['result'] : response
+    return unless messages.is_a?(Array) && messages.size == expected_count
+    return unless messages.all? { |message| telegram_message_id(message) }
+
+    messages
+  end
+
+  def telegram_message_id(message)
+    value = if message.respond_to?(:message_id)
+              message.message_id
+            elsif message.is_a?(Hash)
+              message['message_id'] || message[:message_id]
+            end
+    value if value.is_a?(Integer) && value.positive?
   end
 
   # The task is already DB-:done by the time delivery runs (mark_done!
@@ -604,18 +707,23 @@ class SunoTaskHandler
   # escaped from an early-return path, send_audio's outer rescue would
   # re-enter this method (`unless delivered`) and double-post to the chat.
   def notify_delivery_failed(task, api, title)
-    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: song_delivery_failed for '#{title}' (suno task #{task.external_id})"
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: song_delivery_failed for '#{title}'"
+    scrub_terminal_delivery_result!(task)
+    ActiveRecord::Base.connection_pool.with_connection do
+      task.mark_failed!('song_delivery_failed', delivery_status: 'failed')
+    end
     text = 'Песня сгенерировалась, но отправить её в чат не вышло 😔'
     begin
-      resp = api.sendMessage(chat_id: task.chat_id, text: text)
-      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)
+      resp = api.sendMessage(chat_id: task.chat_id, text: text, **forum_send_params(task.params_hash))
+      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp,
+                                message_thread_id: task.params_hash['forum_thread_id'])
     rescue => e
-      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify delivery failure: #{e.class}: #{e.message}"
+      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify delivery failure: #{e.class}: #{safe_suno_detail(e.message)}"
     end
     emit_agent_event(task, 'song_delivery_failed',
       summary: "Песня '#{title}' сгенерировалась, но доставка в чат не удалась (ошибка отправки в Telegram). Эту генерацию уже не доставить — предложи пользователю заказать песню заново.")
   rescue => e
-    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: notify_delivery_failed itself failed: #{e.class}: #{e.message}"
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: notify_delivery_failed itself failed: #{e.class}: #{safe_suno_detail(e.message)}"
   end
 
   # compose_song stores the locally-composed lyrics in `params['lyrics']`
@@ -628,24 +736,14 @@ class SunoTaskHandler
     from_params = params['lyrics'].to_s.strip
     return from_params unless from_params.empty?
     return '' unless clips.is_a?(Array) && clips.first
-    clips.first[:lyrics].to_s.strip
+    (clips.first['lyrics'] || clips.first[:lyrics]).to_s.strip
   end
 
-  # Save each clip from the media group as a bot Message row via
-  # Message.persist_bot_reply (the centralized bot-side persistence path).
-  # Without these, a user reply to the audio would point at a Telegram
-  # message_id we never indexed, breaking reply_to-based context resolution.
-  def persist_bot_media_rows(chat_id, messages, title, params, bg_task_external_id: nil)
-    return unless messages.is_a?(Array)
-    messages.each_with_index do |msg, i|
-      body = "[песня: #{title}#{messages.size > 1 ? " (#{i + 1}/#{messages.size})" : ''}]"
-      Message.persist_bot_reply(chat_id: chat_id, body: body, response: msg,
-                                bg_task_external_id: bg_task_external_id)
+  def cleanup_audio_tempfiles(temp_files)
+    temp_files.each do |entry|
+      entry[:file].close rescue nil
+      entry[:file].unlink rescue nil
     end
-  end
-
-  def persist_lyrics_row(chat_id, resp, body, reply_to)
-    Message.persist_bot_reply(chat_id: chat_id, body: body, response: resp, reply_to: reply_to)
   end
 
   def build_filename(performer, title, index, total)

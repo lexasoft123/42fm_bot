@@ -3,6 +3,7 @@ LOGGER = Logger.new(IO::NULL) unless defined?(LOGGER)
 
 require 'httparty'
 require 'openssl'
+require 'stringio'
 require_relative '../lib/model_provider_client'
 
 class ModelProviderClientTest < Minitest::Test
@@ -68,7 +69,8 @@ class ModelProviderClientTest < Minitest::Test
         ModelProviderClient.new(CFG).post('/v1/images/generations', {})
       end
     end
-    assert_includes err.message, '...(truncated)'
+    assert(err.message.include?('...(truncated)') || err.message.include?('[redacted]'),
+      'long opaque provider payload must be truncated or classified as a credential')
     assert err.message.length < 600, "error message should be truncated, got #{err.message.length} chars"
   end
 
@@ -118,6 +120,34 @@ class ModelProviderClientTest < Minitest::Test
     end
     assert_nil code
     assert_nil body
+  end
+
+  def test_get_exception_log_redacts_path_token_and_signed_url
+    token = 'GETEXCEPTIONTOKEN123456789012345'
+    signed_url = "https://provider.example/failure?token=#{token}"
+    output = StringIO.new
+    original_logger = LOGGER
+    Object.send(:remove_const, :LOGGER)
+    Object.const_set(:LOGGER, Logger.new(output))
+
+    code, body = with_stubbed(
+      :get,
+      raises: OpenSSL::SSL::SSLError.new("handshake failed at #{signed_url}")
+    ) do
+      ModelProviderClient.new(CFG).get("/prediction/#{token}")
+    end
+
+    assert_nil code
+    assert_nil body
+    assert_includes output.string, 'OpenSSL::SSL::SSLError'
+    assert_includes output.string, '[url]'
+    refute_includes output.string, token
+    refute_includes output.string, 'provider.example'
+  ensure
+    if defined?(original_logger) && original_logger
+      Object.send(:remove_const, :LOGGER) if Object.const_defined?(:LOGGER)
+      Object.const_set(:LOGGER, original_logger)
+    end
   end
 
   # tag: --------------------------------------------------------------

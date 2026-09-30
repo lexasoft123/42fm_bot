@@ -22,13 +22,19 @@ Agent::ToolRegistry.register(
     request = "Шуточная торжественная награда: богато украшенная медаль или " \
               "диплом с гравировкой «#{args['recipient']} — за #{args['reason']}». " \
               "Пафосная церемониальная стилистика, золото, ленты, герб чата 42FM."
-    BackgroundTask.create!(
+    params = { request: request, user_uid: ctx[:user]&.uid,
+               award: true, recipient: args['recipient'] }
+    params[:forum_thread_id] = ctx[:forum_thread_id] if ctx[:forum_thread_id]
+    task = BackgroundTask.create!(
       task_type: 'image_generate',
       chat_id: ctx[:chat_id],
       max_attempts: 60,
-      params: { request: request, user_uid: ctx[:user]&.uid,
-                award: true, recipient: args['recipient'] }.to_json
+      params: params.to_json
     )
-    "Награда для #{args['recipient']} поставлена в очередь и скоро приедет в чат картинкой 🏆"
+    Agent::ToolResult.action(
+      status: :queued, action: 'generate_image', task_id: task.id,
+      task_type: 'image_generate', phase: :queued, delivery: :pending,
+      user_text: "Награда для #{args['recipient']} поставлена в очередь и скоро приедет в чат картинкой 🏆"
+    )
   }
 )

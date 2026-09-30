@@ -222,13 +222,13 @@ class SunoClient
     when 'CREATE_TASK_FAILED', 'GENERATE_WAV_FAILED', 'CALLBACK_EXCEPTION'
       err_code = data['errorCode']
       err_msg  = data['errorMessage'] || data['successFlag']
-      LOGGER.warn "#{self.class.name}#poll_wav_once Suno error: code=#{err_code} msg=#{err_msg.inspect}"
+      LOGGER.warn "#{self.class.name}#poll_wav_once Suno error: code=#{err_code} msg=#{redact_urls(err_msg).inspect}"
       { failed: true, error: format_suno_error(err_code, err_msg) }
     else
       :pending
     end
   rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
-    LOGGER.warn "#{self.class.name} poll_wav_once: #{e.class}: #{e.message}"
+    LOGGER.warn "#{self.class.name} poll_wav_once: #{e.class}: #{redact_urls(e.message)}"
     :pending
   end
 
@@ -285,17 +285,17 @@ class SunoClient
       LOGGER.warn "#{self.class.name}#poll_separation_once SUCCESS without stem urls: response keys=#{(data['response'] || {}).keys.inspect rescue '?'}"
       { failed: true, error: 'Suno: разделение завершилось, но ссылок на дорожки нет' }
     when 'CREATE_TASK_FAILED', 'GENERATE_AUDIO_FAILED', 'CALLBACK_EXCEPTION'
-      LOGGER.warn "#{self.class.name}#poll_separation_once Suno error: flag=#{flag} code=#{err_code} msg=#{err_msg.inspect}"
+      LOGGER.warn "#{self.class.name}#poll_separation_once Suno error: flag=#{flag} code=#{err_code} msg=#{redact_urls(err_msg).inspect}"
       { failed: true, error: format_suno_error(err_code, err_msg.to_s.strip.empty? ? flag : err_msg) }
     else
       if (err_code && err_code.to_i != 0) || (err_msg && !err_msg.to_s.empty?)
-        LOGGER.warn "#{self.class.name}#poll_separation_once Suno error: code=#{err_code} msg=#{err_msg.inspect}"
+        LOGGER.warn "#{self.class.name}#poll_separation_once Suno error: code=#{err_code} msg=#{redact_urls(err_msg).inspect}"
         return { failed: true, error: format_suno_error(err_code, err_msg) }
       end
       :pending
     end
   rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
-    LOGGER.warn "#{self.class.name} poll_separation_once: #{e.class}: #{e.message}"
+    LOGGER.warn "#{self.class.name} poll_separation_once: #{e.class}: #{redact_urls(e.message)}"
     :pending
   end
 
@@ -311,7 +311,7 @@ class SunoClient
     songs = resp.parsed_response.dig('data', 'response', 'sunoData') || []
     songs.map { |s| s['id'] }.compact
   rescue => e
-    LOGGER.warn "#{self.class.name} fetch_audio_ids: #{e.class}: #{e.message}"
+    LOGGER.warn "#{self.class.name} fetch_audio_ids: #{e.class}: #{redact_urls(e.message)}"
     []
   end
 
@@ -342,13 +342,13 @@ class SunoClient
     err_code = data['errorCode']
     err_msg  = data['errorMessage']
     if (err_code && err_code.to_i != 0) || (err_msg && !err_msg.to_s.empty?)
-      LOGGER.warn "#{self.class.name}#poll_cover_art_once Suno error: code=#{err_code} msg=#{err_msg.inspect}"
+      LOGGER.warn "#{self.class.name}#poll_cover_art_once Suno error: code=#{err_code} msg=#{redact_urls(err_msg).inspect}"
       return { failed: true, error: format_suno_error(err_code, err_msg) }
     end
 
     :pending
   rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
-    LOGGER.warn "#{self.class.name} poll_cover_art_once: #{e.class}: #{e.message}"
+    LOGGER.warn "#{self.class.name} poll_cover_art_once: #{e.class}: #{redact_urls(e.message)}"
     :pending
   end
 
@@ -456,20 +456,20 @@ class SunoClient
       err_code = data['errorCode']
       err_msg  = data['errorMessage']
       if (err_code && err_code.to_i != 0) || (err_msg && !err_msg.to_s.empty?)
-        LOGGER.warn "#{self.class.name}#poll_once Suno error: code=#{err_code} msg=#{err_msg.inspect}"
+        LOGGER.warn "#{self.class.name}#poll_once Suno error: code=#{err_code} msg=#{redact_urls(err_msg).inspect}"
         return { failed: true, error: format_suno_error(err_code, err_msg) }
       end
       :pending
     end
   rescue OpenSSL::SSL::SSLError, Net::OpenTimeout, Errno::ECONNRESET => e
-    LOGGER.warn "#{self.class.name} poll_once: #{e.class}: #{e.message}"
+    LOGGER.warn "#{self.class.name} poll_once: #{e.class}: #{redact_urls(e.message)}"
     :pending
   end
 
   # Blocking convenience — submit + poll until done. Returns result hash.
   def compose(title:, lyrics:, tags:, instrumental: false)
     task_id = submit(title: title, lyrics: lyrics, tags: tags, instrumental: instrumental)
-    LOGGER.debug "#{self.class.name}: submitted task #{task_id}"
+    LOGGER.debug "#{self.class.name}: submitted task"
     deadline = Time.now + POLL_TIMEOUT
     loop do
       raise "Suno timed out (#{POLL_TIMEOUT}s)" if Time.now > deadline

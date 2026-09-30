@@ -1,4 +1,5 @@
 require 'set'
+require_relative '../agent/error_reporter'
 
 module ImageGen
   # Atlas Cloud image generation. Targets Atlas's uniform endpoint
@@ -23,8 +24,10 @@ module ImageGen
         return if @logged_unknown_status.include?(task_id)
         @logged_unknown_status.add(task_id)
       end
-      LOGGER.warn "AtlasAdapter: unknown status=#{status.inspect} for #{task_id} (treating as :pending)"
+      LOGGER.warn "AtlasAdapter: unknown status=#{safe(status.inspect)} for #{safe(task_id)} (treating as :pending)"
     end
+
+    def self.safe(value) = Agent::ErrorReporter.sanitize(value)
 
     def initialize
       cfg = Settings.image_gen&.dig('providers', 'atlas') or
@@ -98,7 +101,7 @@ module ImageGen
       end
       resp = @client.post('/api/v1/model/generateImage', body)
       resp['id'] || resp.dig('data', 'id') ||
-        raise("Atlas submit: no id in response: #{resp.inspect}")
+        raise("Atlas submit: no id in response: #{safe(resp.inspect)}")
     end
 
     def poll_once(external_id)
@@ -109,7 +112,7 @@ module ImageGen
         # failed while we'd otherwise poll `:pending` until the 60-attempt
         # timeout). Signal :poll_error so the handler fails fast after a few
         # CONSECUTIVE errors; single transient blips are still tolerated there.
-        LOGGER.warn "AtlasAdapter: poll HTTP #{code.inspect} for #{external_id}"
+        LOGGER.warn "AtlasAdapter: poll HTTP #{safe(code.inspect)} for #{safe(external_id)}"
         return :poll_error
       end
 
@@ -120,18 +123,24 @@ module ImageGen
         if url
           { url: url }
         else
-          LOGGER.warn("AtlasAdapter: terminal status without outputs[0] for #{external_id}: #{data.inspect}")
+          LOGGER.warn("AtlasAdapter: terminal status without outputs[0] for #{safe(external_id)}: #{safe(data.inspect)}")
           :failed
         end
       when 'processing', 'queued'
         :pending
       when 'failed'
-        LOGGER.warn("AtlasAdapter: prediction #{external_id} failed: #{data['error'].to_s[0..200]}")
+        LOGGER.warn("AtlasAdapter: prediction #{safe(external_id)} failed: #{safe(data['error'])}")
         :failed
       else
         self.class.note_unknown_status(external_id, data['status'])
         :pending
       end
+    end
+
+    private
+
+    def safe(value)
+      Agent::ErrorReporter.sanitize(value)
     end
 
  end

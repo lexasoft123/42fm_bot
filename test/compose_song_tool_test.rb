@@ -46,9 +46,15 @@ class ComposeSongToolTest < BotTest
     @user = OpenStruct.new(uid: 999, role: 'member')
   end
 
-  def call_tool(args)
-    ctx = { chat_id: CHAT, user: @user }
+  def call_tool(args = {}, forum_thread_id: nil, **keyword_args)
+    args = keyword_args if args.empty? && !keyword_args.empty?
+    ctx = { chat_id: CHAT, user: @user, forum_thread_id: forum_thread_id }
     @tool.handler.call(args, ctx)
+  end
+
+  def test_forum_thread_is_persisted
+    call_tool({ 'theme' => 'thread song', 'title' => 'Thread' }, forum_thread_id: 41)
+    assert_equal 41, last_song_params['forum_thread_id']
   end
 
   def last_song_params
@@ -191,6 +197,18 @@ class ComposeSongToolTest < BotTest
   def test_model_is_stored_as_the_exact_enum_value
     call_tool({ 'theme' => 'про море', 'title' => 'Море', 'model' => 'v5_5' })
     assert_equal 'V5_5', last_song_params['model']
+  end
+
+  def test_enqueue_returns_task_bound_action_evidence
+    result = call_tool({ 'theme' => 'про море', 'title' => 'Море' })
+    task = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_generate').last
+    assert_instance_of Agent::ToolResult, result
+    assert_equal 'compose_song', result.action
+    assert_equal task.id, result.task_id
+    assert_equal 'suno_generate', result.task_type
+    assert_equal 'queued', result.action_status
+    assert_equal 'queued', result.phase
+    assert_equal 'pending', result.delivery
   end
 
   # Review #3: a rate-limited request keeps the model in the deferred intent,

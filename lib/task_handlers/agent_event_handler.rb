@@ -7,11 +7,24 @@ class AgentEventHandler
     p = task.params_hash
     event_type = p['event_type'].to_s
     summary    = p['summary'].to_s
+    forum_thread_id = p['forum_thread_id']
 
-    LOGGER.info "[chat=#{task.chat_id}] AgentEventHandler[#{task.id}]: event=#{event_type} parent=#{p['parent_task_id']}"
+    LOGGER.info "[chat=#{task.chat_id}] AgentEventHandler[#{task.id}]: event=#{Agent::ErrorReporter.sanitize(event_type)} parent=#{p['parent_task_id'].to_i}"
+
+    # The feature handler already sent the deterministic user-facing notice.
+    # Keep the event as an agent-loop audit record, but complete it before any
+    # context lookup or provider call so it cannot produce a duplicate reply,
+    # tool side effect, or nested runtime_error event.
+    if p['user_notified']
+      LOGGER.info "[chat=#{task.chat_id}] AgentEventHandler[#{task.id}]: user already notified; skipping agent call"
+      ActiveRecord::Base.connection_pool.with_connection do
+        task.mark_done!({ event_type: event_type, replied: false, user_notified: true })
+      end
+      return :done
+    end
 
     user_text = build_event_prompt(event_type, summary, parent_task_type: p['parent_task_type'])
-    context   = get_chat_context(task.chat_id)
+    context   = get_chat_context(task.chat_id, thread_id: forum_thread_id)
     knowledge = get_relevant_knowledge(summary, task.chat_id)
     user      = synthetic_event_user
 
@@ -23,6 +36,7 @@ class AgentEventHandler
       chat_id:   task.chat_id,
       user:      user,
       api:       api,
+      forum_thread_id: forum_thread_id,
       tools_enabled: event_type != 'runtime_error',
       # A provider failure while explaining a provider failure must not enqueue
       # another runtime_error event. The original event already owns delivery.
@@ -40,15 +54,19 @@ class AgentEventHandler
       return :done
     end
 
-    resp = api.sendMessage(chat_id: task.chat_id, text: text)
-    Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp)
+    send_params = { chat_id: task.chat_id, text: text }
+    send_params[:message_thread_id] = forum_thread_id if forum_thread_id
+    resp = api.sendMessage(**send_params)
+    Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp,
+                              message_thread_id: forum_thread_id)
     ActiveRecord::Base.connection_pool.with_connection do
       task.mark_done!({ event_type: event_type, replied: true, reply_chars: text.length })
     end
     :done
   rescue => e
-    LOGGER.error "[chat=#{task.chat_id}] AgentEventHandler[#{task.id}]: #{e.class}: #{e.message}"
-    ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(e.message) }
+    safe_error = Agent::ErrorReporter.sanitize(e.message)
+    LOGGER.error "[chat=#{task.chat_id}] AgentEventHandler[#{task.id}]: #{e.class}: #{safe_error}"
+    ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(safe_error) }
     :failed
   end
 
@@ -57,6 +75,8 @@ class AgentEventHandler
   EVENT_DESCRIPTIONS = {
     'image_failed_after_retries' => 'Я только что попытался сгенерировать пользователю картинку через AI image generator, но после всех ретраев не получилось.',
     'image_failed'               => 'Я попытался сгенерировать картинку через AI image generator, но генерация провалилась (например, контент-модерация или таймаут).',
+    'image_delivery_failed'      => 'Картинка успешно сгенерирована, но Telegram не смог доставить её в чат. Не утверждай, что пользователь её получил, и не запускай повторную генерацию без явной просьбы.',
+    'image_persistence_failed'   => 'Telegram принял и отправил картинку, но бот не смог сохранить локальное подтверждение доставки. Не утверждай, что Telegram отклонил изображение, и не запускай повторную генерацию.',
     'image_succeeded_after_retries' => 'Картинка сгенерирована, но не с первого раза — потребовалось несколько ретраев.',
     'song_failed_after_retries'  => 'Я попытался сгенерировать пользователю песню через Suno, но после всех ретраев не получилось.',
     'song_failed'                => 'Я попытался сгенерировать песню через Suno, но генерация провалилась.',

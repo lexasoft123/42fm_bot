@@ -59,10 +59,20 @@ class CoverAudioToolTest < BotTest
                     bg_task_external_id: bg_task_external_id)
   end
 
-  def call_tool(args, reply_to_message_id: nil)
+  def call_tool(args, reply_to_message_id: nil, forum_thread_id: nil)
     args = { 'upload_url' => 'https://example.com/source.mp3' }.merge(args)
-    ctx = { chat_id: CHAT, user: @user, reply_to_message_id: reply_to_message_id }
+    ctx = { chat_id: CHAT, user: @user, reply_to_message_id: reply_to_message_id,
+            forum_thread_id: forum_thread_id }
     @tool.handler.call(args, ctx)
+  end
+
+  def test_cover_and_add_vocals_persist_forum_thread
+    call_tool({ 'style' => 'jazz', 'title' => 'Cover' }, forum_thread_id: 44)
+    assert_equal 44, BackgroundTask.where(task_type: 'suno_cover_audio').last.params_hash['forum_thread_id']
+    tool = Agent::ToolRegistry.find('add_vocals')
+    tool.handler.call({ 'upload_url' => 'https://example.com/source.mp3', 'title' => 'Vocals' },
+                      { chat_id: CHAT, user: @user, forum_thread_id: 45 })
+    assert_equal 45, BackgroundTask.where(task_type: 'suno_add_vocals').last.params_hash['forum_thread_id']
   end
 
   # compose_song path: the source task carries locally-composed lyrics in
@@ -80,6 +90,22 @@ class CoverAudioToolTest < BotTest
     cover = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio').last
     assert_match(/\[Verse 1\]/, cover.params_hash['lyrics'])
     assert_match(/Для кого-то нужно/, cover.params_hash['lyrics'])
+  end
+
+  def test_cover_and_add_vocals_enqueues_return_task_bound_action_evidence
+    cover = call_tool({ 'style' => 'jazz', 'title' => 'Cover' })
+    cover_task = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio').last
+    assert_equal ['cover_audio', cover_task.id, 'suno_cover_audio', 'queued', 'pending'],
+                 [cover.action, cover.task_id, cover.task_type, cover.phase, cover.delivery]
+
+    vocals_tool = Agent::ToolRegistry.find('add_vocals')
+    vocals = vocals_tool.handler.call(
+      { 'upload_url' => 'https://example.com/source.mp3', 'style' => 'soul', 'title' => 'Vocals' },
+      { chat_id: CHAT, user: @user }
+    )
+    vocals_task = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_add_vocals').last
+    assert_equal ['add_vocals', vocals_task.id, 'suno_add_vocals', 'queued', 'pending'],
+                 [vocals.action, vocals.task_id, vocals.task_type, vocals.phase, vocals.delivery]
   end
 
   # add_vocals / cover_audio path: source's params['lyrics'] is nil — lyrics
@@ -166,16 +192,17 @@ class CoverAudioToolTest < BotTest
   end
   # --- retry_of_task_id: re-run a failed cover with the same source ---
 
-  def make_failed_cover(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'failed')
+  def make_failed_cover(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'failed', forum_thread_id: nil)
     BackgroundTask.create!(task_type: task_type, chat_id: chat_id, max_attempts: 60, status: status,
                            params: { upload_url: 'https://api.telegram.org/file/botX/music/file_1667.mp3',
                                      upload_file_id: 'FID-1667', style: 'rhythm and blues', title: 'Остаться собой',
                                      lyrics: "[Verse]\nСколько печальных историй", topic: '', instrumental: false,
-                                     model: 'V5_5', user_uid: 1 }.to_json)
+                                     model: 'V5_5', forum_thread_id: forum_thread_id, user_uid: 1 }.to_json)
   end
 
-  def call_retry(args)
-    ctx = { chat_id: CHAT, user: @user, reply_to_message_id: nil, audio: nil }
+  def call_retry(args, forum_thread_id: nil)
+    ctx = { chat_id: CHAT, user: @user, reply_to_message_id: nil, audio: nil,
+            forum_thread_id: forum_thread_id }
     @tool.handler.call(args, ctx)
   end
 
@@ -199,6 +226,27 @@ class CoverAudioToolTest < BotTest
     p = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'pending').last.params_hash
     assert_equal 'chicago blues', p['style']
     assert_equal 'Остаться собой', p['title']
+  end
+
+  def test_retry_inherits_source_forum_when_current_context_has_no_topic
+    src = make_failed_cover(forum_thread_id: 81)
+    call_retry({ 'retry_of_task_id' => src.id })
+    retry_task = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'pending').last
+    assert_equal 81, retry_task.params_hash['forum_thread_id']
+
+    vocals_src = make_failed_cover(task_type: 'suno_add_vocals', forum_thread_id: 82)
+    vocals_tool = Agent::ToolRegistry.find('add_vocals')
+    vocals_tool.handler.call({ 'retry_of_task_id' => vocals_src.id },
+                             { chat_id: CHAT, user: @user, audio: nil, forum_thread_id: nil })
+    vocals_retry = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_add_vocals', status: 'pending').last
+    assert_equal 82, vocals_retry.params_hash['forum_thread_id']
+  end
+
+  def test_retry_prefers_current_forum_over_source_forum
+    src = make_failed_cover(forum_thread_id: 81)
+    call_retry({ 'retry_of_task_id' => src.id }, forum_thread_id: 91)
+    retry_task = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_audio', status: 'pending').last
+    assert_equal 91, retry_task.params_hash['forum_thread_id']
   end
 
   def test_retry_rejects_other_chat_non_failed_and_non_cover_tasks

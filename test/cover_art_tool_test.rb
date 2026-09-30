@@ -41,17 +41,26 @@ class CoverArtToolTest < BotTest
                     bg_task_external_id: bg_task_external_id)
   end
 
-  def call_tool(args, reply_to_message_id: nil)
-    ctx = { chat_id: CHAT, user: @user, reply_to_message_id: reply_to_message_id }
+  def call_tool(args, reply_to_message_id: nil, forum_thread_id: nil)
+    ctx = { chat_id: CHAT, user: @user, reply_to_message_id: reply_to_message_id,
+            forum_thread_id: forum_thread_id }
     @tool.handler.call(args, ctx)
+  end
+
+  def test_forum_thread_is_persisted
+    call_tool({ 'suno_task_id' => 'thread-source' }, forum_thread_id: 42)
+    assert_equal 42, BackgroundTask.where(task_type: 'suno_cover_art').last.params_hash['forum_thread_id']
   end
 
   def test_explicit_suno_task_id_wins
     make_song(external_id: 'recent-id', title: 'Recent')
     result = call_tool({ 'suno_task_id' => 'explicit-id-123' })
-    assert_match(/Рисую обложку/, result)
+    assert_match(/Рисую обложку/, result.user_text)
     art = BackgroundTask.where(chat_id: CHAT, task_type: 'suno_cover_art').last
     assert_equal 'explicit-id-123', art.params_hash['source_task_id']
+    assert_equal({ status: 'queued', action: 'cover_art', task_id: art.id,
+                   task_type: 'suno_cover_art', phase: 'queued', delivery: 'pending' },
+                 result.action_payload.except(:message))
   end
 
   def test_reply_resolution_picks_song_via_bg_task_external_id

@@ -14,7 +14,7 @@ class GptMaster
   }.freeze
 
   def initialize(messages, setting: 'main', chat_id: nil, user_uid: nil, purpose: nil, system_prompt: nil,
-                 report_errors: true)
+                 report_errors: true, record_usage: true)
     cfg      = self.class.resolve_setting(setting)
     @api_key  = cfg[:api_key]
     @api_url  = cfg[:api_url]
@@ -30,6 +30,7 @@ class GptMaster
     @purpose         = purpose
     @system_prompt   = system_prompt
     @report_errors   = report_errors
+    @record_usage    = record_usage
   end
 
   def call
@@ -44,11 +45,11 @@ class GptMaster
       if response.code == 200
         parsed = usable_body(response, 'call', body: body, took_ms: took_ms)
         return 'жпт не жпт' unless parsed
-        record_usage(parsed)
+        record_usage(parsed) if @record_usage
         result = extract_content(parsed)
         stop = stop_reason(parsed)
         LOGGER.debug("#{tag}#call: stop=#{stop} reply=#{result.to_s.length} chars took=#{took_ms}ms")
-        dump_gpt(method: 'call', body: body, response: parsed, stop: stop)
+        dump_gpt(method: 'call', body: body, response: parsed, stop: stop, took_ms: took_ms)
         return result
       elsif response.code == 529 && retries < MAX_RETRIES
         retries += 1
@@ -77,10 +78,10 @@ class GptMaster
       if response.code == 200
         parsed = usable_body(response, 'call_raw', body: body, took_ms: took_ms)
         return nil unless parsed
-        record_usage(parsed)
+        record_usage(parsed) if @record_usage
         stop = stop_reason(parsed)
         LOGGER.debug("#{tag}#call_raw: stop_reason=#{stop} took=#{took_ms}ms")
-        dump_gpt(method: 'call_raw', body: body, response: parsed, stop: stop)
+        dump_gpt(method: 'call_raw', body: body, response: parsed, stop: stop, took_ms: took_ms)
         return parsed
       elsif response.code == 529 && retries < MAX_RETRIES
         retries += 1
@@ -291,8 +292,8 @@ class GptMaster
     raw = response.body.to_s
     LOGGER.error "#{tag}##{method}: 200 with #{problem} took=#{took_ms}ms: #{raw[0, 300]}"
     report_provider_error(method, 200, "#{problem}: #{raw[0, 300]}")
-    dump_gpt(method: method, body: body, response: { 'unusable_200' => problem, 'took_ms' => took_ms,
-                                                     'body' => raw[0, 2000] }, stop: nil)
+    dump_gpt(method: method, body: body, response: { 'unusable_200' => problem,
+                                                     'body' => raw[0, 2000] }, stop: nil, took_ms: took_ms)
     nil
   end
 
@@ -341,7 +342,7 @@ class GptMaster
   # NDJSON dump of the full request + response to GPT_LOGGER (log/gpt.log).
   # Gated on Settings.chat_gpt['debug_log'] (default true). Safe no-op if
   # GPT_LOGGER isn't set (e.g. during tests / standalone scripts).
-  def dump_gpt(method:, body:, response:, stop:)
+  def dump_gpt(method:, body:, response:, stop:, took_ms:)
     return unless defined?(GPT_LOGGER) && GPT_LOGGER
     return if Settings.chat_gpt.key?('debug_log') && !Settings.chat_gpt['debug_log']
     usage = extract_usage(response) || {}
@@ -353,6 +354,7 @@ class GptMaster
       method:  method,
       model:   @model,
       stop:    stop,
+      took_ms: took_ms,
       usage:   usage,
       request: {
         system:   body[:system],

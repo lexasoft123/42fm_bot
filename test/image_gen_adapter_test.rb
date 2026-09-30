@@ -162,6 +162,51 @@ class FluxAdapterSubmitTest < Minitest::Test
       assert_equal 'https://api.bfl.ai/v1/flux-2-flex', urls.first
     end
   end
+
+  def test_submit_log_redacts_provider_supplied_model_url
+    token = 'FLUXSUBMITTOKEN1234567890123456'
+    model = "https://models.example/flux?token=#{token}"
+    output = StringIO.new
+    original_logger = LOGGER
+    Object.send(:remove_const, :LOGGER)
+    Object.const_set(:LOGGER, Logger.new(output))
+
+    with_post_capture { ImageGen::FluxAdapter.new.submit(prompt: 'x', model: model) }
+
+    assert_includes output.string, '[url]'
+    refute_includes output.string, token
+    refute_includes output.string, 'models.example'
+  ensure
+    if defined?(original_logger) && original_logger
+      Object.send(:remove_const, :LOGGER) if Object.const_defined?(:LOGGER)
+      Object.const_set(:LOGGER, original_logger)
+    end
+  end
+
+  def test_poll_log_redacts_status_and_external_identifier
+    token = 'FLUXPOLLTOKEN123456789012345678'
+    signed_url = "https://status.example/job?token=#{token}"
+    real_get = HTTParty.method(:get)
+    HTTParty.singleton_class.send(:define_method, :get) do |*_args, **_kwargs|
+      OpenStruct.new(code: 200, parsed_response: { 'status' => signed_url })
+    end
+    output = StringIO.new
+    original_logger = LOGGER
+    Object.send(:remove_const, :LOGGER)
+    Object.const_set(:LOGGER, Logger.new(output))
+
+    assert_equal :pending, ImageGen::FluxAdapter.new.poll_once(token)
+
+    assert_includes output.string, '[url]'
+    refute_includes output.string, token
+    refute_includes output.string, 'status.example'
+  ensure
+    HTTParty.singleton_class.send(:define_method, :get, real_get) if defined?(real_get) && real_get
+    if defined?(original_logger) && original_logger
+      Object.send(:remove_const, :LOGGER) if Object.const_defined?(:LOGGER)
+      Object.const_set(:LOGGER, original_logger)
+    end
+  end
 end
 
 # AtlasAdapter — stubs ModelProviderClient at the class level (not HTTParty) so we
@@ -418,6 +463,33 @@ class AtlasAdapterTest < Minitest::Test
     assert_match(/no id in response/, err.message)
   end
 
+  def test_submit_error_redacts_provider_response_before_escape
+    token = 'ATLASSUBMITTOKEN123456789012345'
+    signed_url = "https://atlas.example/result?token=#{token}"
+    fake = FakeModelProviderClient.new(post_returns: {
+      'error' => signed_url,
+      'authorization' => "Bearer #{token}"
+    })
+    output = StringIO.new
+    original_logger = LOGGER
+    Object.send(:remove_const, :LOGGER)
+    Object.const_set(:LOGGER, Logger.new(output))
+
+    error = assert_raises(RuntimeError) do
+      with_fake_client(fake) { ImageGen::AtlasAdapter.new.submit(prompt: 'x') }
+    end
+
+    assert_includes error.message, '[url]'
+    refute_includes error.message, token
+    refute_includes error.message, 'atlas.example'
+    refute_includes output.string, token
+  ensure
+    if defined?(original_logger) && original_logger
+      Object.send(:remove_const, :LOGGER) if Object.const_defined?(:LOGGER)
+      Object.const_set(:LOGGER, original_logger)
+    end
+  end
+
   def test_submit_uses_configured_model_and_dimensions
     cfg = Marshal.load(Marshal.dump(ATLAS_CFG))
     cfg['providers']['atlas']['text_to_image_model'] = 'qwen-image'
@@ -470,6 +542,29 @@ class AtlasAdapterTest < Minitest::Test
     fake = FakeModelProviderClient.new(get_returns: [200, body])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
     assert_equal :failed, out
+  end
+
+  def test_poll_failure_log_redacts_error_url_and_external_identifier
+    token = 'ATLASPOLLTOKEN12345678901234567'
+    signed_url = "https://atlas.example/result?token=#{token}"
+    body = { 'data' => { 'status' => 'failed', 'error' => "provider failed at #{signed_url}" } }
+    fake = FakeModelProviderClient.new(get_returns: [200, body])
+    output = StringIO.new
+    original_logger = LOGGER
+    Object.send(:remove_const, :LOGGER)
+    Object.const_set(:LOGGER, Logger.new(output))
+
+    out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once(token) }
+
+    assert_equal :failed, out
+    assert_includes output.string, '[url]'
+    refute_includes output.string, token
+    refute_includes output.string, 'atlas.example'
+  ensure
+    if defined?(original_logger) && original_logger
+      Object.send(:remove_const, :LOGGER) if Object.const_defined?(:LOGGER)
+      Object.const_set(:LOGGER, original_logger)
+    end
   end
 
   def test_poll_unknown_status_logs_once_returns_pending
@@ -733,11 +828,13 @@ class FakeAdapter < ImageGen::Adapter
 
   def submit(prompt:, input_images: nil, model: nil)
     @submit_calls << { prompt: prompt, input_images: input_images, model: model }
+    raise @submit_returns if @submit_returns.is_a?(Exception)
     @submit_returns
   end
 
   def poll_once(external_id)
     @poll_calls << external_id
+    raise @poll_returns if @poll_returns.is_a?(Exception)
     @poll_returns
   end
 
@@ -757,6 +854,8 @@ require_relative '../lib/gpt_master'
 require_relative '../lib/chat_context'
 require_relative '../lib/task_runner'
 require_relative '../lib/task_handlers/image_gen_handler'
+require 'telegram/bot'
+require 'stringio'
 
 # Handler↔adapter integration. Stubs ImageGen module methods to inject a
 # FakeAdapter, plus GptMaster + ChatContext + the bot api so we never reach
@@ -769,21 +868,41 @@ class HandlerAdapterIntegrationTest < BotTest
   # template the handler picked. Returns a canned string from #call.
   class FakeGptMaster
     @@captured = []
-    @@settings = []
+    @@kwargs = []
     @@response = 'enriched prompt'
     def self.captured; @@captured; end
-    def self.settings; @@settings; end
+    def self.kwargs; @@kwargs; end
+    def self.settings; @@kwargs.map { |kw| kw[:setting] }; end
     def self.response=(value); @@response = value; end
-    def self.reset!; @@captured = []; @@settings = []; @@response = 'enriched prompt'; end
-    def initialize(messages, **kw); @@captured << messages; @@settings << kw[:setting]; end
-    def call; @@response; end
+    def self.reset!; @@captured = []; @@kwargs = []; @@response = 'enriched prompt'; end
+    def initialize(messages, **kw); @@captured << messages; @@kwargs << kw; end
+    def call
+      raise @@response if @@response.is_a?(Exception)
+      @@response
+    end
   end
 
   class FakeBotApi
     attr_reader :calls
-    def initialize; @calls = []; end
-    def sendMessage(**kw); @calls << [:sendMessage, kw]; OpenStruct.new(message_id: 1, message_thread_id: nil); end
-    def sendPhoto(**kw);   @calls << [:sendPhoto, kw];   OpenStruct.new(message_id: 2, message_thread_id: nil); end
+    def initialize
+      @calls = []
+      @photo_outcomes = []
+      @message_outcomes = []
+    end
+    def queue_photo_outcomes(*outcomes); @photo_outcomes.concat(outcomes); end
+    def queue_message_outcomes(*outcomes); @message_outcomes.concat(outcomes); end
+    def sendMessage(**kw)
+      @calls << [:sendMessage, kw]
+      outcome = @message_outcomes.empty? ? OpenStruct.new(message_id: 1, message_thread_id: nil) : @message_outcomes.shift
+      raise outcome if outcome.is_a?(Exception)
+      outcome
+    end
+    def sendPhoto(**kw)
+      @calls << [:sendPhoto, kw]
+      outcome = @photo_outcomes.empty? ? OpenStruct.new(message_id: 2, message_thread_id: nil) : @photo_outcomes.shift
+      raise outcome if outcome.is_a?(Exception)
+      outcome
+    end
   end
 
   HANDLER_CATALOG = {
@@ -801,6 +920,7 @@ class HandlerAdapterIntegrationTest < BotTest
 
   def setup
     super
+    @original_download_to_tempfile = ImageGenTaskHandler.instance_method(:download_to_tempfile)
     @fake_adapter = FakeAdapter.new
     @bot          = FakeBotApi.new
     @original_gpt = ::GptMaster if defined?(::GptMaster)
@@ -820,7 +940,7 @@ class HandlerAdapterIntegrationTest < BotTest
     # Stub away ChatContext lookups + tempfile download (forces sendPhoto's
     # URL-fallback path so we don't need a real image to deliver).
     ImageGenTaskHandler.class_eval do
-      define_method(:get_chat_context)        { |_| 'ctx' }
+      define_method(:get_chat_context)        { |_, thread_id: nil| 'ctx' }
       define_method(:get_relevant_knowledge)  { |_, _| 'kn' }
       define_method(:download_to_tempfile)    { |_url| nil }
     end
@@ -844,12 +964,14 @@ class HandlerAdapterIntegrationTest < BotTest
     ImageGen.singleton_class.send(:remove_method, :__current_adapter)
     ImageGen.singleton_class.send(:remove_method, :__adapter_for)
     TelegramFile.singleton_class.send(:define_method, :download_image, @orig_download_image) if @orig_download_image
+    ImageGenTaskHandler.send(:define_method, :download_to_tempfile, @original_download_to_tempfile) if @original_download_to_tempfile
     Settings.image_gen = nil
     ImageGen::Catalog.reset!
     super
   end
 
-  def fresh_task(input_image: nil, input_images: nil, source_message_ids: nil, model: nil, award: false)
+  def fresh_task(input_image: nil, input_images: nil, source_message_ids: nil, model: nil, award: false,
+                 forum_thread_id: nil)
     params = { 'request' => 'кот в шляпе', 'user_uid' => 42 }
     params['input_image']        = input_image if input_image
     params['input_media_type']   = 'image/jpeg' if input_image
@@ -857,6 +979,7 @@ class HandlerAdapterIntegrationTest < BotTest
     params['source_message_ids'] = source_message_ids if source_message_ids
     params['model'] = model if model
     params['award'] = true  if award
+    params['forum_thread_id'] = forum_thread_id if forum_thread_id
     BackgroundTask.create!(task_type: 'image_generate', chat_id: -1, max_attempts: 60, params: params.to_json)
   end
 
@@ -880,6 +1003,8 @@ class HandlerAdapterIntegrationTest < BotTest
     task.reload
     assert_equal 'fake-extid', task.external_id
     assert_equal 'fake', task.params_hash['provider']
+    assert_equal 'processing', task.lifecycle_phase
+    assert_equal 'unknown', task.delivery_status
 
     # Template selection: handler asked adapter for :text_to_image template,
     # which our FakeAdapter prefixes with [text_to_image] — that string
@@ -900,6 +1025,7 @@ class HandlerAdapterIntegrationTest < BotTest
     task = fresh_task # no image
     ImageGenTaskHandler.new.call(task, @bot)
     assert_equal 'image_prompt', FakeGptMaster.settings.first
+    assert_equal false, FakeGptMaster.kwargs.first[:report_errors]
   end
 
   def test_prompt_composer_refusal_falls_back_to_raw_user_request
@@ -910,8 +1036,8 @@ class HandlerAdapterIntegrationTest < BotTest
     ImageGenTaskHandler.new.call(task, @bot)
 
     assert_equal raw_request, @fake_adapter.submit_calls.first[:prompt]
-    task.reload
-    assert_equal raw_request, task.params_hash['prompt']
+    persisted = BackgroundTask.find(task.id).params_hash
+    assert_equal raw_request, persisted['prompt']
   end
 
   def test_blank_prompt_composer_output_falls_back_to_raw_user_request
@@ -922,8 +1048,75 @@ class HandlerAdapterIntegrationTest < BotTest
     ImageGenTaskHandler.new.call(task, @bot)
 
     assert_equal raw_request, @fake_adapter.submit_calls.first[:prompt]
-    task.reload
-    assert_equal raw_request, task.params_hash['prompt']
+    persisted = BackgroundTask.find(task.id).params_hash
+    assert_equal raw_request, persisted['prompt']
+  end
+
+  def test_prompt_composer_provider_failure_falls_back_without_retrying_task
+    task = fresh_task
+    raw_request = task.params_hash['request']
+    FakeGptMaster.response = 'жпт не жпт'
+
+    result = ImageGenTaskHandler.new.call(task, @bot)
+
+    assert_equal :pending, result
+    assert_equal raw_request, @fake_adapter.submit_calls.first[:prompt]
+    persisted = BackgroundTask.find(task.id).params_hash
+    assert_equal raw_request, persisted['prompt']
+    refute persisted.key?('prompt_failures')
+  end
+
+  def test_prompt_composer_exception_falls_back_without_retrying_task
+    task = fresh_task
+    raw_request = task.params_hash['request']
+    FakeGptMaster.response = RuntimeError.new('composer unavailable')
+
+    result = ImageGenTaskHandler.new.call(task, @bot)
+
+    assert_equal :pending, result
+    assert_equal raw_request, @fake_adapter.submit_calls.first[:prompt]
+    persisted = BackgroundTask.find(task.id).params_hash
+    assert_equal raw_request, persisted['prompt']
+    refute persisted.key?('prompt_failures')
+  end
+
+  def test_prompt_composer_failure_still_uses_submit_retry_path
+    task = fresh_task
+    raw_request = task.params_hash['request']
+    FakeGptMaster.response = 'жпт не жпт'
+    @fake_adapter.submit_returns = RuntimeError.new('image backend unavailable')
+
+    error = assert_raises(RuntimeError) { ImageGenTaskHandler.new.call(task, @bot) }
+
+    assert_equal 'image backend unavailable', error.message
+    assert_equal raw_request, @fake_adapter.submit_calls.first[:prompt]
+    persisted = BackgroundTask.find(task.id).params_hash
+    assert_equal raw_request, persisted['prompt']
+    assert_equal 1, persisted['submit_failures']
+    refute persisted.key?('prompt_failures')
+  end
+
+  def test_provider_submit_exception_is_redacted_before_rethrow_and_log
+    token = 'ABCDEFGHIJKLMNOPQRSTUVWX12345678'
+    @fake_adapter.submit_returns = RuntimeError.new(
+      "provider 503 https://provider.example/jobs/9?token=#{token}"
+    )
+    output = StringIO.new
+    original_logger = LOGGER
+    Object.send(:remove_const, :LOGGER)
+    Object.const_set(:LOGGER, Logger.new(output))
+
+    error = assert_raises(RuntimeError) { ImageGenTaskHandler.new.call(fresh_task, @bot) }
+
+    assert_includes error.message, '503'
+    assert_includes error.message, '[url]'
+    refute_includes error.message, token
+    refute_includes output.string, token
+  ensure
+    if defined?(original_logger) && original_logger
+      Object.send(:remove_const, :LOGGER) if Object.const_defined?(:LOGGER)
+      Object.const_set(:LOGGER, original_logger)
+    end
   end
 
   def test_submit_uses_edit_template_when_input_image_present
@@ -947,9 +1140,139 @@ class HandlerAdapterIntegrationTest < BotTest
     handler.call(task, @bot)
     task.reload
     assert_equal 'done', task.status
+    assert_equal 'completed', task.lifecycle_phase
+    assert_equal 'delivered', task.delivery_status
 
     assert_equal [task.external_id], @fake_adapter.poll_calls
     assert_equal :sendPhoto, @bot.calls.last[0]
+    assert Message.exists?(chat_id: -1, message_id: 2, role: 'bot'), 'delivery persisted before completion'
+  end
+
+  def test_async_image_process_failed_marks_delivery_failed_and_notifies_once
+    @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+
+    assert_equal :pending, handler.call(task, @bot)
+    assert_equal :failed, handler.call(task, @bot)
+
+    persisted = BackgroundTask.find(task.id)
+    assert_equal 'failed', persisted.status
+    assert_equal 'failed', persisted.lifecycle_phase
+    assert_equal 'failed', persisted.delivery_status
+    assert_equal 'image_delivery_failed', persisted.result_hash['error']
+    assert_equal '[url]', persisted.params_hash.dig('delivery_result', 'url')
+    assert_equal 1, @fake_adapter.poll_calls.size, 'terminal generation result must not be polled again'
+    assert_equal 1, @bot.calls.count { |kind, _| kind == :sendPhoto }
+    notices = @bot.calls.select { |kind, _| kind == :sendMessage }
+    assert_equal 1, notices.size
+    assert_match(/Telegram не смог/, notices.first[1][:text])
+
+    events = BackgroundTask.where(task_type: 'agent_event').map(&:params_hash)
+    assert_equal 1, events.count { |p| p['parent_task_id'] == task.id && p['event_type'] == 'image_delivery_failed' }
+  end
+
+  def test_async_retryable_telegram_500_retries_delivery_without_repolling
+    @bot.queue_photo_outcomes(
+      telegram_error(500, 'Internal Server Error'),
+      OpenStruct.new(message_id: 902, message_thread_id: nil)
+    )
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+
+    assert_equal :pending, handler.call(task, @bot) # submit
+    assert_equal :pending, handler.call(task, @bot) # poll succeeds; Telegram 500
+    retrying = BackgroundTask.find(task.id)
+    assert_equal 'retrying', retrying.lifecycle_phase
+    assert_equal 'pending', retrying.delivery_status
+    assert_equal 1, retrying.retry_count
+    assert_equal 1, @fake_adapter.poll_calls.size
+    assert_equal :done, handler.call(task, @bot)    # cached result; delivery only
+
+    assert_equal 1, @fake_adapter.poll_calls.size, 'delivery retry must not poll generation again'
+    assert_equal 1, @fake_adapter.submit_calls.size
+    assert_equal 2, @bot.calls.count { |kind, _| kind == :sendPhoto }
+    assert_equal 'done', BackgroundTask.find(task.id).status
+    assert_equal 'delivered', BackgroundTask.find(task.id).delivery_status
+  end
+
+  def test_malformed_truthy_send_photo_response_is_unconfirmed_delivery_failure
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/malformed.png' }
+    @bot.queue_photo_outcomes({ 'ok' => true, 'result' => {} })
+    task = fresh_task
+
+    assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
+
+    persisted = BackgroundTask.find(task.id)
+    assert_equal 'image_delivery_failed', persisted.result_hash['error']
+    refute persisted.params_hash.key?('delivery_receipt')
+    refute persisted.params_hash.key?('persistence_failures')
+    assert_equal 1, @bot.calls.count { |kind, _| kind == :sendPhoto }
+    notice = @bot.calls.find { |kind, _| kind == :sendMessage }
+    assert_match(/Telegram не смог/, notice[1][:text])
+  end
+
+  def test_send_photo_requires_strict_positive_integer_message_id
+    @fake_adapter.sync = true
+    malformed_ids = ['902', 902.0, 0]
+
+    malformed_ids.each_with_index do |message_id, index|
+      @fake_adapter.submit_returns = { url: "http://x/malformed-#{index}.png" }
+      @bot.queue_photo_outcomes(OpenStruct.new(message_id: message_id, message_thread_id: nil))
+      task = fresh_task
+
+      assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
+      persisted = BackgroundTask.find(task.id)
+      assert_equal 'image_delivery_failed', persisted.result_hash['error']
+      refute persisted.params_hash.key?('delivery_receipt')
+    end
+  end
+
+  def test_async_hash_response_is_persisted_before_task_is_done
+    @bot.queue_photo_outcomes(
+      { 'result' => { 'message_id' => 901, 'message_thread_id' => 77,
+                      'photo' => [{ 'file_id' => 'SMALL', 'width' => 320 }] } }
+    )
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+
+    handler.call(task, @bot)
+    assert_equal :done, handler.call(task, @bot)
+
+    persisted = BackgroundTask.find(task.id)
+    assert_equal 'done', persisted.status
+    msg = Message.find_by(chat_id: -1, message_id: 901)
+    refute_nil msg
+    assert_equal 77, msg.message_thread_id
+    assert_equal 'SMALL', msg.attachment_photo_file_id
+    assert_equal persisted.external_id, msg.bg_task_external_id
+  end
+
+  def test_async_signed_completion_url_is_redacted_from_logs_and_terminal_task_state
+    token = 'ABCDEFGHIJKLMNOPQRSTUVWX12345678'
+    signed_url = "https://images.example/out.png?token=#{token}"
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+    assert_equal :pending, handler.call(task, @bot)
+    @fake_adapter.poll_returns = { url: signed_url }
+    output = StringIO.new
+    original_logger = LOGGER
+    Object.send(:remove_const, :LOGGER)
+    Object.const_set(:LOGGER, Logger.new(output))
+
+    assert_equal :done, handler.call(task, @bot)
+
+    persisted = BackgroundTask.find(task.id)
+    assert_equal({}, persisted.result_hash)
+    refute persisted.params_hash.key?('delivery_result')
+    refute_includes output.string, token
+    refute_includes output.string, 'images.example'
+  ensure
+    if defined?(original_logger) && original_logger
+      Object.send(:remove_const, :LOGGER) if Object.const_defined?(:LOGGER)
+      Object.const_set(:LOGGER, original_logger)
+    end
   end
 
   # Synchronous adapter path: submit returns {url:, completed:true}, handler
@@ -971,6 +1294,324 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal :sendPhoto, @bot.calls.last[0]
   end
 
+  def test_synchronous_transient_delivery_failure_retries_without_regenerating
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/sync-retry.png' }
+    @bot.queue_photo_outcomes(Faraday::TimeoutError.new('telegram timeout'),
+                              OpenStruct.new(message_id: 903, message_thread_id: nil))
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+
+    assert_equal :pending, handler.call(task, @bot)
+    after_first = BackgroundTask.find(task.id)
+    assert_equal 'pending', after_first.status
+    assert_equal 'http://x/sync-retry.png', after_first.params_hash.dig('delivery_result', 'url')
+    assert_equal 1, after_first.params_hash['delivery_failures']
+
+    assert_equal :done, handler.call(task, @bot)
+    assert_equal 'done', BackgroundTask.find(task.id).status
+    assert_equal 1, @fake_adapter.submit_calls.size, 'delivery retry must not regenerate the image'
+    assert_empty @fake_adapter.poll_calls
+    assert_equal 2, @bot.calls.count { |kind, _| kind == :sendPhoto }
+    assert Message.exists?(chat_id: -1, message_id: 903, role: 'bot')
+  end
+
+  def test_synchronous_image_process_failed_never_marks_done
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/sync-fail.png' }
+    @bot.queue_photo_outcomes(RuntimeError.new('Bad Request: IMAGE_PROCESS_FAILED'))
+    task = fresh_task
+
+    assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
+
+    persisted = BackgroundTask.find(task.id)
+    assert_equal 'failed', persisted.status
+    assert_equal 'image_delivery_failed', persisted.result_hash['error']
+    assert_equal '[url]', persisted.params_hash.dig('delivery_result', 'url')
+    assert_equal 1, @fake_adapter.submit_calls.size
+    events = BackgroundTask.where(task_type: 'agent_event').map(&:params_hash)
+    assert_equal 1, events.count { |p| p['parent_task_id'] == task.id && p['event_type'] == 'image_delivery_failed' }
+  end
+
+  def test_synchronous_transient_delivery_failures_are_bounded_across_cycles
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/sync-timeout.png' }
+    @bot.queue_photo_outcomes(*Array.new(3) { Faraday::TimeoutError.new('telegram timeout') })
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+
+    assert_equal :pending, handler.call(task, @bot)
+    assert_equal :pending, handler.call(task, @bot)
+    assert_equal :failed, handler.call(task, @bot)
+
+    persisted = BackgroundTask.find(task.id)
+    assert_equal 'failed', persisted.status
+    assert_equal 3, persisted.params_hash['delivery_failures']
+    assert_equal 1, @fake_adapter.submit_calls.size, 'bounded delivery retries must reuse the generated result'
+    assert_equal 3, @bot.calls.count { |kind, _| kind == :sendPhoto }
+    assert_equal 1, @bot.calls.count { |kind, _| kind == :sendMessage }
+    events = BackgroundTask.where(task_type: 'agent_event').map(&:params_hash)
+    assert_equal 1, events.count { |p| p['parent_task_id'] == task.id && p['event_type'] == 'image_delivery_failed' }
+  end
+
+  def test_accepted_photo_with_persistence_nil_retries_persistence_without_resending
+    @fake_adapter.sync = true
+    token = 'ABCDEFGHIJKLMNOPQRSTUVWX12345678'
+    signed_url = "https://images.example/sync-persist.png?token=#{token}"
+    @fake_adapter.submit_returns = {
+      url: signed_url,
+      provider_payload: { callback_url: "https://provider.example/callback?token=#{token}" }
+    }
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+    original = Message.method(:persist_bot_reply)
+    Message.singleton_class.send(:define_method, :persist_bot_reply) { |**_| nil }
+
+    assert_equal :pending, handler.call(task, @bot)
+    first = BackgroundTask.find(task.id)
+    assert_equal 2, first.params_hash.dig('delivery_receipt', 'message_id')
+    refute first.params_hash.key?('delivery_result')
+    refute_includes first.params, token
+    refute_includes first.params, 'images.example'
+    refute_includes first.params, 'provider.example'
+    assert_equal 1, first.params_hash['persistence_failures']
+    assert_equal 'retrying', first.lifecycle_phase
+    assert_equal 'delivered', first.delivery_status
+    assert_equal 1, first.retry_count
+    assert_equal 1, @bot.calls.count { |kind, _| kind == :sendPhoto }
+
+    assert_equal :pending, handler.call(task, @bot)
+    assert_equal :failed, handler.call(task, @bot)
+    persisted = BackgroundTask.find(task.id)
+    assert_equal 'image_persistence_failed', persisted.result_hash['error']
+    assert_equal 'failed', persisted.lifecycle_phase
+    assert_equal 'delivered', persisted.delivery_status
+    assert_equal 3, persisted.params_hash['persistence_failures']
+    refute persisted.params_hash.key?('delivery_result')
+    refute_includes persisted.params, token
+    assert_equal 1, @bot.calls.count { |kind, _| kind == :sendPhoto }, 'receipt retry must never resend'
+    notice = @bot.calls.find { |kind, _| kind == :sendMessage }
+    assert_match(/отправлена.*сохранить подтверждение/, notice[1][:text])
+    refute_match(/Telegram не смог/, notice[1][:text])
+    event = BackgroundTask.where(task_type: 'agent_event').last
+    assert_equal true, event.params_hash['user_notified']
+  ensure
+    Message.singleton_class.send(:define_method, :persist_bot_reply, original) if original
+  end
+
+  def test_recovery_event_failure_after_receipt_persistence_cannot_undo_success
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/recovered.png' }
+    task = fresh_task
+    p = task.params_hash
+    p['generation_retries'] = 1
+    task.update!(params: p.to_json)
+    handler = ImageGenTaskHandler.new
+    handler.define_singleton_method(:emit_agent_event) do |*_, **_kwargs|
+      raise ActiveRecord::StatementInvalid, 'event insert failed https://db.example/?token=SECRET'
+    end
+    original_logger = LOGGER
+    output = StringIO.new
+    Object.send(:remove_const, :LOGGER)
+    Object.const_set(:LOGGER, Logger.new(output))
+
+    assert_equal :done, handler.call(task, @bot)
+
+    assert_equal 'done', BackgroundTask.find(task.id).status
+    assert_equal 1, @bot.calls.count { |kind, _| kind == :sendPhoto }
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendMessage }
+    assert Message.exists?(chat_id: task.chat_id, role: 'bot',
+                           bg_task_external_id: "image-task:#{task.id}")
+    assert_includes output.string, '[url]'
+    refute_includes output.string, 'db.example'
+  ensure
+    if defined?(original_logger) && original_logger
+      Object.send(:remove_const, :LOGGER) if Object.const_defined?(:LOGGER)
+      Object.const_set(:LOGGER, original_logger)
+    end
+  end
+
+  def test_existing_persisted_delivery_reconciles_after_crash_without_resending
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+    assert_equal :pending, handler.call(task, @bot)
+    task.reload
+    p = task.params_hash
+    p['delivery_result'] = { 'url' => 'http://x/already-sent.png' }
+    task.update!(params: p.to_json)
+    Message.create!(role: 'bot', chat_id: task.chat_id, body: '[image]', message_id: 444,
+                    bg_task_external_id: task.external_id)
+
+    assert_equal :done, handler.call(task, @bot)
+    assert_equal 'done', BackgroundTask.find(task.id).status
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendPhoto }
+    assert_empty @fake_adapter.poll_calls
+  end
+
+  def test_recovery_event_failure_after_existing_message_reconciliation_cannot_undo_success
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+    assert_equal :pending, handler.call(task, @bot)
+    task.reload
+    p = task.params_hash
+    p['delivery_result'] = { 'url' => 'http://x/already-sent-recovered.png' }
+    p['generation_retries'] = 2
+    task.update!(params: p.to_json)
+    Message.create!(role: 'bot', chat_id: task.chat_id, body: '[image]', message_id: 445,
+                    bg_task_external_id: task.external_id)
+    handler.define_singleton_method(:emit_agent_event) do |*_, **_kwargs|
+      raise ActiveRecord::StatementInvalid, 'event insert failed https://db.example/?token=SECRET'
+    end
+
+    assert_equal :done, handler.call(task, @bot)
+
+    assert_equal 'done', BackgroundTask.find(task.id).status
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendPhoto }
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendMessage }
+  end
+
+  def test_forum_thread_is_used_for_photo_notice_persistence_and_event
+    task = fresh_task(forum_thread_id: 73)
+    @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
+    handler = ImageGenTaskHandler.new
+
+    handler.call(task, @bot)
+    assert_equal :failed, handler.call(task, @bot)
+
+    photo_call = @bot.calls.find { |kind, _| kind == :sendPhoto }
+    notice_call = @bot.calls.find { |kind, _| kind == :sendMessage }
+    assert_equal 73, photo_call[1][:message_thread_id]
+    assert_equal 73, notice_call[1][:message_thread_id]
+    notice_row = Message.find_by(chat_id: task.chat_id, message_id: 1)
+    assert_equal 73, notice_row.message_thread_id
+    event = BackgroundTask.where(task_type: 'agent_event').last
+    assert_equal 73, event.params_hash['forum_thread_id']
+    assert_equal true, event.params_hash['user_notified']
+  end
+
+  def test_malformed_failure_notice_keeps_event_eligible_for_agent_fallback
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/fail.png' }
+    @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
+    @bot.queue_message_outcomes({ 'ok' => true, 'result' => {} })
+
+    assert_equal :failed, ImageGenTaskHandler.new.call(fresh_task, @bot)
+
+    event = BackgroundTask.where(task_type: 'agent_event').last
+    refute event.params_hash['user_notified']
+  end
+
+  def test_failure_notice_requires_strict_positive_integer_message_id
+    @fake_adapter.sync = true
+    malformed_ids = ['1', 1.0, 0]
+
+    malformed_ids.each_with_index do |message_id, index|
+      @fake_adapter.submit_returns = { url: "http://x/fail-notice-#{index}.png" }
+      @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
+      @bot.queue_message_outcomes(OpenStruct.new(message_id: message_id, message_thread_id: nil))
+      task = fresh_task
+
+      assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
+      event = BackgroundTask.where(task_type: 'agent_event')
+        .detect { |candidate| candidate.params_hash['parent_task_id'] == task.id }
+      refute event.params_hash['user_notified']
+    end
+  end
+
+  def test_successful_forum_delivery_persists_in_originating_thread
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/forum.png' }
+    task = fresh_task(forum_thread_id: 74)
+
+    assert_equal :done, ImageGenTaskHandler.new.call(task, @bot)
+
+    photo_call = @bot.calls.find { |kind, _| kind == :sendPhoto }
+    assert_equal 74, photo_call[1][:message_thread_id]
+    row = Message.find_by(chat_id: task.chat_id, message_id: 2)
+    assert_equal 74, row.message_thread_id
+    assert_equal "image-task:#{task.id}", row.bg_task_external_id
+  end
+
+  def test_real_telegram_response_codes_classify_429_and_5xx_as_retryable
+    handler = ImageGenTaskHandler.new
+
+    assert handler.send(:retryable_telegram_response?, telegram_error(429, 'Too Many Requests'))
+    assert handler.send(:retryable_telegram_response?, telegram_error(502, 'Bad Gateway'))
+    refute handler.send(:retryable_telegram_response?, telegram_error(400, 'IMAGE_PROCESS_FAILED'))
+  end
+
+  def test_non_json_telegram_error_log_redacts_bot_token_url
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/retry.png' }
+    token = '123456789:FAKE_SECRET_TELEGRAM_TOKEN'
+    response = Struct.new(:body, :status, :env).new(
+      'upstream exploded', 502,
+      OpenStruct.new(url: URI("https://api.telegram.org/bot#{token}/sendPhoto"))
+    )
+    @bot.queue_photo_outcomes(Telegram::Bot::Exceptions::ResponseError.new(response: response))
+
+    original_logger = LOGGER
+    output = StringIO.new
+    Object.send(:remove_const, :LOGGER)
+    Object.const_set(:LOGGER, Logger.new(output))
+
+    assert_equal :pending, ImageGenTaskHandler.new.call(fresh_task, @bot)
+    refute_includes output.string, token
+    assert_includes output.string, '[url]'
+  ensure
+    if defined?(original_logger) && original_logger
+      Object.send(:remove_const, :LOGGER) if Object.const_defined?(:LOGGER)
+      Object.const_set(:LOGGER, original_logger)
+    end
+  end
+
+  def test_download_metadata_controls_upload_mime_and_filename_and_tempfile_is_cleaned
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/image.png' }
+    tmp = Tempfile.new(['delivery-test', '.png'])
+    path = tmp.path
+    handler = ImageGenTaskHandler.new
+    handler.define_singleton_method(:download_to_tempfile) do |_url|
+      { file: tmp, mime_type: 'image/png', filename: 'image.png' }
+    end
+
+    assert_equal :done, handler.call(fresh_task, @bot)
+
+    upload = @bot.calls.find { |kind, _| kind == :sendPhoto }[1][:photo]
+    assert_equal 'image/png', upload.content_type
+    assert_equal 'image.png', upload.original_filename
+    refute File.exist?(path), 'delivery tempfile must be unlinked after send'
+  end
+
+  def test_download_failure_redacts_signed_url_and_token_from_log
+    token = 'ABCDEFGHIJKLMNOPQRSTUVWX12345678'
+    signed_url = "https://images.example/out.png?token=#{token}"
+    original_get = HTTParty.method(:get)
+    HTTParty.singleton_class.send(:define_method, :get) do |*_args, **_kwargs|
+      raise RuntimeError, "download 502 from #{signed_url}"
+    end
+    original_logger = LOGGER
+    output = StringIO.new
+    Object.send(:remove_const, :LOGGER)
+    Object.const_set(:LOGGER, Logger.new(output))
+    handler = ImageGenTaskHandler.new
+    original_download = @original_download_to_tempfile
+    handler.define_singleton_method(:download_to_tempfile) do |url|
+      original_download.bind_call(self, url)
+    end
+
+    assert_nil handler.send(:download_to_tempfile, signed_url)
+    assert_includes output.string, '[url]'
+    refute_includes output.string, token
+    refute_includes output.string, 'images.example'
+  ensure
+    HTTParty.singleton_class.send(:define_method, :get, original_get) if defined?(original_get) && original_get
+    if defined?(original_logger) && original_logger
+      Object.send(:remove_const, :LOGGER) if Object.const_defined?(:LOGGER)
+      Object.const_set(:LOGGER, original_logger)
+    end
+  end
+
   def test_poll_retry_path_clears_external_id_and_increments_counter
     task = fresh_task
     @fake_adapter.poll_returns = :retry
@@ -986,6 +1627,30 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal 1, task.params_hash['generation_retries']
     assert_equal 'pending', task.status
     refute_nil original_extid
+  end
+
+  def test_poll_exception_is_redacted_before_rethrow_without_losing_status_classification
+    token = 'ABCDEFGHIJKLMNOPQRSTUVWX12345678'
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+    assert_equal :pending, handler.call(task, @bot)
+    @fake_adapter.poll_returns = RuntimeError.new(
+      "provider 503 https://provider.example/status?token=#{token}"
+    )
+
+    error = assert_raises(RuntimeError) { handler.call(task, @bot) }
+
+    assert_includes error.message, '503'
+    assert_includes error.message, '[url]'
+    refute_includes error.message, token
+  end
+
+  def telegram_error(code, description)
+    response = Faraday::Response.new(
+      status: code,
+      response_body: { ok: false, error_code: code, description: description }.to_json
+    )
+    Telegram::Bot::Exceptions::ResponseError.new(response: response)
   end
 
   # --- per-request model selection (catalog) --------------------------------
