@@ -291,9 +291,15 @@ class ImageGenTaskHandler
       mark_failed_and_notify(task, api, 'image_failed')
       :failed
     when Hash
-      LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: asynchronous generation complete (URL redacted)"
-      cache_delivery_result(task, result)
-      deliver_generated_result(task, api, result)
+      if result[:failed] || result['failed']
+        provider_reason = result[:error] || result['error']
+        mark_failed_and_notify(task, api, 'image_failed', provider_reason: provider_reason)
+        :failed
+      else
+        LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: asynchronous generation complete (URL redacted)"
+        cache_delivery_result(task, result)
+        deliver_generated_result(task, api, result)
+      end
     end
   end
 
@@ -493,23 +499,12 @@ class ImageGenTaskHandler
     ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
   end
 
-  def mark_failed_and_notify(task, api, reason, user_text: "Не удалось сгенерировать картинку")
+  def mark_failed_and_notify(task, api, reason, user_text: "Не удалось сгенерировать картинку",
+                             provider_reason: nil)
     LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generation #{reason} for #{safe_external(task.external_id)}"
     ActiveRecord::Base.connection_pool.with_connection { mark_failed_sanitized!(task, reason) }
-    text = user_text
     forum_thread_id = task.params_hash['forum_thread_id']
-    user_notified = false
-    begin
-      send_params = { chat_id: task.chat_id, text: text }
-      send_params[:message_thread_id] = forum_thread_id if forum_thread_id
-      resp = api.sendMessage(**send_params)
-      receipt = serialize_delivery_receipt(resp, forum_thread_id: forum_thread_id)
-      user_notified = valid_message_id?(receipt['message_id'])
-      Message.persist_bot_reply(chat_id: task.chat_id, body: text, response: resp,
-                                message_thread_id: forum_thread_id)
-    rescue => e
-      LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to notify chat: #{e.class}: #{sanitized_error_message(e)}"
-    end
+
     event_type = if reason.to_s == 'image_delivery_failed'
       'image_delivery_failed'
     elsif reason.to_s == 'image_persistence_failed'
@@ -519,9 +514,47 @@ class ImageGenTaskHandler
     else
       'image_failed'
     end
-    summary = "Запрос: #{task.params_hash['request'].to_s[0..200]} | Промпт: #{task.params_hash['prompt'].to_s[0..200]} | Причина: #{reason}"
-    emit_agent_event(task, event_type, summary: summary, user_notified: user_notified,
-                     forum_thread_id: forum_thread_id)
+    readable_reason = reason.to_s.tr('_', ' ')
+    provider_detail = Agent::ErrorReporter.sanitize(provider_reason.to_s)[0, 400]
+    readable_reason += ": #{provider_detail}" unless provider_detail.empty?
+    summary = "Задача ##{task.id} | Запрос: #{task.params_hash['request'].to_s[0..200]} | " \
+              "Промпт: #{task.params_hash['prompt'].to_s[0..200]} | Причина: #{readable_reason}"
+
+    # Async failures belong to the agent loop: it has the chat context and can
+    # explain the real outcome instead of leaving a context-free placeholder.
+    # The deterministic text is used only if the event queue is unavailable
+    # (for example, rate-limited or its insert fails). AgentEventHandler owns
+    # the equivalent fallback when the queued agent turn itself cannot answer.
+    event = emit_agent_event(task, event_type, summary: summary, user_notified: false,
+                             forum_thread_id: forum_thread_id)
+    enqueue_failure_notice(task, user_text, forum_thread_id) unless event
+  rescue => e
+    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to enqueue failure event: " \
+                "#{e.class}: #{sanitized_error_message(e)}"
+    enqueue_failure_notice(task, user_text, forum_thread_id)
+  end
+
+  def enqueue_failure_notice(task, text, forum_thread_id)
+    ActiveRecord::Base.connection_pool.with_connection do
+      existing = BackgroundTask.where(task_type: 'failure_notice', chat_id: task.chat_id,
+                                      parent_task_id: task.id).where(status: 'pending').first
+      return existing if existing
+
+      BackgroundTask.create!(
+        task_type: 'failure_notice', chat_id: task.chat_id, parent_task_id: task.id,
+        max_attempts: 5,
+        params: {
+          text: text,
+          forum_thread_id: forum_thread_id,
+          parent_task_id: task.id,
+          parent_task_type: task.task_type,
+        }.compact.to_json
+      )
+    end
+  rescue => e
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to queue durable fallback notice: " \
+                 "#{e.class}: #{sanitized_error_message(e)}"
+    nil
   end
 
   def send_photo(api, chat_id, url, caption, forum_thread_id: nil)

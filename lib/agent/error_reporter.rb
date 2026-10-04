@@ -73,7 +73,7 @@ module Agent
 
     def report_task_failure(task, source: 'background_task')
       return nil unless task
-      return nil if task.task_type == 'agent_event'
+      return nil if %w[agent_event failure_notice].include?(task.task_type)
       existing = existing_event_for(task)
       return existing if existing
 
@@ -128,7 +128,7 @@ module Agent
     end
 
     def existing_event_for(task)
-      BackgroundTask.where(chat_id: task.chat_id, task_type: 'agent_event')
+      BackgroundTask.where(chat_id: task.chat_id, task_type: %w[agent_event failure_notice])
         .where(parent_task_id: task.id)
         .where('created_at >= ?', task.created_at || Time.at(0))
         .order(id: :desc).first

@@ -9,7 +9,7 @@ require_relative '../lib/task_handlers/agent_event_emitter'
 require_relative '../lib/task_handlers/image_gen_handler'
 
 # ImageGenTaskHandler poll-error handling: a persistently-erroring status
-# endpoint (Atlas 500) must fail the task fast (+ notify) after a few CONSECUTIVE
+# endpoint (Atlas 500) must fail the task fast (+ queue an agent notice) after a few CONSECUTIVE
 # errors instead of masking it as :pending until the 60-attempt timeout, while a
 # single transient blip is tolerated.
 class ImageGenPollErrorTest < BotTest
@@ -61,14 +61,18 @@ class ImageGenPollErrorTest < BotTest
     assert_empty @api.sent, 'no failure notice below threshold'
   end
 
-  def test_poll_error_fails_and_notifies_at_threshold
+  def test_poll_error_fails_and_queues_agent_notice_at_threshold
     # Already at (MAX-1) consecutive errors; this one trips the threshold.
     task = make_task(poll_errors: ImageGenTaskHandler::MAX_POLL_ERRORS - 1)
     out = with_adapter(:poll_error) { @handler.call(task, @api) }
     assert_equal :failed, out
     assert_equal 'failed', task.reload.status
-    assert_equal 1, @api.sent.size, 'user notified once'
-    assert_match(/картинку/i, @api.sent.first[:text])
+    assert_empty @api.sent, 'agent event owns the user-facing failure reply'
+    event = BackgroundTask.where(task_type: 'agent_event').last
+    refute_nil event
+    assert_equal 'image_failed', event.params_hash['event_type']
+    assert_equal task.id, event.params_hash['parent_task_id']
+    assert_includes event.params_hash['summary'], "Задача ##{task.id}"
   end
 
   def test_healthy_poll_resets_error_streak

@@ -124,13 +124,14 @@ module ImageGen
           { url: url }
         else
           LOGGER.warn("AtlasAdapter: terminal status without outputs[0] for #{safe(external_id)}: #{safe(data.inspect)}")
-          :failed
+          { failed: true, error: 'terminal status without image output' }
         end
       when 'processing', 'queued'
         :pending
       when 'failed'
-        LOGGER.warn("AtlasAdapter: prediction #{safe(external_id)} failed: #{safe(data['error'])}")
-        :failed
+        reason = safe(data['error'].to_s)[0, 400]
+        LOGGER.warn("AtlasAdapter: prediction #{safe(external_id)} failed: #{reason}")
+        { failed: true, error: reason }
       else
         self.class.note_unknown_status(external_id, data['status'])
         :pending

@@ -145,10 +145,12 @@ class AgentEventDeliverySuppressionTest < BotTest
   class FakeRunner
     class << self
       attr_reader :kwargs, :calls
+      attr_accessor :response
 
       def reset!
         @kwargs = nil
         @calls = 0
+        @response = 'Вот ещё одно сообщение, которое нельзя отправлять'
       end
     end
 
@@ -158,20 +160,25 @@ class AgentEventDeliverySuppressionTest < BotTest
     end
 
     def run
-      'Вот ещё одно сообщение, которое нельзя отправлять'
+      raise self.class.response if self.class.response.is_a?(Exception)
+      self.class.response
     end
   end
 
   class FakeApi
     attr_reader :calls
+    attr_accessor :response
 
     def initialize
       @calls = []
+      @response = OpenStruct.new(message_id: 501, message_thread_id: nil)
     end
 
     def sendMessage(**params)
       @calls << params
-      OpenStruct.new(message_id: 501, message_thread_id: params[:message_thread_id])
+      return @response unless @response.respond_to?(:message_thread_id) && @response.message_thread_id.nil?
+      OpenStruct.new(message_id: @response.message_id,
+                     message_thread_id: params[:message_thread_id])
     end
   end
 
@@ -190,12 +197,14 @@ class AgentEventDeliverySuppressionTest < BotTest
     super
   end
 
-  def event_task(user_notified:, forum_thread_id: 91)
+  def event_task(user_notified:, forum_thread_id: 91,
+                 event_type: 'image_delivery_failed', parent_task_id: nil)
     BackgroundTask.create!(
       task_type: 'agent_event', chat_id: CHAT, max_attempts: 5,
       params: {
-        event_type: 'image_delivery_failed', summary: 'delivery rejected',
+        event_type: event_type, summary: 'delivery rejected',
         user_notified: user_notified, forum_thread_id: forum_thread_id,
+        parent_task_id: parent_task_id,
       }.to_json
     )
   end
@@ -239,5 +248,92 @@ class AgentEventDeliverySuppressionTest < BotTest
     assert_equal 92, api.calls.first[:message_thread_id]
     row = Message.find_by(chat_id: CHAT, message_id: 501)
     assert_equal 92, row.message_thread_id
+  end
+
+  def test_blank_image_failure_reply_uses_persisted_fallback_in_forum_thread
+    FakeRunner.response = '(skip)'
+    task = event_task(user_notified: false, forum_thread_id: 93,
+                      event_type: 'image_failed', parent_task_id: 712)
+    api = FakeApi.new
+
+    assert_equal :done, handler.call(task, api)
+
+    assert_equal 1, api.calls.size
+    assert_equal 93, api.calls.first[:message_thread_id]
+    assert_match(/задача #712/, api.calls.first[:text])
+    row = Message.find_by(chat_id: CHAT, message_id: 501)
+    assert_equal api.calls.first[:text], row.body
+    result = BackgroundTask.find(task.id).result_hash
+    assert_equal true, result['replied']
+    assert_equal true, result['fallback']
+  end
+
+  def test_agent_exception_uses_persisted_image_failure_fallback
+    FakeRunner.response = RuntimeError.new('provider secret token=ABCDEFGHIJKLMNOPQRSTUVWX12345678')
+    task = event_task(user_notified: false, event_type: 'image_failed_after_retries',
+                      parent_task_id: 713)
+    api = FakeApi.new
+
+    assert_equal :done, handler.call(task, api)
+
+    assert_equal 1, api.calls.size
+    assert_match(/повторных попыток/, api.calls.first[:text])
+    assert_match(/задача #713/, api.calls.first[:text])
+    assert Message.exists?(chat_id: CHAT, message_id: 501, role: 'bot')
+    assert_equal true, BackgroundTask.find(task.id).result_hash['fallback']
+  end
+
+  def test_blank_non_image_event_remains_silent
+    FakeRunner.response = ''
+    task = event_task(user_notified: false, event_type: 'cron_tick')
+    api = FakeApi.new
+
+    assert_equal :done, handler.call(task, api)
+
+    assert_empty api.calls
+    result = BackgroundTask.find(task.id).result_hash
+    assert_equal false, result['replied']
+    refute result.key?('fallback')
+  end
+
+  def test_unacknowledged_reply_stays_pending_and_reuses_cached_agent_text
+    [nil, OpenStruct.new(message_id: '501'), OpenStruct.new(message_id: 0)].each do |response|
+      task = event_task(user_notified: false)
+      api = FakeApi.new
+      api.response = response
+
+      assert_equal :pending, handler.call(task, api)
+
+      persisted = BackgroundTask.find(task.id)
+      assert_equal 'pending', persisted.status
+      assert_equal 'retrying', persisted.lifecycle_phase
+      assert persisted.params_hash['reply_text']
+      refute persisted.params_hash.key?('reply_receipt')
+      refute Message.exists?(chat_id: CHAT, role: 'bot')
+    end
+    assert_equal 3, FakeRunner.calls
+  end
+
+  def test_persistence_failure_retries_receipt_without_resending_or_rerunning_agent
+    task = event_task(user_notified: false, forum_thread_id: 94)
+    api = FakeApi.new
+    original = Message.method(:persist_bot_reply)
+    Message.singleton_class.send(:define_method, :persist_bot_reply) { |**_| nil }
+
+    assert_equal :pending, handler.call(task, api)
+    pending = BackgroundTask.find(task.id)
+    assert_equal 501, pending.params_hash.dig('reply_receipt', 'message_id')
+    assert_equal 'delivered', pending.delivery_status
+    assert_equal 1, api.calls.size
+    assert_equal 1, FakeRunner.calls
+
+    Message.singleton_class.send(:define_method, :persist_bot_reply, original)
+    assert_equal :done, handler.call(task, api)
+    assert_equal 1, api.calls.size, 'persist retry must not resend an acknowledged message'
+    assert_equal 1, FakeRunner.calls, 'persist retry must reuse the cached agent reply'
+    assert Message.exists?(chat_id: CHAT, message_id: 501, role: 'bot')
+    assert_equal true, BackgroundTask.find(task.id).result_hash['replied']
+  ensure
+    Message.singleton_class.send(:define_method, :persist_bot_reply, original) if original
   end
 end

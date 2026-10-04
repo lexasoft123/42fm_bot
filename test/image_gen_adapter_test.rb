@@ -541,7 +541,7 @@ class AtlasAdapterTest < Minitest::Test
     body = { 'code' => 400, 'data' => { 'status' => 'failed', 'error' => 'oops' } }
     fake = FakeModelProviderClient.new(get_returns: [200, body])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
-    assert_equal :failed, out
+    assert_equal({ failed: true, error: 'oops' }, out)
   end
 
   def test_poll_failure_log_redacts_error_url_and_external_identifier
@@ -556,7 +556,7 @@ class AtlasAdapterTest < Minitest::Test
 
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once(token) }
 
-    assert_equal :failed, out
+    assert_equal({ failed: true, error: 'provider failed at [url]' }, out)
     assert_includes output.string, '[url]'
     refute_includes output.string, token
     refute_includes output.string, 'atlas.example'
@@ -601,7 +601,7 @@ class AtlasAdapterTest < Minitest::Test
     body = { 'data' => { 'status' => 'completed', 'outputs' => [] } }
     fake = FakeModelProviderClient.new(get_returns: [200, body])
     out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
-    assert_equal :failed, out
+    assert_equal({ failed: true, error: 'terminal status without image output' }, out)
   end
 
   def test_poll_tolerates_unwrapped_response_shape
@@ -1148,7 +1148,7 @@ class HandlerAdapterIntegrationTest < BotTest
     assert Message.exists?(chat_id: -1, message_id: 2, role: 'bot'), 'delivery persisted before completion'
   end
 
-  def test_async_image_process_failed_marks_delivery_failed_and_notifies_once
+  def test_async_image_process_failed_marks_delivery_failed_and_queues_agent_notice
     @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
     task = fresh_task
     handler = ImageGenTaskHandler.new
@@ -1164,12 +1164,13 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal '[url]', persisted.params_hash.dig('delivery_result', 'url')
     assert_equal 1, @fake_adapter.poll_calls.size, 'terminal generation result must not be polled again'
     assert_equal 1, @bot.calls.count { |kind, _| kind == :sendPhoto }
-    notices = @bot.calls.select { |kind, _| kind == :sendMessage }
-    assert_equal 1, notices.size
-    assert_match(/Telegram не смог/, notices.first[1][:text])
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendMessage }
 
-    events = BackgroundTask.where(task_type: 'agent_event').map(&:params_hash)
-    assert_equal 1, events.count { |p| p['parent_task_id'] == task.id && p['event_type'] == 'image_delivery_failed' }
+    event = BackgroundTask.where(task_type: 'agent_event')
+      .detect { |candidate| candidate.params_hash['parent_task_id'] == task.id }
+    assert_equal 'image_delivery_failed', event.params_hash['event_type']
+    refute event.params_hash['user_notified']
+    assert_includes event.params_hash['summary'], "Задача ##{task.id}"
   end
 
   def test_async_retryable_telegram_500_retries_delivery_without_repolling
@@ -1209,8 +1210,9 @@ class HandlerAdapterIntegrationTest < BotTest
     refute persisted.params_hash.key?('delivery_receipt')
     refute persisted.params_hash.key?('persistence_failures')
     assert_equal 1, @bot.calls.count { |kind, _| kind == :sendPhoto }
-    notice = @bot.calls.find { |kind, _| kind == :sendMessage }
-    assert_match(/Telegram не смог/, notice[1][:text])
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendMessage }
+    event = BackgroundTask.where(task_type: 'agent_event').last
+    refute event.params_hash['user_notified']
   end
 
   def test_send_photo_requires_strict_positive_integer_message_id
@@ -1349,7 +1351,7 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal 3, persisted.params_hash['delivery_failures']
     assert_equal 1, @fake_adapter.submit_calls.size, 'bounded delivery retries must reuse the generated result'
     assert_equal 3, @bot.calls.count { |kind, _| kind == :sendPhoto }
-    assert_equal 1, @bot.calls.count { |kind, _| kind == :sendMessage }
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendMessage }
     events = BackgroundTask.where(task_type: 'agent_event').map(&:params_hash)
     assert_equal 1, events.count { |p| p['parent_task_id'] == task.id && p['event_type'] == 'image_delivery_failed' }
   end
@@ -1390,11 +1392,9 @@ class HandlerAdapterIntegrationTest < BotTest
     refute persisted.params_hash.key?('delivery_result')
     refute_includes persisted.params, token
     assert_equal 1, @bot.calls.count { |kind, _| kind == :sendPhoto }, 'receipt retry must never resend'
-    notice = @bot.calls.find { |kind, _| kind == :sendMessage }
-    assert_match(/отправлена.*сохранить подтверждение/, notice[1][:text])
-    refute_match(/Telegram не смог/, notice[1][:text])
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendMessage }
     event = BackgroundTask.where(task_type: 'agent_event').last
-    assert_equal true, event.params_hash['user_notified']
+    refute event.params_hash['user_notified']
   ensure
     Message.singleton_class.send(:define_method, :persist_bot_reply, original) if original
   end
@@ -1470,7 +1470,7 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal 0, @bot.calls.count { |kind, _| kind == :sendMessage }
   end
 
-  def test_forum_thread_is_used_for_photo_notice_persistence_and_event
+  def test_forum_thread_is_used_for_photo_and_failure_event
     task = fresh_task(forum_thread_id: 73)
     @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
     handler = ImageGenTaskHandler.new
@@ -1479,43 +1479,59 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal :failed, handler.call(task, @bot)
 
     photo_call = @bot.calls.find { |kind, _| kind == :sendPhoto }
-    notice_call = @bot.calls.find { |kind, _| kind == :sendMessage }
     assert_equal 73, photo_call[1][:message_thread_id]
-    assert_equal 73, notice_call[1][:message_thread_id]
-    notice_row = Message.find_by(chat_id: task.chat_id, message_id: 1)
-    assert_equal 73, notice_row.message_thread_id
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendMessage }
     event = BackgroundTask.where(task_type: 'agent_event').last
     assert_equal 73, event.params_hash['forum_thread_id']
-    assert_equal true, event.params_hash['user_notified']
-  end
-
-  def test_malformed_failure_notice_keeps_event_eligible_for_agent_fallback
-    @fake_adapter.sync = true
-    @fake_adapter.submit_returns = { url: 'http://x/fail.png' }
-    @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
-    @bot.queue_message_outcomes({ 'ok' => true, 'result' => {} })
-
-    assert_equal :failed, ImageGenTaskHandler.new.call(fresh_task, @bot)
-
-    event = BackgroundTask.where(task_type: 'agent_event').last
     refute event.params_hash['user_notified']
   end
 
-  def test_failure_notice_requires_strict_positive_integer_message_id
+  def test_event_queue_suppression_enqueues_durable_fallback
     @fake_adapter.sync = true
-    malformed_ids = ['1', 1.0, 0]
+    @fake_adapter.submit_returns = { url: 'http://x/fail.png' }
+    @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
+    task = fresh_task(forum_thread_id: 75)
+    handler = ImageGenTaskHandler.new
+    handler.define_singleton_method(:emit_agent_event) { |*_, **_| nil }
 
-    malformed_ids.each_with_index do |message_id, index|
-      @fake_adapter.submit_returns = { url: "http://x/fail-notice-#{index}.png" }
-      @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
-      @bot.queue_message_outcomes(OpenStruct.new(message_id: message_id, message_thread_id: nil))
-      task = fresh_task
+    assert_equal :failed, handler.call(task, @bot)
 
-      assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
-      event = BackgroundTask.where(task_type: 'agent_event')
-        .detect { |candidate| candidate.params_hash['parent_task_id'] == task.id }
-      refute event.params_hash['user_notified']
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendMessage }
+    notice = BackgroundTask.where(task_type: 'failure_notice').last
+    refute_nil notice
+    assert_equal task.id, notice.parent_task_id
+    assert_match(/Telegram не смог/, notice.params_hash['text'])
+    assert_equal 75, notice.params_hash['forum_thread_id']
+    assert_empty BackgroundTask.where(task_type: 'agent_event')
+  end
+
+  def test_event_queue_exception_enqueues_durable_fallback
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'http://x/fail-notice.png' }
+    @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+    handler.define_singleton_method(:emit_agent_event) do |*_, **_|
+      raise ActiveRecord::StatementInvalid, 'event insert failed'
     end
+
+    assert_equal :failed, handler.call(task, @bot)
+
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendMessage }
+    notice = BackgroundTask.where(task_type: 'failure_notice').last
+    refute_nil notice
+    assert_equal task.id, notice.parent_task_id
+  end
+
+  def test_durable_fallback_enqueue_is_idempotent_for_parent_task
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+
+    first = handler.send(:enqueue_failure_notice, task, 'failed', nil)
+    second = handler.send(:enqueue_failure_notice, task, 'failed again', nil)
+
+    assert_equal first.id, second.id
+    assert_equal 1, BackgroundTask.where(task_type: 'failure_notice', parent_task_id: task.id).count
   end
 
   def test_successful_forum_delivery_persists_in_originating_thread
@@ -1627,6 +1643,27 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal 1, task.params_hash['generation_retries']
     assert_equal 'pending', task.status
     refute_nil original_extid
+  end
+
+  def test_provider_failure_reason_reaches_agent_event_sanitized
+    token = 'ABCDEFGHIJKLMNOPQRSTUVWX12345678'
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+    assert_equal :pending, handler.call(task, @bot)
+    @fake_adapter.poll_returns = {
+      failed: true,
+      error: "content safety policy rejected at https://provider.example/job/1 token=#{token}",
+    }
+
+    assert_equal :failed, handler.call(task, @bot)
+
+    event = BackgroundTask.where(task_type: 'agent_event').last
+    summary = event.params_hash['summary']
+    assert_includes summary, 'content safety policy rejected'
+    assert_includes summary, '[url]'
+    assert_includes summary, 'token=[redacted]'
+    refute_includes summary, token
+    refute_includes summary, 'provider.example'
   end
 
   def test_poll_exception_is_redacted_before_rethrow_without_losing_status_classification
@@ -1768,17 +1805,19 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal [{ data: 'DL_FID2', media_type: 'image/jpeg' }], imgs
   end
 
-  # Edit was requested but NOTHING usable resolved → fail with a user-facing
-  # notice, never silently regenerate from scratch (the bug class being killed).
-  def test_edit_intended_but_all_sources_unavailable_fails_with_notice
+  # Edit was requested but NOTHING usable resolved → fail into the agent
+  # loop, never silently regenerate from scratch (the bug class being killed).
+  def test_edit_intended_but_all_sources_unavailable_queues_agent_event
     task = fresh_task(model: 'nano-banana-2', source_message_ids: [999]) # no message row
     result = ImageGenTaskHandler.new.call(task, @bot)
     assert_equal :failed, result
     task.reload
     assert_equal 'failed', task.status
     assert_empty @fake_adapter.submit_calls, 'must not submit a text-to-image fallback'
-    msg = @bot.calls.find { |c| c[0] == :sendMessage }
-    assert msg, 'a failure notice was sent to the chat'
-    assert_match(/редактирован/i, msg[1][:text])
+    assert_equal 0, @bot.calls.count { |kind, _| kind == :sendMessage }
+    event = BackgroundTask.where(task_type: 'agent_event').last
+    assert_equal 'image_failed', event.params_hash['event_type']
+    refute event.params_hash['user_notified']
+    assert_includes event.params_hash['summary'], 'edit sources unavailable'
   end
 end
