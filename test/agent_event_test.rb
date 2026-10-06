@@ -268,6 +268,21 @@ class AgentEventDeliverySuppressionTest < BotTest
     assert_equal true, result['fallback']
   end
 
+  def test_image_failure_turn_cannot_persist_provider_moderation_as_memory
+    task = event_task(user_notified: false, event_type: 'image_failed', parent_task_id: 714)
+    api = FakeApi.new
+
+    assert_equal :done, handler.call(task, api)
+
+    assert_equal %w[remember forget set_rule repeal_rule challenge_rule court_rule],
+                 FakeRunner.kwargs[:excluded_tools]
+    assert_equal false, FakeRunner.kwargs[:persist_deferred_intents]
+    prompt = FakeRunner.kwargs[:text]
+    assert_includes prompt, 'не вызывай remember'
+    assert_includes prompt, 'не сохраняй такие ограничения в scratchpad'
+    refute_includes prompt, 'Помни про scratchpad: можно сохранить'
+  end
+
   def test_agent_exception_uses_persisted_image_failure_fallback
     FakeRunner.response = RuntimeError.new('provider secret token=ABCDEFGHIJKLMNOPQRSTUVWX12345678')
     task = event_task(user_notified: false, event_type: 'image_failed_after_retries',

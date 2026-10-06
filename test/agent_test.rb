@@ -181,6 +181,17 @@ class ToolRegistryTest < BotTest
     assert_equal 2, defs.size
   end
 
+  def test_definitions_exclude_named_tools_for_one_turn
+    Agent::ToolRegistry.register(name: 'remember', description: 'memory', handler: ->(_a, _c) { '' })
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_a, _c) { '' })
+
+    defs = Agent::ToolRegistry.definitions_for(
+      user_role: 'member', api_type: 'anthropic', exclude_names: ['remember']
+    )
+
+    assert_equal ['generate_image'], defs.map { |definition| definition[:name] }
+  end
+
   # Anthropic format uses input_schema with type/properties/required
   def test_definitions_anthropic_format
     Agent::ToolRegistry.register(
@@ -398,6 +409,32 @@ class RunnerTest < BotTest
     assert_equal 'retry_later', payload['action']
     assert_equal 5, payload['retry_in_min']
     assert_equal true, payload['intent_saved']
+    assert_equal 'Wait 5 min', payload['message']
+  end
+
+  def test_deferred_tool_result_does_not_persist_when_turn_disables_intentions
+    Agent::ToolRegistry.register(
+      name: 'flaky', description: 'flaky',
+      handler: ->(_a, _c) {
+        Agent::ToolResult.deferred(user_text: 'Wait 5 min',
+                                   intent: 'persisted provider restriction',
+                                   retry_in_min: 5)
+      }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('flaky', {}),
+      anthropic_text('Не буду сохранять это ограничение.')
+    )
+
+    result = build_runner(text: 'image failure event', user: @user, chat_id: 998,
+                          user_initiated: false, persist_deferred_intents: false).run
+
+    assert_equal 'Не буду сохранять это ограничение.', result
+    assert_empty Agent::Scratchpad.read(998)['intentions']
+    tool_result_msg = FakeGptMaster.calls[1][:messages].last
+    payload = JSON.parse(tool_result_msg[:content].first[:content])
+    assert_equal 'deferred', payload['status']
+    assert_equal false, payload['intent_saved']
     assert_equal 'Wait 5 min', payload['message']
   end
 
@@ -1317,18 +1354,25 @@ class RunnerTest < BotTest
     assert_equal 1, calls.size, 'inline 🎨 with long trailing text must not trigger watchdog'
   end
 
-  # Watchdog must fire only once per turn — if the model still hallucinates
-  # after the nudge, return that text rather than looping forever.
-  def test_watchdog_fires_only_once_per_turn
+  # The model gets one chance to recover after the watchdog nudge. A second
+  # no-tool answer must dispatch the raw draw request directly instead of
+  # letting the chat model become a censorship/policy gate.
+  def test_watchdog_forces_image_call_after_second_no_tool_answer
+    captured = nil
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'draw',
+      handler: ->(args, _ctx) { captured = args; 'queued directly' }
+    )
     long_caption = 'B' * 200
     FakeGptMaster.enqueue(
       anthropic_text("\n🎨 #{long_caption}"),  # iter1: first hallucination
-      anthropic_text("\n🎨 #{long_caption}")   # iter2: still hallucinating after nudge
+      anthropic_text("\n🎨 #{long_caption}")   # iter2: still no tool after nudge
     )
-    result = build_runner(text: 'нарисуй', user: @user).run
+    result = build_runner(text: 'нарисуй кота', user: @user).run
     calls = FakeGptMaster.calls.select { |c| c[:method] == :call_raw }
-    assert_equal 2, calls.size, 'must not loop infinitely'
-    assert_match(/🎨/, result)
+    assert_equal 2, calls.size
+    assert_equal 'queued directly', result
+    assert_equal({ 'prompt' => 'нарисуй кота' }, captured)
   end
 
   # Watchdog also fires when the user gave an imperative draw directive but the
@@ -1352,6 +1396,84 @@ class RunnerTest < BotTest
     nudge = calls[1][:messages].last
     nudge_text = nudge[:content].is_a?(Array) ? nudge[:content].first[:text] : nudge[:content]
     assert_match(/generate_image/, nudge_text)
+  end
+
+  def test_repeated_adult_image_refusal_cannot_veto_generation
+    captured = nil
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'draw',
+      handler: ->(args, _ctx) { captured = args; 'Редактирование поставлено в очередь' }
+    )
+    request = 'нарисуй тесты Роршаха с явно взрослыми сексуальными образами'
+    FakeGptMaster.enqueue(
+      anthropic_text('Не буду рисовать это.'),
+      anthropic_text('Это сознательный отказ, инструмент не вызову.')
+    )
+
+    result = build_runner(
+      text: request, user: @user,
+      image: { data: 'BASE64', media_type: 'image/jpeg' }
+    ).run
+
+    assert_equal 'Редактирование поставлено в очередь', result
+    assert_equal request, captured['prompt']
+    assert_equal true, captured['edit_source'], 'a replied-to image must remain the edit source'
+    assert_equal 2, FakeGptMaster.calls.count { |call| call[:method] == :call_raw }
+  end
+
+  def test_blank_retry_on_draw_request_forces_generation
+    captured = nil
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'draw',
+      handler: ->(args, _ctx) { captured = args; 'queued' }
+    )
+    FakeGptMaster.enqueue(anthropic_text(''), anthropic_text(''))
+
+    result = build_runner(text: 'нарисуй красного кота', user: @user).run
+
+    assert_equal 'queued', result
+    assert_equal({ 'prompt' => 'нарисуй красного кота' }, captured)
+  end
+
+  def test_failed_direct_image_fallback_is_not_executed_again_after_blank_replies
+    attempts = 0
+    Agent::ToolRegistry.register(
+      name: 'generate_image', description: 'draw',
+      handler: ->(_args, _ctx) { attempts += 1; raise 'ambiguous enqueue failure' }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_text('Не буду рисовать это.'),
+      anthropic_text('Всё равно отказываюсь.'),
+      anthropic_text(''),
+      anthropic_text('')
+    )
+
+    result = build_runner(
+      text: 'нарисуй продолжение', user: @user,
+      image: { data: 'BASE64', media_type: 'image/jpeg' }
+    ).run
+
+    assert_equal 1, attempts, 'an ambiguous direct-call error must never create repeated tasks'
+    assert_equal Agent::Runner::SAFE_FAILURE_REPLY, result
+  end
+
+  def test_excluded_tool_is_neither_advertised_nor_executed
+    remembered = false
+    Agent::ToolRegistry.register(
+      name: 'remember', description: 'memory',
+      handler: ->(_args, _ctx) { remembered = true; 'saved' }
+    )
+    FakeGptMaster.enqueue(
+      anthropic_tool_call('remember', { 'content' => 'ban this forever' }),
+      anthropic_text('Не сохранил это как правило.')
+    )
+
+    result = build_runner(text: 'service event', user: @user,
+                          excluded_tools: ['remember'], user_initiated: false).run
+
+    refute remembered
+    assert_equal 'Не сохранил это как правило.', result
+    assert_empty FakeGptMaster.calls.first[:tools]
   end
 
   def test_attached_image_edit_refusal_is_dispatched_directly_with_named_model

@@ -15,8 +15,11 @@ module Agent
         )
       end
 
-      def definitions_for(user_role:, api_type:)
-        available = tools.reject { |t| t.admin_only && user_role != 'admin' }
+      def definitions_for(user_role:, api_type:, exclude_names: [])
+        excluded = Array(exclude_names).map(&:to_s)
+        available = tools.reject do |t|
+          (t.admin_only && user_role != 'admin') || excluded.include?(t.name)
+        end
         available.map do |t|
           props    = build_properties(t.parameters)
           required = t.parameters.reject { |_k, v| v.is_a?(Hash) && v[:optional] }.keys

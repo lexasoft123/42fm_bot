@@ -26,7 +26,7 @@ module Agent
                       'Не утверждай статус очереди, генерации или доставки, если он не подтверждён ' \
                       'результатом уже выполненного инструмента.'.freeze
 
-    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil, user_initiated: true, forum_thread_id: nil, private_chat: false, tools_enabled: true, report_errors: true)
+    def initialize(text:, context:, knowledge:, radio:, chat_id:, user:, api: nil, image: nil, phrase: nil, audio: nil, reply_to_message_id: nil, message_id: nil, user_initiated: true, forum_thread_id: nil, private_chat: false, tools_enabled: true, excluded_tools: [], persist_deferred_intents: true, report_errors: true)
       @text       = text
       @context    = context
       @knowledge  = knowledge
@@ -43,6 +43,8 @@ module Agent
       # it would re-trigger image-gen on the very loop built to prevent that.
       @user_initiated = user_initiated
       @tools_enabled = tools_enabled
+      @excluded_tools = Array(excluded_tools).map(&:to_s).freeze
+      @persist_deferred_intents = persist_deferred_intents
       @report_errors = report_errors
       # Only payloads produced by ToolResult.action inside this Runner are
       # authoritative. Provider-written JSON must never manufacture state.
@@ -118,7 +120,12 @@ module Agent
     def run_inner
       system_prompt, user_content = build_initial_content
       messages = build_initial_messages(user_content)
-      tools    = @tools_enabled ? ToolRegistry.definitions_for(user_role: @user.role, api_type: @api_type) : []
+      tools    = if @tools_enabled
+        ToolRegistry.definitions_for(user_role: @user.role, api_type: @api_type,
+                                     exclude_names: @excluded_tools)
+      else
+        []
+      end
 
       alog :info, "START user=#{@user.name} (#{@user.role})\nREQUEST: #{@text}"
 
@@ -149,6 +156,16 @@ module Agent
             # User turn: a blank reply used to reach deliver as "" and be
             # dropped silently. Budget exhaustion won't improve on a retry of
             # the same context (and would block the loop again) → visible stub.
+            if !generate_image_called &&
+               (OUTPUT_BUDGET_STOPS.include?(stop.to_s) || blank_retried) &&
+               watchdog_fired && image_request_unanswered?
+              generate_image_called = true
+              direct_result = dispatch_direct_image_request
+              return finalize_output(direct_result, messages: messages, system_prompt: system_prompt,
+                                     tools: tools, iteration: i + 1) unless Agent::ErrorReporter.tool_error_result?(direct_result)
+              append_user_nudge(messages, direct_image_error_nudge(direct_result))
+              next
+            end
             if OUTPUT_BUDGET_STOPS.include?(stop.to_s) || blank_retried
               alog :warn, "empty reply (iteration #{i + 1}, stop=#{stop}#{blank_retried ? ', after retry' : ''}) — returning stub"
               return SAFE_FAILURE_REPLY
@@ -157,7 +174,7 @@ module Agent
             # it. Do not make the vision model act as a policy gate: enqueue the
             # raw request directly and let the image backend decide what it can
             # render.
-            if direct_image_edit_request?
+            if !generate_image_called && direct_image_edit_request?
               generate_image_called = true
               direct_result = dispatch_direct_image_edit
               return finalize_output(direct_result, messages: messages, system_prompt: system_prompt,
@@ -213,6 +230,21 @@ module Agent
             alog :warn, "watchdog: #{reason} but no generate_image call — nudging"
             messages << build_assistant_message(raw)
             messages << build_image_call_nudge
+            next
+          end
+
+          # A real draw request gets one model retry so it can choose the best
+          # image model and arguments. If it still returns prose/refusal instead
+          # of the tool call, the chat model is no longer allowed to become a
+          # policy gate: enqueue the user's request verbatim and let the image
+          # backend return its own authoritative result.
+          if !generate_image_called && watchdog_fired && image_request_unanswered?
+            generate_image_called = true
+            direct_result = dispatch_direct_image_request
+            return finalize_output(direct_result, messages: messages, system_prompt: system_prompt,
+                                   tools: tools, iteration: i + 1) unless Agent::ErrorReporter.tool_error_result?(direct_result)
+            messages << build_assistant_message(raw)
+            append_user_nudge(messages, direct_image_error_nudge(direct_result))
             next
           end
 
@@ -335,12 +367,22 @@ module Agent
     end
 
     def dispatch_direct_image_edit
+      dispatch_direct_image_request(force_edit: true)
+    end
+
+    def dispatch_direct_image_request(force_edit: false)
       args = { 'prompt' => @text, 'edit_source' => true }
+      args.delete('edit_source') unless force_edit || source_image_available?
       model = IMAGE_MODEL_MENTIONS.find { |pattern, _key| @text.match?(pattern) }&.last
       args['model'] = model if model
-      alog :warn, "direct image-edit fallback: vision model returned no tool call; " \
+      mode = args['edit_source'] ? 'image-edit' : 'image-generation'
+      alog :warn, "direct #{mode} fallback: model returned no tool call; " \
                   "dispatching generate_image#{model ? " model=#{model}" : ''}"
       execute_tool('generate_image', args)
+    end
+
+    def source_image_available?
+      @image.is_a?(Hash) && @image[:data]
     end
 
     def direct_image_error_nudge(result)
@@ -524,6 +566,12 @@ module Agent
                              message: 'tools are disabled for this turn')
       end
 
+      if @excluded_tools.include?(name.to_s)
+        alog :warn, "blocked excluded tool #{name}"
+        return JSON.generate(status: 'error', source: "tool.#{name}",
+                             message: 'tool is unavailable for this turn')
+      end
+
       tool = ToolRegistry.find(name)
       unless tool
         alog :warn, "unknown tool #{name}"
@@ -608,13 +656,19 @@ module Agent
       end
       return result.user_text unless result.deferred?
 
-      due_at = result.retry_in_min ? (Time.now + result.retry_in_min * 60) : nil
-      Agent::Scratchpad.add(@chat_id, category: 'intentions',
-                            content: result.deferred_intent, due_at: due_at)
-      alog :info, "auto-remember (deferred): #{result.deferred_intent[0..120]}"
+      intent_saved = false
+      if @persist_deferred_intents
+        due_at = result.retry_in_min ? (Time.now + result.retry_in_min * 60) : nil
+        Agent::Scratchpad.add(@chat_id, category: 'intentions',
+                              content: result.deferred_intent, due_at: due_at)
+        intent_saved = true
+        alog :info, "auto-remember (deferred): #{result.deferred_intent[0..120]}"
+      else
+        alog :info, 'auto-remember (deferred) suppressed for this turn'
+      end
       payload = {
         status: 'deferred', action: 'retry_later', retry_in_min: result.retry_in_min,
-        intent_saved: true, message: result.user_text
+        intent_saved: intent_saved, message: result.user_text
       }.compact
       register_trusted_action(payload)
       JSON.generate(payload)

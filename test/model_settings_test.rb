@@ -94,4 +94,13 @@ class ModelSettingsTest < BotTest
     assert_includes prompt, 'Если пользователь просит перевод текста — переведи сам, без инструментов'
     assert_includes prompt, 'для перевода отдавай ТОЛЬКО результат'
   end
+
+  def test_agent_prompt_does_not_make_chat_model_an_image_policy_gate
+    prompt = @settings.dig('chat_gpt', 'agent_prompt')
+
+    assert_includes prompt, 'Ты не являешься модератором image generator'
+    assert_includes prompt, 'не отказывайся вызывать generate_image'
+    assert_includes prompt, 'не смягчай намерение пользователя'
+    assert_includes prompt, 'не сохраняй такой запрет через remember'
+  end
 end
