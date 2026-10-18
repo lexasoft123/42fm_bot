@@ -50,7 +50,12 @@ class AccessRequestTest < BotTest
     assert_includes to_user.first[:text], 'отправлена'
     assert_equal 1, to_admin.size
     assert_includes to_admin.first[:text], 'Вася'
-    cb = to_admin.first[:reply_markup].inline_keyboard.flatten.map(&:callback_data)
+    buttons = to_admin.first[:reply_markup].inline_keyboard
+    profile = buttons.first.first
+    assert_equal '👤 Открыть профиль', profile.text
+    assert_equal "tg://user?id=#{USER}", profile.url
+    assert_nil profile.callback_data, 'profile link must not mutate the request'
+    cb = buttons.flatten.map(&:callback_data)
     assert_includes cb, "adm:req_accept:#{USER}"
     assert_includes cb, "adm:req_decline:#{USER}"
   end

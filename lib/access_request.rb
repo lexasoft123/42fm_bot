@@ -42,10 +42,15 @@ module AccessRequest
   end
 
   def notify_admins(bot, chat_id, label)
-    kb = Telegram::Bot::Types::InlineKeyboardMarkup.new(inline_keyboard: [[
-      Telegram::Bot::Types::InlineKeyboardButton.new(text: '✅ Принять',  callback_data: "adm:req_accept:#{chat_id}"),
-      Telegram::Bot::Types::InlineKeyboardButton.new(text: '❌ Отклонить', callback_data: "adm:req_decline:#{chat_id}"),
-    ]])
+    kb = Telegram::Bot::Types::InlineKeyboardMarkup.new(inline_keyboard: [
+      [Telegram::Bot::Types::InlineKeyboardButton.new(
+        text: '👤 Открыть профиль', url: "tg://user?id=#{chat_id}"
+      )],
+      [
+        Telegram::Bot::Types::InlineKeyboardButton.new(text: '✅ Принять',  callback_data: "adm:req_accept:#{chat_id}"),
+        Telegram::Bot::Types::InlineKeyboardButton.new(text: '❌ Отклонить', callback_data: "adm:req_decline:#{chat_id}"),
+      ],
+    ])
     Settings.auth['super_admin_uids'].to_a.each do |uid|
       bot.api.sendMessage(chat_id: uid, text: "📨 Заявка на доступ: #{label} (id: #{chat_id})", reply_markup: kb)
     rescue => e
