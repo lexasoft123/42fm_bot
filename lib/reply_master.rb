@@ -5,8 +5,10 @@ class ReplyMaster
   DAMN_RATE = 1
   @@wildcard = './config/replies/*.yml'
 
-  def initialize
+  def initialize(enabled: nil)
+    @enabled = enabled.nil? ? configured_enabled? : enabled
     @replies = Hash.new
+    return unless @enabled
 
     sources = []
 
@@ -18,6 +20,8 @@ class ReplyMaster
   end
 
   def reply user, tlg_user, msg
+    return nil unless @enabled
+
     @replies.each do |regex, replies|
       if msg =~ /#{regex}/i
         if replies.is_a?(Hash)
@@ -46,5 +50,12 @@ class ReplyMaster
     name = user.first_name.to_s
     name += " #{user.last_name}" if user.last_name
     name
+  end
+
+  def configured_enabled?
+    return true unless defined?(Settings) && Settings.respond_to?(:replies)
+    Settings.replies.fetch('trigger_replies_enabled', true) != false
+  rescue NoMethodError
+    true
   end
 end

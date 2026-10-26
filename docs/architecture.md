@@ -639,7 +639,7 @@ Scrapes XML from `img.ignio.com` for zodiac horoscopes. Also scrapes `newsler.ru
 OpenWeatherMap JSON API. Returns temperature, wind speed, cloud cover for a given city.
 
 ### ReplyMaster — `lib/reply_master.rb`
-Loads `config/replies/*.yml`. Each entry has a regex trigger and a list of response templates. Randomly selects responses. Also pulls user-saved `phrases` from the DB for personalized insult replies.
+Loads `config/replies/*.yml`. Each entry has a regex trigger and a list of response templates. Randomly selects responses. Also pulls user-saved `phrases` from the DB for personalized insult replies. The committed `replies.trigger_replies_enabled: false` kill switch currently disables both unsolicited paths (YAML regex matches and the 1% random saved-phrase fallback); `FallbackReply` remains the registry's structural catch-all and returns `CommandResult.none`. Explicit `бот ты/вы …` phrase collection, `бот топ`, and the agent's `get_random_phrase` tool are unaffected. Set the flag to `true` and restart to restore the legacy behavior.
 
 ### Dice — `lib/dice.rb`
 Rolls 2 dice for user and 2 for bot, determines winner, returns templated response from `config/lib/dice.yml`.

@@ -77,6 +77,10 @@ class ModelSettingsTest < BotTest
     refute_includes prompt, 'Если запрос абсурдный, риторический или просто хочешь пошутить — вызови get_random_phrase'
   end
 
+  def test_unsolicited_trigger_replies_are_disabled
+    assert_equal false, @settings.dig('replies', 'trigger_replies_enabled')
+  end
+
   def test_agent_prompt_has_bounded_fact_search_policy
     prompt = @settings.dig('chat_gpt', 'agent_prompt')
 

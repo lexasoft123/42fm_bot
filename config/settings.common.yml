@@ -480,6 +480,10 @@ auth:
   # super_admin_uids: []
 
 replies:
+  # Kill switch for unsolicited ReplyMaster Easter eggs: regex-triggered YAML
+  # replies and the 1% random saved-phrase fallback. Explicit phrase capture,
+  # `бот топ`, and the agent's get_random_phrase tool remain available.
+  trigger_replies_enabled: false
   admin_denied:
     - "а ты кто такой вообще?!"
     - "только для своих, брат"
