@@ -12,6 +12,7 @@ TEST_FILES := \
 	test/task_status_tool_test.rb \
 	test/production_errors_test.rb \
 	test/listen_supervisor_test.rb \
+	test/proxy_boot_test.rb \
 	test/api_usage_test.rb \
 	test/gpt_master_test.rb \
 	test/agent_model_canary_test.rb \

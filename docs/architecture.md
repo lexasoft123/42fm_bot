@@ -1115,7 +1115,7 @@ Log rotation: size-based — rotates at `max_size_mb`, keeps `keep_files` old fi
 - **Ruby:** 4.0
 - **Production runs in Docker:** `docker compose up -d --build`; the entrypoint runs `rake db:migrate` then execs the bot as PID 1. `restart: unless-stopped` handles crashes (the bot's own `ListenSupervisor` loop also retries within the process). Deploy from local: `make deploy`. See CLAUDE.md for the full run/deploy procedure.
 - **Local non-Docker runs only:** `daemons` gem via `./bin/bot start|stop|restart|status` — PID file in `pids/42fm_bot.pid`. `:monitor => false` — the bot's own `ListenSupervisor` retry loop handles restarts (never set `:monitor => true`; it spawns a second bot process causing duplicate responses).
-- **SOCKS proxy:** configured in `settings.yml`, applied globally in `AppConfigurator#setup_proxy` via `socksify` (patches `Net::HTTP` — affects ALL outbound HTTP including Telegram polling and GPT calls)
+- **SOCKS proxy:** configured in `settings.yml`, applied globally in `AppConfigurator#setup_proxy` via `socksify` (patches TCP sockets — affects ALL outbound HTTP including Telegram polling and GPT calls). `config/boot.rb` must require `socksify` before any HTTP dependencies: Net::HTTP caches native `open_timeout` support when loaded, and loading it first leaves SOCKS handshake reads outside its timeout guard, potentially freezing the listener indefinitely. Loading the patch alone does not enable proxy routing; `setup_proxy` still supplies the configured server and credentials. `test/proxy_boot_test.rb` runs the real boot sequence in a fresh process against a silent loopback SOCKS server and requires `Net::OpenTimeout`.
 
 ---
 

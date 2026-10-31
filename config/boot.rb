@@ -1,3 +1,4 @@
+require 'socksify' # Must precede net/http's cached native open_timeout detection.
 require 'pathname'
 APP_PATH = Pathname.new File.expand_path('../../',  __FILE__)
 Dir.chdir APP_PATH
