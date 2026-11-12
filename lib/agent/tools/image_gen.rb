@@ -1,3 +1,27 @@
+module ImageGen
+  module EnqueueSnapshot
+    module_function
+
+    # Context and knowledge are serialized arrays. Keep complete rows and
+    # prefer the replied-to message and recent rows inside a fixed budget.
+    def capture(value, limit:, reply_to: nil, recent_first: true)
+      rows = value.is_a?(String) ? JSON.parse(value) : value
+      return '' unless rows.is_a?(Array)
+      reply = rows.find { |row| row.is_a?(Hash) && (row['id'] || row[:id]).to_i == reply_to.to_i } if reply_to.to_i.positive?
+      candidates = [reply, *(recent_first ? rows.reverse : rows)].compact.uniq
+      selected = []
+      candidates.each do |row|
+        next unless row.is_a?(Hash) || row.is_a?(String)
+        trial = selected + [row]
+        selected = trial if JSON.generate(trial).bytesize <= limit
+      end
+      JSON.generate(rows.select { |row| selected.include?(row) }.uniq)
+    rescue JSON::ParserError, TypeError
+      ''
+    end
+  end
+end
+
 Agent::ToolRegistry.register(
   name: 'generate_image',
   description: 'Создаёт картинку через AI image generator. Два режима:
@@ -15,7 +39,7 @@ Agent::ToolRegistry.register(
     'source_message_ids' => {
       type: 'array', optional: true,
       items: { type: 'integer' },
-      description: 'message_id более ранних сообщений с photo: true (поле `id` в контексте) — дополнительные исходные картинки: например, объединить картинку из текущего сообщения с присланной раньше другим участником или скомбинировать несколько старых. Картинка ТЕКУЩЕГО сообщения подключается через edit_source, эти id — для истории. Несколько картинок умеют объединять GPT Image 2.5 Sunburst, Qwen Image 3 Pro (до 3 исходников), Seedream и nano-banana; для остальных моделей будет использована только первая.',
+      description: 'message_id более ранних сообщений с photo: true (поле `id` в контексте) — дополнительные исходные картинки: например, объединить картинку из текущего сообщения с присланной раньше другим участником или скомбинировать несколько старых. Картинка ТЕКУЩЕГО сообщения подключается через edit_source, эти id — для истории. Несколько картинок умеют объединять GPT Image 2.5 Sunburst, Qwen Image 3 Pro (до 3 исходников), Seedream и nano-banana; после удаления дублей доступны максимум 6 картинок, Qwen — 3. Явно выбранная модель при превышении своего лимита остановит задачу; автоматически выбранная заменится подходящей. Если нужных исходников больше лимита или они недоступны, задача завершится с уведомлением.',
     },
     # enum/описание моделей строятся лениво из ImageGen::Catalog в
     # ToolRegistry.definitions_for (Settings ещё не загружен на этапе require'а тулов).
@@ -27,43 +51,83 @@ Agent::ToolRegistry.register(
     },
   },
   handler: ->(args, ctx) {
+    request = ctx[:user_initiated] && !ctx[:request_text].to_s.empty? ? ctx[:request_text].to_s : args['prompt'].to_s
+
+    photo_present = ctx[:photo_source_present] || ctx[:image].is_a?(Hash)
+    edit_requested = !!args['edit_source'] || (photo_present && ImageGen::EditIntent.requested?(request))
+    inline = (edit_requested && ctx[:image].is_a?(Hash) && !ctx[:image][:data].to_s.empty?) ? [ctx[:image]] : []
+    inline_id = ctx[:photo_source_message_id].to_i
+    raw_sources = Array(args['source_message_ids'])
+    if raw_sources.size + inline.size > ImageGen::Catalog::MAX_SOURCE_CANDIDATES
+      next Agent::ToolResult.action(status: :failed, action: 'generate_image',
+        user_text: 'Слишком много исходных сообщений. Выбери не более 24 и попробуй снова.')
+    end
+    source_ids = raw_sources.map(&:to_i).select(&:positive?).uniq
+    source_ids.delete(inline_id) if inline.any? && inline_id.positive?
+    source_ids.unshift(inline_id) if edit_requested && inline.empty? && photo_present && inline_id.positive? && !source_ids.include?(inline_id)
+    if source_ids.size + inline.size > ImageGen::Catalog::MAX_SOURCE_CANDIDATES
+      next Agent::ToolResult.action(status: :failed, action: 'generate_image',
+        user_text: 'Слишком много исходных сообщений. Выбери не более 24 и попробуй снова.')
+    end
+    if ctx[:user_initiated] && inline.empty? && source_ids.empty? && ImageGen::EditIntent.find_photo_then_edit?(request)
+      next Agent::ToolResult.action(status: :failed, action: 'generate_image',
+        user_text: 'Сначала нужно найти фото. Ответь на выбранное фото, и я смогу его отредактировать.')
+    end
+
     role = ctx[:user]&.role
     if RateLimiter.exceeded?(ctx[:chat_id], 'image', role: role)
       mins = RateLimiter.minutes_until_free(ctx[:chat_id], 'image', role: role)
       next Agent::ToolResult.deferred(
         user_text:    RateLimiter.reply(ctx[:chat_id], 'image', role: role),
-        intent:       "дорисовать через #{mins} мин: #{args['prompt']}",
+        intent:       "дорисовать через #{mins} мин: #{request}",
         retry_in_min: mins
       )
     end
 
-    max = ImageGen::MAX_EDIT_IMAGES
-    # Inline image = the photo attached to / replied-to by the current message
-    # (already downloaded to ctx[:image]). History images come by message_id and
-    # are downloaded later, in the background handler (never block the bot loop).
-    inline     = (args['edit_source'] && ctx[:image].is_a?(Hash) && ctx[:image][:data]) ? [ctx[:image]] : []
-    source_ids = Array(args['source_message_ids']).map { |v| v.to_i }.reject(&:zero?).uniq
-    source_ids = source_ids.first([max - inline.size, 0].max)   # cap total at MAX_EDIT_IMAGES
-    total      = inline.size + source_ids.size
 
-    model_key = ImageGen::Catalog.resolve_key(args['model'])   # blank/unknown -> default key
-    # A combine (>1 source image) needs a multi-image-capable model. If the
-    # agent picked one that can't (Wan/Flux), switch to a capable model so the
-    # user gets the combine instead of a silent single-image edit. We pick a
-    # capability-aware default (not blindly default_key) so a future
-    # default_model change to a single-image model can't silently re-break this.
-    if total > 1 && !ImageGen::Catalog.multi_image?(model_key)
-      switched = ImageGen::Catalog.multi_image_default_key
-      LOGGER.info "[chat=#{ctx[:chat_id]}] generate_image: #{model_key} can't combine #{total} images -> using #{switched}"
-      unless ImageGen::Catalog.multi_image?(switched)
-        LOGGER.warn "[chat=#{ctx[:chat_id]}] generate_image: no multi_image-capable model in catalog — combine will use only the first image"
-      end
-      model_key = switched
+    # Resolve identities without downloading on the listen thread. Different
+    # message IDs can refer to the very same Telegram file.
+    known_files = []
+    if inline.any? && inline_id.positive?
+      scope = Message.where(chat_id: ctx[:chat_id], message_id: inline_id)
+      scope = scope.where(message_thread_id: ctx[:forum_thread_id]) if ctx[:forum_thread_id]
+      known_files << scope.pick(:attachment_photo_file_id)
     end
-
-    params = { request: args['prompt'], user_uid: ctx[:user]&.uid, model: model_key }
-    params[:forum_thread_id]    = ctx[:forum_thread_id] if ctx[:forum_thread_id]
-    params[:input_images]       = inline.map { |i| { data: i[:data], media_type: i[:media_type] } } if inline.any?
+    source_ids = source_ids.reject do |mid|
+      scope = Message.where(chat_id: ctx[:chat_id], message_id: mid)
+      scope = scope.where(message_thread_id: ctx[:forum_thread_id]) if ctx[:forum_thread_id]
+      file_id = scope.pick(:attachment_photo_file_id)
+      duplicate = file_id && known_files.include?(file_id)
+      known_files << file_id if file_id
+      duplicate
+    end
+    total = inline.size + source_ids.size
+    requested_model = ImageGen::Catalog.requested_key(request)
+    excluded_models = ImageGen::Catalog.excluded_keys(request)
+    model_key = requested_model || ImageGen::Catalog.allowed_key(args['model'], excluded_models)
+    unless model_key
+      next Agent::ToolResult.action(status: :failed, action: 'generate_image',
+        user_text: 'Нет доступной модели с учётом указанных исключений.')
+    end
+    edit_intended = edit_requested || source_ids.any?
+    if edit_intended && !ImageGen::Catalog.edit_supported?(model_key)
+      if requested_model
+        next Agent::ToolResult.action(status: :failed, action: 'generate_image',
+          user_text: "#{model_key} не поддерживает редактирование. Выбери другую модель.")
+      end
+      model_key = ImageGen::Catalog.capable_model_for(1, excluded: excluded_models)
+      unless model_key
+        next Agent::ToolResult.action(status: :failed, action: 'generate_image',
+          user_text: 'Нет доступной модели для редактирования картинки.')
+      end
+    end
+    params = { request: request, user_uid: ctx[:user]&.uid, origin_user_id: ctx[:user]&.uid, model: model_key,
+               user_requested_model: requested_model, model_explicit: !requested_model.nil?, excluded_models: excluded_models, edit_intended: edit_intended,
+               missing_inline_source: !!(edit_requested && photo_present && inline.empty? && !inline_id.positive?),
+               prompt_context: ImageGen::EnqueueSnapshot.capture(ctx[:image_prompt_context], limit: 8000, reply_to: ctx[:reply_to_message_id]),
+               prompt_knowledge: ImageGen::EnqueueSnapshot.capture(ctx[:image_prompt_knowledge], limit: 4000, recent_first: false) }
+    params[:forum_thread_id] = ctx[:forum_thread_id] if ctx[:forum_thread_id]
+    params[:input_images] = inline.map { |i| { data: i[:data], media_type: i[:media_type], source_message_id: inline_id.positive? ? inline_id : nil }.compact } if inline.any?
     params[:source_message_ids] = source_ids if source_ids.any?
 
     task = BackgroundTask.create!(
@@ -72,8 +136,8 @@ Agent::ToolRegistry.register(
       max_attempts: 60,
       params: params.to_json
     )
-    user_text = total.positive? ? 'Редактирование картинки поставлено в очередь и скоро будет отправлено в чат' \
-                                : 'Картинка поставлена в очередь генерации и скоро будет отправлена в чат'
+    user_text = edit_intended ? 'Редактирование картинки поставлено в очередь' \
+                                : 'Картинка поставлена в очередь генерации'
     Agent::ToolResult.action(status: :queued, action: 'generate_image',
                              task_id: task.id, task_type: 'image_generate', user_text: user_text)
   }

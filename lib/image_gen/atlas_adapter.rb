@@ -79,11 +79,12 @@ module ImageGen
         # silently regenerate from scratch. Atlas documents a 3-reference cap
         # for Qwen 3.0, below the tool-wide MAX_EDIT_IMAGES cap.
         if edit_model.to_s.include?('qwen-image-3.0')
-          LOGGER.warn "AtlasAdapter: Qwen Image 3.0 accepts at most 3 references; ignoring #{data_uris.length - 3}" if data_uris.length > 3
-          base.merge(reference_image_urls: data_uris.first(3))
+          raise ArgumentError, "Qwen Image 3.0 accepts at most 3 references" if data_uris.length > 3
+          base.merge(reference_image_urls: data_uris)
         elsif edit_model.to_s.match?(/nano-banana|seedream|gpt-image/)
           base.merge(images: data_uris)
         else
+          raise ArgumentError, "selected model accepts only one reference" if data_uris.length > 1
           base.merge(image: data_uris.first)
         end
       else

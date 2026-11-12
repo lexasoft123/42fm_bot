@@ -1,21 +1,33 @@
 require_relative 'agent_event_emitter'
+require_relative 'task_delivery_errors'
 require_relative '../telegram_file'
+require_relative '../model_provider_client'
 require 'faraday'
 require 'faraday/multipart'
 require 'tempfile'
 require 'uri'
+require 'digest'
+require 'base64'
 
 class ImageGenTaskHandler
   include ChatContext
   include AgentEventEmitter
 
-  MAX_SUBMIT_FAILURES  = 3
   MAX_DELIVERY_FAILURES = 3
   MAX_PERSISTENCE_FAILURES = 3
 
   class DeliveryPersistenceError < StandardError; end
 
   def call(task, api)
+    # A terminal provider outcome may have been reached immediately before
+    # SQLite rolled back the parent+notice transaction. Replay only that
+    # terminal transition after restart; never compose or submit the paid job
+    # again while its notice is still pending.
+    if task.status == 'pending' && (transition = task.params_hash['terminal_failure_transition'])
+      mark_failed_and_notify(task, api, transition['reason'], terminal_transition: transition)
+      return :failed
+    end
+
     # A completed generation is cached in params before the first Telegram
     # delivery attempt. This branch must win over external_id dispatch so a
     # transient send failure retries delivery instead of paying to regenerate.
@@ -31,28 +43,72 @@ class ImageGenTaskHandler
       return deliver_generated_result(task, api, delivery_result)
     end
 
-    task.external_id.nil? ? compose_and_submit(task, api) : poll_and_deliver(task, api)
+    if task.external_id.nil? && task.params_hash['submit_in_flight']
+      mark_failed_and_notify(task, api, 'submit_outcome_unknown')
+      return :failed
+    end
+
+    result = task.external_id.nil? ? compose_and_submit(task, api) : poll_and_deliver(task, api)
+    if result == :pending && task.attempts + 1 >= task.max_attempts
+      mark_failed_and_notify(task, api, task.external_id ? 'poll_timeout' : 'submit_timeout')
+      return :failed
+    end
+    result
   end
 
   private
 
-  def compose_and_submit(task, api)
+  def mark_processing_unless_retrying(task)
+    return if %w[retrying delivering persisting_delivery].include?(task.lifecycle_phase)
     ActiveRecord::Base.connection_pool.with_connection { task.mark_processing! }
+  end
+
+  def compose_and_submit(task, api)
+    mark_processing_unless_retrying(task)
     p = task.params_hash
     request = p['request'].to_s
     model_key = p['model']   # nil for legacy/award tasks (no per-request model)
+    explicit_model = p['model_explicit'] || !p['user_requested_model'].to_s.empty?
+    if explicit_model && !ImageGen::Catalog.entry(model_key)
+      mark_failed_and_notify(task, api, 'image_model_unavailable')
+      return :failed
+    end
     # Did the user ask to edit/combine? (inline image, history message_ids, or a
     # legacy single-image task enqueued before this deploy.)
-    edit_intended = !p['input_image'].to_s.empty? ||
+    edit_intended = p['edit_intended'] || !p['input_image'].to_s.empty? ||
                     Array(p['input_images']).any? ||
                     Array(p['source_message_ids']).any?
+    if explicit_model && edit_intended && !ImageGen::Catalog.edit_supported?(model_key)
+      mark_failed_and_notify(task, api, 'image_model_unavailable')
+      return :failed
+    end
+    if !explicit_model && edit_intended && model_key &&
+       (!ImageGen::Catalog.entry(model_key) || !ImageGen::Catalog.edit_supported?(model_key))
+      model_key = ImageGen::Catalog.capable_model_for(1, excluded: Array(p['excluded_models']))
+      unless model_key
+        mark_failed_and_notify(task, api, 'image_model_unavailable')
+        return :failed
+      end
+    end
     begin
       if model_key
         prov = ImageGen::Catalog.provider_for(model_key)
         unless ImageGen::ADAPTERS.key?(prov)   # typo'd/unknown provider in catalog entry
+          if explicit_model
+            mark_failed_and_notify(task, api, 'adapter_config_error')
+            return :failed
+          end
           LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: model #{safe_external(model_key).inspect} → unknown provider #{safe_external(prov).inspect}; falling back to default_model"
-          model_key = ImageGen::Catalog.default_key   # re-resolve key so model id matches the adapter
-          prov      = ImageGen::Catalog.provider_for(model_key)
+          model_key = if edit_intended
+            ImageGen::Catalog.capable_model_for(1, excluded: Array(p['excluded_models']))
+          else
+            ImageGen::Catalog.allowed_key(nil, Array(p['excluded_models']))
+          end
+          unless model_key
+            mark_failed_and_notify(task, api, 'adapter_config_error')
+            return :failed
+          end
+          prov = ImageGen::Catalog.provider_for(model_key)
         end
         adapter = ImageGen.adapter_for(prov)   # build the entry's provider's adapter
       else
@@ -67,23 +123,41 @@ class ImageGenTaskHandler
     # Resolve edit source image(s): inline (current/reply, already base64) plus
     # any chat-history photos the agent referenced by message_id — downloaded
     # HERE because the handler runs in TaskRunner, not the bot's listen loop.
+    if Array(p['source_message_ids']).size + Array(p['input_images']).size > ImageGen::Catalog::MAX_SOURCE_CANDIDATES
+      mark_failed_and_notify(task, api, 'image_model_source_conflict')
+      return :failed
+    end
     images  = resolve_input_images(task, api, p)
     editing = images.any?
     # Edit requested but nothing usable resolved (e.g. every referenced photo
     # predates photo-capture) — fail loudly instead of silently regenerating
     # from scratch (the exact silent-degradation this change exists to kill).
-    if edit_intended && images.empty?
+    if edit_intended && (images.empty? || (p.key?('edit_intended') && @missing_image_source))
       mark_failed_and_notify(task, api, 'edit_sources_unavailable',
         user_text: "Не нашёл картинок для редактирования — возможно, они слишком старые. Пришли картинку заново.")
       return :failed
+    end
+
+    effective_key = model_key || ImageGen::Catalog.default_key
+    if images.size > ImageGen::MAX_EDIT_IMAGES || (effective_key && images.size > ImageGen::Catalog.image_capacity(effective_key))
+      if explicit_model || images.size > ImageGen::MAX_EDIT_IMAGES
+        mark_failed_and_notify(task, api, 'image_model_source_conflict')
+        return :failed
+      end
+      model_key = ImageGen::Catalog.capable_model_for(images.size, excluded: Array(p['excluded_models']))
+      unless model_key
+        mark_failed_and_notify(task, api, 'image_model_source_conflict')
+        return :failed
+      end
+      adapter = ImageGen.adapter_for(ImageGen::Catalog.provider_for(model_key))
     end
 
     # Generate prompt via LLM with chat context (+ vision of the source images when editing)
     unless p['prompt']
       LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generating prompt for '#{safe_external(request)}' (edit=#{editing}, provider=#{safe_external(adapter.name)})"
 
-      context = get_chat_context(task.chat_id, thread_id: p['forum_thread_id'])
-      knowledge = get_relevant_knowledge(request, task.chat_id)
+      context = p.key?('prompt_context') ? p['prompt_context'].to_s : get_chat_context(task.chat_id, thread_id: p['forum_thread_id'])
+      knowledge = p.key?('prompt_knowledge') ? p['prompt_knowledge'].to_s : get_relevant_knowledge(request, task.chat_id)
       template = adapter.prompt_template(editing ? :edit : :text_to_image)
       # model_name is passed on EVERY path (incl. award/legacy tasks with no
       # model key) because the Atlas template references %{model_name} and
@@ -127,7 +201,7 @@ class ImageGenTaskHandler
           p['prompt'] = composed_prompt.to_s.strip
         end
 
-        if prompt_refusal?(p['prompt'])
+        if prompt_refusal?(p['prompt']) || unsafe_composed_prompt?(p['prompt'], request, p)
           LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: prompt composer refused; using raw request"
           p['prompt'] = request
         end
@@ -145,13 +219,36 @@ class ImageGenTaskHandler
     # Provider-specific model id for this mode; nil ⇒ adapter uses its
     # configured default (legacy tasks, or an edit:false catalog entry).
     mode = editing ? :edit : :text_to_image
+    resolved_model_id = model_key ? ImageGen::Catalog.model_id_for(model_key, mode) : nil
+    if editing && model_key && resolved_model_id.nil?
+      mark_failed_and_notify(task, api, 'image_model_unavailable')
+      return :failed
+    end
+    # Durable before POST: a crash or transport exception cannot safely tell us
+    # whether the provider accepted a paid request. No adapter has idempotency.
+    p['submit_in_flight'] = true
+    ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
     begin
-      resolved_model_id = model_key ? ImageGen::Catalog.model_id_for(model_key, mode) : nil
       submit_result = adapter.submit(prompt: p['prompt'],
                                      input_images: editing ? images : nil,
                                      model: resolved_model_id)
     rescue => e
-      return bail_or_retry(task, api, p, 'submit_failures', MAX_SUBMIT_FAILURES, "submit: #{e.message}", raise_on_retry: e)
+      if e.is_a?(ModelProviderClient::HttpError) && e.status.is_a?(Integer) && e.status.between?(400, 499)
+        mark_failed_and_notify(task, api, 'submit_rejected', provider_reason: e.message)
+      else
+        LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submit outcome unknown: #{e.class}: #{sanitized_error_message(e)}"
+        mark_failed_and_notify(task, api, 'submit_outcome_unknown', provider_reason: e.message)
+      end
+      return :failed
+    end
+    valid_submit_result = if adapter.synchronous?
+      submit_result.is_a?(Hash)
+    else
+      submit_result.is_a?(String) && !submit_result.strip.empty?
+    end
+    unless valid_submit_result
+      mark_failed_and_notify(task, api, 'submit_outcome_unknown')
+      return :failed
     end
     p['provider'] = adapter.name
     p['model']    = model_key if model_key   # forensics snapshot (poll dispatches on provider)
@@ -169,6 +266,7 @@ class ImageGenTaskHandler
       return deliver_sync_result(task, api, submit_result)
     end
 
+    p.delete('submit_in_flight')
     task_id = submit_result
     LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: submitted #{safe_external(task_id)} via #{safe_external(adapter.name)}"
     ActiveRecord::Base.connection_pool.with_connection { task.update!(external_id: task_id, params: p.to_json) }
@@ -185,15 +283,23 @@ class ImageGenTaskHandler
     text.to_s.match?(PROMPT_REFUSAL)
   end
 
+  # Reject invented operational labels and rewrites that omit the user's
+  # literal directive. Preserve requested labels and numbers verbatim.
+  def unsafe_composed_prompt?(composed, request, params)
+    return false unless params.key?('prompt_context')
+    return true unless composed.include?(request)
+    pattern = /(?:#\s*\d+|\btask\s*#?\s*\d+|задач[аиуы]?\s*#?\s*\d+|в\s+очереди|поставлен[аоы]?\s+в\s+очередь|доставк[аиу]|queue(?:d)?|deliver(?:y|ed))/i
+    composed.scan(pattern).any? { |token| !request.downcase.include?(token.downcase) }
+  end
+
   # Synchronous-path delivery. Mirrors the `when Hash` arm of poll_and_deliver
   # without the retry/agent-event-after-retries plumbing.
   #
   # `generation_retries` accounting is intentionally skipped here: it counts
   # poll-time `:retry` returns (transient backend hiccups during async
   # generation), which sync adapters can NEVER produce by definition. The
-  # other retry axis — `submit_failures` — runs upstream in `bail_or_retry`
-  # and either ultimately succeeds (we reach this method) or fails the task,
-  # so it never reaches the success branch either. No agent_event needed.
+  # submit errors end in a terminal notice; no retry is safe without
+  # provider idempotency. No recovery event is needed on this path.
   def deliver_sync_result(task, api, result)
     LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: synchronous generation complete (URL redacted)"
     cache_delivery_result(task, result)
@@ -207,23 +313,6 @@ class ImageGenTaskHandler
     "#{prefix} #{p['prompt'].to_s.empty? ? p['request'] : p['prompt']}"
   end
 
-  # Increment a step-failure counter; if cap reached, fail+notify; otherwise re-raise so
-  # TaskRunner retries on the next poll cycle.
-  def bail_or_retry(task, api, params, counter, max, reason, raise_on_retry:)
-    reason = safe_external(reason)
-    params[counter] = (params[counter] || 0) + 1
-    ActiveRecord::Base.connection_pool.with_connection do
-      task.mark_retrying!(params: params.to_json)
-    end
-    if params[counter] >= max
-      LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]} (max #{max}), giving up: #{reason}"
-      mark_failed_and_notify(task, api, "#{counter}_after_retries")
-      return :failed
-    end
-    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: #{counter}=#{params[counter]}/#{max} — will retry: #{reason}"
-    raise sanitized_exception(raise_on_retry)
-  end
-
   MAX_GENERATION_RETRIES = 3
   # Consecutive status-endpoint (poll) errors tolerated before failing the task.
   # ~5 polls ≈ 75s — long enough to ride out a transient Atlas blip, far short of
@@ -231,7 +320,7 @@ class ImageGenTaskHandler
   MAX_POLL_ERRORS = 5
 
   def poll_and_deliver(task, api)
-    ActiveRecord::Base.connection_pool.with_connection { task.mark_processing! }
+    mark_processing_unless_retrying(task)
     provider = task.params_hash['provider']
     begin
       adapter = ImageGen.adapter_for(provider)
@@ -244,7 +333,7 @@ class ImageGenTaskHandler
       result = adapter.poll_once(task.external_id)
     rescue => e
       LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: poll raised #{e.class}: #{sanitized_error_message(e)}"
-      raise sanitized_exception(e)
+      result = :poll_error
     end
 
     LOGGER.debug "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: polling #{safe_external(task.external_id)} via #{safe_external(adapter.name)} (attempt #{task.attempts + 1}/#{task.max_attempts}) → #{safe_external(result.inspect)}"
@@ -255,7 +344,7 @@ class ImageGenTaskHandler
       # Hash/:failed are terminal. A future :retry-returning model would carry a
       # prior error streak forward (harmless; revisit if such a model is added).
       reset_poll_errors(task) # a healthy 200 poll clears the consecutive-error streak
-      ActiveRecord::Base.connection_pool.with_connection { task.mark_processing! }
+      mark_processing_unless_retrying(task)
       :pending
     when :poll_error
       # The status endpoint failed (e.g. Atlas 500). Tolerate a few CONSECUTIVE
@@ -293,7 +382,8 @@ class ImageGenTaskHandler
     when Hash
       if result[:failed] || result['failed']
         provider_reason = result[:error] || result['error']
-        mark_failed_and_notify(task, api, 'image_failed', provider_reason: provider_reason)
+        structured_reason = result[:failure_reason] || result['failure_reason']
+        mark_failed_and_notify(task, api, 'image_failed', provider_reason: provider_reason, structured_reason: structured_reason)
         :failed
       else
         LOGGER.info "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: asynchronous generation complete (URL redacted)"
@@ -309,8 +399,15 @@ class ImageGenTaskHandler
   def cache_delivery_result(task, result)
     p = task.params_hash
     p['delivery_result'] = JSON.parse(result.to_json)
+    p.delete('submit_in_flight')
     ActiveRecord::Base.connection_pool.with_connection do
-      task.update!(params: p.to_json, lifecycle_phase: 'delivering', delivery_status: 'pending')
+      # Provider polling and Telegram delivery have independent bounded
+      # budgets. A successful paid generation near the poll cap must still get
+      # its configured delivery retries. This reset happens only once, when
+      # the terminal provider result is first cached; re-entry sees the cache
+      # above and never resets/repeats provider work.
+      task.update!(params: p.to_json, attempts: 0,
+                   lifecycle_phase: 'delivering', delivery_status: 'pending')
     end
   end
 
@@ -320,7 +417,8 @@ class ImageGenTaskHandler
     unless url
       LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generated result has no URL: #{safe_external(result.inspect)}"
       mark_failed_and_notify(task, api, 'image_delivery_failed',
-        user_text: 'Картинка сгенерирована, но не удалось отправить её в чат')
+        user_text: 'Картинка сгенерирована, но не удалось отправить её в чат',
+        delivery_status: 'failed')
       return :failed
     end
 
@@ -342,6 +440,7 @@ class ImageGenTaskHandler
     when :retry
       failures = (p['delivery_failures'] || 0) + 1
       p['delivery_failures'] = failures
+      p['delivery_ambiguous'] = true unless p['delivery_receipt']
       ActiveRecord::Base.connection_pool.with_connection do
         task.mark_retrying!(params: p.to_json, delivery_status: 'pending')
       end
@@ -350,11 +449,26 @@ class ImageGenTaskHandler
         return :pending
       end
       mark_failed_and_notify(task, api, 'image_delivery_failed',
-        user_text: 'Картинка сгенерирована, но Telegram не смог её отправить')
+        user_text: 'Картинка сгенерирована, но Telegram не смог её отправить',
+        delivery_status: 'unknown')
       :failed
     else
+      if send_result[:delivery_status] == 'unknown' && !p['delivery_receipt']
+        p['delivery_ambiguous'] = true
+        ActiveRecord::Base.connection_pool.with_connection do
+          task.update!(params: p.to_json, delivery_status: 'unknown')
+        end
+      end
+      delivery_status = if p['delivery_receipt']
+        'delivered'
+      elsif p['delivery_ambiguous']
+        'unknown'
+      else
+        send_result[:delivery_status] || 'unknown'
+      end
       mark_failed_and_notify(task, api, 'image_delivery_failed',
-        user_text: 'Картинка сгенерирована, но Telegram не смог её отправить')
+        user_text: 'Картинка сгенерирована, но Telegram не смог её отправить',
+        delivery_status: delivery_status)
       :failed
     end
   end
@@ -461,33 +575,49 @@ class ImageGenTaskHandler
   # with a warning. Returns up to MAX_EDIT_IMAGES of { data:, media_type: }.
   def resolve_input_images(task, api, p)
     images = []
+    @missing_image_source = !!p['missing_inline_source']
     Array(p['input_images']).each do |img|
       data = img['data'] || img[:data]
-      next if data.to_s.empty?
-      images << { data: data, media_type: img['media_type'] || img[:media_type] || 'image/jpeg' }
-    end
-    if images.empty? && !p['input_image'].to_s.empty?   # legacy single-image task
-      images << { data: p['input_image'], media_type: p['input_media_type'] || 'image/jpeg' }
-    end
-    Array(p['source_message_ids']).each do |mid|
-      file_id = ActiveRecord::Base.connection_pool.with_connection do
-        Message.where(chat_id: task.chat_id, message_id: mid.to_i).pick(:attachment_photo_file_id)
-      end
-      unless file_id
-        LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: source message #{mid} has no stored photo — skipping"
+      if data.to_s.empty?
+        @missing_image_source = true
         next
       end
+      images << { data: data, media_type: img['media_type'] || img[:media_type] || 'image/jpeg' }
+    end
+    if images.empty? && !p['input_image'].to_s.empty?
+      images << { data: p['input_image'], media_type: p['input_media_type'] || 'image/jpeg' }
+    end
+    seen_files = []
+    inline_ids = Array(p['input_images']).filter_map { |img| img['source_message_id'] || img[:source_message_id] }.map(&:to_i)
+    Array(p['source_message_ids']).map(&:to_i).uniq.each do |mid|
+      next if inline_ids.include?(mid)
+      file_id = ActiveRecord::Base.connection_pool.with_connection do
+        scope = Message.where(chat_id: task.chat_id, message_id: mid)
+        scope = scope.where(message_thread_id: p['forum_thread_id']) if p['forum_thread_id']
+        scope.pick(:attachment_photo_file_id)
+      end
+      unless file_id
+        @missing_image_source = true
+        next
+      end
+      next if seen_files.include?(file_id)
+      seen_files << file_id
       img = TelegramFile.download_image(api, file_id, chat_id: task.chat_id)
-      unless img
-        LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to download photo from message #{mid} — skipping"
+      unless img && !img[:data].to_s.empty?
+        @missing_image_source = true
         next
       end
       images << { data: img[:data], media_type: img[:media_type] || 'image/jpeg' }
     end
-    # Post-resolution backstop. The tool pre-caps source_message_ids before
-    # enqueue, but this also bounds legacy/in-flight tasks (and any future
-    # enqueuer) regardless of how they were created.
-    images.first(ImageGen::MAX_EDIT_IMAGES)
+    images.uniq do |img|
+      data = img[:data].to_s
+      bytes = begin
+        Base64.strict_decode64(data)
+      rescue ArgumentError
+        data
+      end
+      Digest::SHA256.digest(bytes)
+    end
   end
 
   # Clear the consecutive poll-error counter after a healthy poll so a later
@@ -500,11 +630,117 @@ class ImageGenTaskHandler
   end
 
   def mark_failed_and_notify(task, api, reason, user_text: "Не удалось сгенерировать картинку",
-                             provider_reason: nil)
-    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generation #{reason} for #{safe_external(task.external_id)}"
-    ActiveRecord::Base.connection_pool.with_connection { mark_failed_sanitized!(task, reason) }
-    forum_thread_id = task.params_hash['forum_thread_id']
+                             provider_reason: nil, structured_reason: nil,
+                             terminal_transition: nil, delivery_status: nil)
+    unless terminal_transition
+      terminal_transition = persist_or_read_terminal_failure_transition(
+        task, reason, user_text: user_text, provider_reason: provider_reason,
+        structured_reason: structured_reason, delivery_status: delivery_status
+      )
+      return unless terminal_transition
+    end
 
+    reason = terminal_transition['reason']
+    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: generation #{reason} for #{safe_external(task.external_id)}"
+    failure_stage = terminal_transition['failure_stage']
+    failure_reason = terminal_transition['failure_reason']
+    event_type = terminal_transition['event_type']
+    summary = terminal_transition['summary']
+    user_text = terminal_transition['user_text']
+
+    # Async failures belong to the agent loop: it has the chat context and can
+    # explain the real outcome instead of leaving a context-free placeholder.
+    # The deterministic text is used only if the event queue is unavailable
+    # (for example, rate-limited or its insert fails). AgentEventHandler owns
+    # the equivalent fallback when the queued agent turn itself cannot answer.
+    begin
+      ActiveRecord::Base.connection_pool.with_connection do
+        BackgroundTask.transaction do
+          # Acquire SQLite's write lock before inspecting the parent and notice,
+          # serializing competing failure paths even when the parent is terminal.
+          BackgroundTask.where(id: task.id).update_all('updated_at = updated_at')
+          current_parent = BackgroundTask.find_by(id: task.id)
+          next unless current_parent
+
+          forum_thread_id = current_parent.params_hash['forum_thread_id']
+          current_status = current_parent.status
+          existing = BackgroundTask.where(chat_id: current_parent.chat_id, parent_task_id: current_parent.id,
+                                          task_type: %w[agent_event failure_notice]).exists?
+          mark_failed_sanitized!(current_parent, reason, failure_stage, failure_reason,
+                                 terminal_transition['delivery_status']) if current_status == 'pending'
+          if %w[pending failed].include?(current_status) && !existing
+            event = begin
+              BackgroundTask.transaction(requires_new: true) do
+                emit_agent_event(current_parent, event_type, summary: summary, user_notified: false,
+                                 forum_thread_id: forum_thread_id, failure_stage: failure_stage,
+                                 failure_reason: failure_reason)
+              end
+            rescue => e
+              LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: event insert failed: #{e.class}: #{sanitized_error_message(e)}"
+              nil
+            end
+            enqueue_failure_notice(current_parent, user_text, forum_thread_id, event_type: event_type,
+                                   failure_stage: failure_stage, failure_reason: failure_reason) unless event
+          end
+        end
+      end
+    rescue => e
+      # This special no-attempt exception is allowed only after a separate
+      # connection can read back the terminal outcome checkpoint. A rejected
+      # checkpoint write must escape as an ordinary bounded handler failure.
+      durable = ActiveRecord::Base.connection_pool.with_connection do
+        BackgroundTask.find_by(id: task.id)&.params_hash&.[]('terminal_failure_transition')
+      end
+      if durable == terminal_transition
+        raise BackgroundTask::NotificationTransitionPending, sanitized_error_message(e)
+      end
+
+      raise sanitized_exception(e)
+    end
+  end
+
+  def persist_or_read_terminal_failure_transition(task, reason, user_text:, provider_reason:,
+                                                 structured_reason:, delivery_status:)
+    transition = nil
+    ActiveRecord::Base.connection_pool.with_connection do
+      BackgroundTask.transaction do
+        # Serialize checkpoint writers before reading the current params. A
+        # stale handler must never replace a winner's transition or restore a
+        # provider URL that the winner already scrubbed.
+        BackgroundTask.where(id: task.id).update_all('updated_at = updated_at')
+        current = BackgroundTask.find_by(id: task.id)
+        if current
+          params = current.params_hash
+          transition = params['terminal_failure_transition']
+          if transition.nil? && current.status == 'pending'
+            candidate = build_terminal_failure_transition(
+              current, reason, user_text: user_text, provider_reason: provider_reason,
+              structured_reason: structured_reason, delivery_status: delivery_status
+            )
+            checkpoint_params = params.dup
+            if checkpoint_params['delivery_result']
+              checkpoint_params['delivery_result'] = sanitized_data(checkpoint_params['delivery_result'])
+            end
+            encoded_params = checkpoint_params.merge('terminal_failure_transition' => candidate).to_json
+            updated = BackgroundTask.where(id: current.id, status: 'pending')
+              .where("json_type(COALESCE(params, '{}'), '$.terminal_failure_transition') IS NULL")
+              .update_all(params: encoded_params, updated_at: Time.now)
+            if updated == 1
+              transition = candidate
+            else
+              winner = BackgroundTask.find_by(id: current.id)
+              transition = winner&.params_hash&.[]('terminal_failure_transition')
+            end
+          end
+        end
+      end
+    end
+    transition if transition.is_a?(Hash)
+  end
+
+  def build_terminal_failure_transition(task, reason, user_text:, provider_reason:,
+                                        structured_reason:, delivery_status:)
+    failure_stage, failure_reason = classify_failure(reason, provider_reason, structured_reason)
     event_type = if reason.to_s == 'image_delivery_failed'
       'image_delivery_failed'
     elsif reason.to_s == 'image_persistence_failed'
@@ -514,30 +750,53 @@ class ImageGenTaskHandler
     else
       'image_failed'
     end
-    readable_reason = reason.to_s.tr('_', ' ')
     provider_detail = Agent::ErrorReporter.sanitize(provider_reason.to_s)[0, 400]
+    readable_reason = reason.to_s.tr('_', ' ')
     readable_reason += ": #{provider_detail}" unless provider_detail.empty?
     summary = "Задача ##{task.id} | Запрос: #{task.params_hash['request'].to_s[0..200]} | " \
               "Промпт: #{task.params_hash['prompt'].to_s[0..200]} | Причина: #{readable_reason}"
-
-    # Async failures belong to the agent loop: it has the chat context and can
-    # explain the real outcome instead of leaving a context-free placeholder.
-    # The deterministic text is used only if the event queue is unavailable
-    # (for example, rate-limited or its insert fails). AgentEventHandler owns
-    # the equivalent fallback when the queued agent turn itself cannot answer.
-    event = emit_agent_event(task, event_type, summary: summary, user_notified: false,
-                             forum_thread_id: forum_thread_id)
-    enqueue_failure_notice(task, user_text, forum_thread_id) unless event
-  rescue => e
-    LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to enqueue failure event: " \
-                "#{e.class}: #{sanitized_error_message(e)}"
-    enqueue_failure_notice(task, user_text, forum_thread_id)
+    {
+      'reason' => reason.to_s,
+      'user_text' => safe_external(user_text),
+      'provider_reason' => provider_detail,
+      'failure_stage' => failure_stage,
+      'failure_reason' => failure_reason,
+      'event_type' => event_type,
+      'summary' => Agent::ErrorReporter.sanitize(summary),
+      'delivery_status' => (delivery_status if BackgroundTask::DELIVERY_STATUSES.include?(delivery_status.to_s)),
+    }.compact
   end
 
-  def enqueue_failure_notice(task, text, forum_thread_id)
+  def classify_failure(reason, provider_reason, structured_reason = nil)
+    reason = reason.to_s
+    return ['poll', 'moderation'] if structured_reason.to_s == 'moderation'
+    return ['delivery', 'telegram_failed'] if reason == 'image_delivery_failed'
+    return ['persistence', 'persistence_failed'] if reason == 'image_persistence_failed'
+    return ['submit', 'model_unavailable'] if reason == 'image_model_unavailable'
+    return ['submit', 'model_source_conflict'] if reason == 'image_model_source_conflict'
+    return ['submit', 'edit_sources_unavailable'] if reason == 'edit_sources_unavailable'
+    return ['submit', 'provider_rejected'] if reason == 'submit_rejected'
+    return ['submit', 'submit_outcome_unknown'] if reason == 'submit_outcome_unknown'
+    return ['poll', 'timeout'] if reason == 'poll_timeout'
+    return ['submit', 'timeout'] if reason == 'submit_timeout'
+    return ['poll', 'provider_unavailable'] if reason == 'poll_unavailable'
+    stage = %w[submit_failures_after_retries adapter_config_error].include?(reason) ? 'submit' : 'poll'
+    detail = provider_reason.to_s.downcase
+    cause = if detail.match?(/timed?\s*out|timeout/)
+      'timeout'
+    elsif detail.match?(/unavailable|connection|refused|5\d\d/)
+      'provider_unavailable'
+    else
+      'unknown'
+    end
+    [stage, cause]
+  end
+
+  def enqueue_failure_notice(task, text, forum_thread_id, event_type: nil,
+                             failure_stage: nil, failure_reason: nil)
     ActiveRecord::Base.connection_pool.with_connection do
       existing = BackgroundTask.where(task_type: 'failure_notice', chat_id: task.chat_id,
-                                      parent_task_id: task.id).where(status: 'pending').first
+                                      parent_task_id: task.id).first
       return existing if existing
 
       BackgroundTask.create!(
@@ -548,13 +807,12 @@ class ImageGenTaskHandler
           forum_thread_id: forum_thread_id,
           parent_task_id: task.id,
           parent_task_type: task.task_type,
+          event_type: event_type,
+          failure_stage: failure_stage,
+          failure_reason: failure_reason,
         }.compact.to_json
       )
     end
-  rescue => e
-    LOGGER.error "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: failed to queue durable fallback notice: " \
-                 "#{e.class}: #{sanitized_error_message(e)}"
-    nil
   end
 
   def send_photo(api, chat_id, url, caption, forum_thread_id: nil)
@@ -572,25 +830,23 @@ class ImageGenTaskHandler
       api.sendPhoto(**send_params)
     end
 
-    return { status: :failed } unless response
+    return { status: :failed, delivery_status: 'unknown' } unless response
     receipt = serialize_delivery_receipt(response, forum_thread_id: forum_thread_id)
     unless valid_message_id?(receipt['message_id'])
       LOGGER.error "[chat=#{chat_id}] #{self.class.name} sendPhoto returned no valid message_id; delivery unconfirmed"
-      return { status: :failed }
+      return { status: :failed, delivery_status: 'unknown' }
     end
     { status: :accepted, receipt: receipt }
-  rescue OpenSSL::SSL::SSLError, Faraday::ConnectionFailed, Faraday::TimeoutError,
-         Net::OpenTimeout, Net::ReadTimeout, Errno::ECONNRESET, Errno::ECONNREFUSED,
-         SocketError => e
-    LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendPhoto transient failure: #{e.class}: #{sanitized_error_message(e)}"
-    { status: :retry }
   rescue => e
-    if telegram_response_error?(e) && retryable_telegram_response?(e)
-      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendPhoto transient Telegram response: #{e.error_code}: #{sanitized_error_message(e)}"
-      { status: :retry }
+    if TaskDeliveryErrors.retryable?(e)
+      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendPhoto transient failure: #{e.class}: #{sanitized_error_message(e)}"
+      { status: :retry, delivery_status: 'unknown' }
+    elsif TaskDeliveryErrors.definitive_telegram_rejection?(e)
+      LOGGER.error "[chat=#{chat_id}] #{self.class.name} sendPhoto rejected by Telegram: #{sanitized_error_message(e)}"
+      { status: :failed, delivery_status: 'failed' }
     else
       LOGGER.error "[chat=#{chat_id}] #{self.class.name} sendPhoto failed: #{e.class}: #{sanitized_error_message(e)}"
-      { status: :failed }
+      { status: :failed, delivery_status: 'unknown' }
     end
   ensure
     if tmp
@@ -610,13 +866,11 @@ class ImageGenTaskHandler
   end
 
   def telegram_response_error?(error)
-    defined?(Telegram::Bot::Exceptions::ResponseError) &&
-      error.is_a?(Telegram::Bot::Exceptions::ResponseError)
+    TaskDeliveryErrors.telegram_response_error?(error)
   end
 
   def retryable_telegram_response?(error)
-    code = error.error_code.to_i
-    code == 429 || code.between?(500, 599)
+    TaskDeliveryErrors.retryable?(error)
   end
 
   def sanitized_error_message(error)
@@ -657,16 +911,21 @@ class ImageGenTaskHandler
                  result: sanitized_data(result).to_json, params: p.to_json)
   end
 
-  def mark_failed_sanitized!(task, reason)
+  def mark_failed_sanitized!(task, reason, failure_stage, failure_reason, delivery_status = nil)
     p = task.params_hash
     p['delivery_result'] = sanitized_data(p['delivery_result']) if p['delivery_result']
-    delivery = case reason.to_s
-               when 'image_delivery_failed' then 'failed'
-               when 'image_persistence_failed' then 'delivered'
-               else 'unknown'
-               end
+    delivery = if BackgroundTask::DELIVERY_STATUSES.include?(delivery_status.to_s)
+      delivery_status
+    else
+      case reason.to_s
+      when 'image_delivery_failed' then 'failed'
+      when 'image_persistence_failed' then 'delivered'
+      else 'unknown'
+      end
+    end
     task.update!(status: 'failed', lifecycle_phase: 'failed', delivery_status: delivery,
-                 result: { error: reason }.to_json, params: p.to_json)
+                 result: { error: reason, failure_stage: failure_stage, failure_reason: failure_reason,
+                           requested_model: (safe_external(p['model']) if reason.to_s == 'image_model_unavailable') }.compact.to_json, params: p.to_json)
   end
 
   def valid_message_id?(message_id)

@@ -276,6 +276,9 @@ Agent::ToolRegistry.register(
     when 'text'
       results = Gogolmogol.new(query, media_type: 'text').search_results(limit: 3)
       next 'Ничего не найдено' if results.empty?
+      if ctx[:record_text_search]
+        ctx[:record_text_search].call(query, results)
+      end
       Agent::Tools::GoogleSearch.format_text_results(results)
     when 'photo'
       downloads = Gogolmogol.new(query, media_type: 'photo').download_results(limit: 4)

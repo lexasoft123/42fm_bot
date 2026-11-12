@@ -24,6 +24,7 @@ require './lib/agent/tool_result'
 require './lib/chat_context'
 require './lib/telegram_file'
 require './lib/task_runner'
+require './lib/task_cancellation'
 require './lib/chat_wrapped'
 require './lib/cron_scheduler'
 Dir['./lib/task_handlers/*.rb'].each { |f| require f }

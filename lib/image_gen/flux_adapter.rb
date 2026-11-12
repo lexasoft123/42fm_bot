@@ -1,6 +1,7 @@
 require 'httparty'
 require 'set'
 require_relative '../agent/error_reporter'
+require_relative '../model_provider_client'
 
 module ImageGen
   # FLUX 2 image generation via api.bfl.ai. Absorbed from the former top-level
@@ -47,14 +48,13 @@ module ImageGen
     # Submit image generation or editing. Returns task_id string.
     # When input_images is provided, flux-2-pro switches to image-edit mode and
     # sizes the output to match the input unless width/height are forced. FLUX
-    # edits a SINGLE source image — if several are passed (a combine the agent
-    # should have routed to a nano-banana model), use the first and warn.
+    # edits a single source and rejects larger input lists before submission.
     def submit(prompt:, input_images: nil, width: 1024, height: 1024, model: nil)
       effective_model = model || @model
       imgs = Array(input_images)
       body = { prompt: prompt, safety_tolerance: 5, output_format: 'jpeg' }
       if imgs.any?
-        LOGGER.warn "#{self.class.name}: #{imgs.size} input images given but FLUX edits one — using the first" if imgs.size > 1
+        raise ArgumentError, "FLUX accepts only one reference" if imgs.size > 1
         first = imgs.first
         body[:input_image] = "data:#{first[:media_type] || 'image/jpeg'};base64,#{first[:data]}"
         LOGGER.debug "#{self.class.name}: submitting edit (prompt #{prompt.length} chars, #{imgs.size} image(s)) to #{safe(effective_model)}"
@@ -67,7 +67,9 @@ module ImageGen
       resp = HTTParty.post("#{@base_url}/v1/#{effective_model}",
         body: body.to_json, headers: headers, timeout: 60)
       LOGGER.debug "#{self.class.name}#submit took=#{((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round}ms code=#{resp.code}"
-      raise "Flux submit failed: #{safe(resp.code)} #{safe(resp.body)}" unless resp.code == 200
+      unless resp.code == 200
+        raise ModelProviderClient::HttpError.new(status: resp.code, message: "Flux submit failed: #{safe(resp.code)} #{safe(resp.body)}")
+      end
       resp.parsed_response['id'] || raise("No id in response")
     end
 
@@ -83,7 +85,9 @@ module ImageGen
       case data['status']
       when 'Ready'
         { url: data.dig('result', 'sample') }
-      when 'Content Moderated', 'Request Moderated', 'Task not found'
+      when 'Content Moderated', 'Request Moderated'
+        { failed: true, failure_reason: 'moderation' }
+      when 'Task not found'
         :failed
       when 'Error'
         :retry

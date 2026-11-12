@@ -10,6 +10,8 @@ TEST_FILES := \
 	test/agent_test.rb \
 	test/bot_state_tool_test.rb \
 	test/task_status_tool_test.rb \
+	test/task_cancellation_test.rb \
+	test/image_failure_atomicity_test.rb \
 	test/production_errors_test.rb \
 	test/listen_supervisor_test.rb \
 	test/proxy_boot_test.rb \

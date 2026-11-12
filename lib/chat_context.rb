@@ -53,7 +53,7 @@ module ChatContext
   # without a Telegram username via `[Name](tg://user?id=UID)`.
   def self.identity_for_row(r)
     o = {}
-    o[:uid]        = r.uid.to_i              if r.try(:uid)
+    o[:uid]        = r.uid.to_i              if r.try(:uid).to_i.positive?
     o[:username]   = r.name.to_s.strip       if r.try(:name)       && !r.name.to_s.strip.empty?
     o[:first_name] = r.first_name.to_s.strip if r.try(:first_name) && !r.first_name.to_s.strip.empty?
     o[:last_name]  = r.last_name.to_s.strip  if r.try(:last_name)  && !r.last_name.to_s.strip.empty?

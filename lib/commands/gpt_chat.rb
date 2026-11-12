@@ -43,7 +43,9 @@ module Commands
 
     def execute
       m = cmd&.match(PATTERN)
-      text = m ? m[:text] : cmd
+      original = message.text || message.caption || cmd
+      original_match = original&.match(PATTERN)
+      text = original_match ? original_match[:text] : original
 
       # Any new request cancels a pending "send the audio next" follow-up —
       # a track shared after "бот погода" must not replay an old cover request.
@@ -54,14 +56,18 @@ module Commands
       # the Phrase collection.
       explicitly_addressed = !m.nil? || reply_to_bot?
       phrase = explicitly_addressed ? maybe_save_phrase(text) : nil
-      replied_image = extract_image || extract_replied_image
+      photo_message = [message, message.reply_to_message].compact.find do |candidate|
+        candidate.photo.is_a?(Array) && !candidate.photo.empty?
+      end
+      replied_image = photo_message && download_photo(photo_message.photo.last.file_id)
       audio = attached_audio
 
       reply = Agent::Runner.new(
-        text: text, context: get_chat_context,
+        text: text, original_request_text: original, context: get_chat_context,
         knowledge: get_relevant_knowledge(text),
         radio: radio, chat_id: chat_id, user: user, api: bot&.api,
         image: replied_image, phrase: phrase, audio: audio,
+        photo_source_present: !photo_message.nil?, photo_source_message_id: photo_message&.message_id,
         reply_to_message_id: message.reply_to_message&.message_id,
         message_id: message.message_id,
         forum_thread_id: (message.message_thread_id if AudioAttachment.forum?(message)),

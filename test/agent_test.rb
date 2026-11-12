@@ -16,6 +16,7 @@ require_relative '../lib/commands/base'
 require_relative '../lib/chat_context'
 require_relative '../lib/commands/gpt_helpers'
 require_relative '../lib/commands/gpt_chat'
+require_relative '../lib/commands/task_cancel'
 
 # --- Global logger stubs ---
 LOGGER       = Logger.new(IO::NULL) unless defined?(LOGGER)
@@ -96,6 +97,11 @@ module AgentTestHelpers
 
   def stub_settings!(overrides = {})
     defaults = {
+      image_gen: { 'models' => {
+        'wan-2.7' => {}, 'qwen-image-3-pro' => {}, 'seedream-5-pro' => {},
+        'nano-banana-pro' => {}, 'nano-banana-2' => {}, 'flux-2-pro' => {},
+        'gpt-image-2.5-sunburst' => {}
+      } },
       radio: { 'path' => '/music', 'host_path' => nil },
       telegram: { 'token' => '123456:ABCDEF' },
       chat_gpt: {
@@ -107,6 +113,7 @@ module AgentTestHelpers
     }
     merged = defaults.merge(overrides)
     Settings.instance_variable_set(:@_settings, OpenStruct.new(merged))
+    ImageGen::Catalog.instance_variable_set(:@all, nil)
   end
 
   def build_runner(text:, user:, **opts)
@@ -501,6 +508,774 @@ class RunnerTest < BotTest
     FakeGptMaster.enqueue(anthropic_tool_call('queue_image', {}), anthropic_text(payload))
 
     assert_equal 'Картинка поставлена в очередь (задача #42)', build_runner(text: 'status', user: @user).run
+  end
+
+  def test_existing_photo_search_blocks_fabricated_generation
+    called = false
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_a, _c) { called = true; 'queued' })
+    FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'Алиса' }), anthropic_text('Не нашёл фото.'))
+    assert_equal 'Не нашёл фото.', build_runner(text: 'Просто погугли фото Алисы', user: @user).run
+    refute called
+  end
+
+  def test_factual_answer_without_text_search_is_not_presented_as_verified
+    FakeGptMaster.enqueue(anthropic_text('Это точно правда.'), anthropic_text('Это точно правда.'))
+    assert_match(/не могу надёжно проверить/, build_runner(text: 'Проверь новости про Марс', user: @user).run)
+  end
+
+  def test_text_search_evidence_must_match_query_and_request
+    runner = build_runner(text: 'Проверь новости про Марс', user: @user)
+    runner.send(:record_text_search, 'Луна', [{ title: 'Луна', snippet: 'Исследование Луны' }])
+    refute runner.instance_variable_get(:@text_search_evidence)
+    runner.send(:record_text_search, 'Новости Марс', [{ title: 'Новости Марса', snippet: 'Исследование планеты', link: 'https://example.org' }])
+    assert runner.instance_variable_get(:@text_search_evidence)
+  end
+
+  def test_unbound_photo_lookup_asks_without_any_model_or_media_call
+    assert_match(/Уточни/, build_runner(text: 'Просто погугли фото', user: @user).run)
+    assert_empty FakeGptMaster.calls
+  end
+
+  def test_photo_subject_rejects_unrelated_search_and_allows_compound_edit
+    runner = build_runner(text: 'Найди фото кота и добавь ему очки', user: @user)
+    refute runner.send(:existing_photo_lookup?)
+    refute runner.send(:photo_query_matches_subject?, runner.send(:photo_lookup_subject), 'собака')
+    assert runner.send(:photo_query_matches_subject?, runner.send(:photo_lookup_subject), 'кот фото')
+  end
+
+  def test_untrusted_identity_destinations_in_gfm_are_removed
+    runner = build_runner(text: 'привет', user: @user)
+    result = runner.send(:sanitize_telegram_identity_links, '[X](<tg://user?id=999>) <tg://user?id=999>\n[x]: tg://user?id=999')
+    refute_includes result, 'tg://user?id=999'
+    assert_includes result, 'X'
+  end
+
+  def test_missing_pixels_override_confident_description
+    FakeGptMaster.enqueue(anthropic_text('На фото красная машина.'))
+    assert_match(/Не удалось посмотреть фото/, build_runner(text: 'Что на фото?', user: @user, photo_source_present: true).run)
+  end
+
+  def test_search_provenance_accepts_short_subject_but_not_generic_overlap
+    runner = build_runner(text: 'Проверь ЦБ РФ', user: @user)
+    runner.send(:record_text_search, 'ЦБ РФ', [{ title: 'ЦБ РФ', snippet: 'Решение', link: 'https://cbr.ru' }])
+    assert runner.instance_variable_get(:@text_search_evidence)
+    other = build_runner(text: 'Проверь новости про Марс', user: @user)
+    other.send(:record_text_search, 'новости спорта', [{ title: 'Новости спорта', snippet: 'Спорт', link: 'https://example.org' }])
+    refute other.instance_variable_get(:@text_search_evidence)
+  end
+
+  def test_linked_result_must_itself_contain_requested_financial_subject
+    runner = build_runner(text: 'Проверь курс доллара сегодня', user: @user)
+    runner.send(:record_text_search, 'доллара футбол', [
+      { title: 'Матч', snippet: 'Футбол и голы', link: 'https://example.org' },
+      { title: 'Курс доллара', snippet: 'Без ссылки', link: nil }
+    ])
+    refute runner.instance_variable_get(:@text_search_evidence)
+  end
+
+  def test_photo_subject_parses_before_and_after_media_and_discards_instructions
+    ['Найди фото кота, не рисуй', 'найди фотографию кота', 'найди кота фото'].each do |text|
+      runner = build_runner(text: text, user: @user)
+      assert runner.send(:photo_query_matches_subject?, runner.send(:photo_lookup_subject), 'фото кота'), text
+    end
+    assert_nil build_runner(text: 'найди его фото', user: @user).send(:photo_lookup_subject)
+    assert_equal ['земфиры'], build_runner(text: 'найди фотографию Земфиры', user: @user).send(:photo_lookup_subject)
+  end
+
+  def test_local_radio_tools_bypass_web_search_requirement
+    %w[radio_search radio_request].each do |tool_name|
+      Agent::ToolRegistry.register(name: tool_name, description: 'radio', handler: ->(_a, _c) { 'Трек найден' })
+      FakeGptMaster.enqueue(anthropic_tool_call(tool_name, { 'query' => 'трек' }), anthropic_text('Трек найден'))
+      assert_equal 'Трек найден', build_runner(text: 'найди и поставь трек в нашей библиотеке', user: @user).run
+    end
+  end
+
+  def test_wrong_status_tool_id_cannot_satisfy_explicit_question
+    called = []
+    Agent::ToolRegistry.register(name: 'task_status', description: 'status', handler: ->(args, _c) {
+      called << args['task_id']
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: args['task_id'],
+                               task_type: 'image_generate', phase: :queued, user_text: 'snapshot',
+                               display_text: "Задача ##{args['task_id']} в очереди.")
+    })
+    FakeGptMaster.enqueue(anthropic_tool_call('task_status', { 'task_id' => 73 }), anthropic_text('Статус?'))
+    assert_equal 'Задача #42 в очереди.', build_runner(text: 'Какой статус задачи #42?', user: @user).run
+    assert_equal [42], called
+  end
+
+  def test_other_photo_pixels_do_not_authorize_description_of_missing_reply_photo
+    Settings.chat_gpt['settings']['agent_vision'] = Settings.chat_gpt['settings']['agent']
+    Agent::ToolRegistry.register(name: 'view_image', description: 'photo', handler: ->(_a, _c) {
+      Agent::ToolResult.image(user_text: 'loaded', image: { data: 'image', media_type: 'image/jpeg' })
+    })
+    FakeGptMaster.enqueue(anthropic_tool_call('view_image', { 'message_id' => 99 }), anthropic_text('На фото кошка.'))
+    result = build_runner(text: 'Что на фото?', user: @user, photo_source_present: true,
+                          photo_source_message_id: 41).run
+    assert_match(/Не удалось посмотреть фото/, result)
+  end
+
+  def test_explicit_historical_photo_requires_its_own_pixels
+    Settings.chat_gpt['settings']['agent_vision'] = Settings.chat_gpt['settings']['agent']
+    Agent::ToolRegistry.register(name: 'view_image', description: 'photo', handler: ->(_a, _c) {
+      Agent::ToolResult.image(user_text: 'loaded', image: { data: 'image', media_type: 'image/jpeg' })
+    })
+    ['no tool', 'wrong image'].each do |variant|
+      responses = variant == 'no tool' ? [anthropic_text('На фото кошка.')] :
+        [anthropic_tool_call('view_image', { 'message_id' => 99 }), anthropic_text('На фото кошка.')]
+      FakeGptMaster.enqueue(*responses)
+      result = build_runner(text: 'Что на фото в сообщении #42?', user: @user).run
+      assert_match(/Не удалось посмотреть фото/, result, variant)
+    end
+    FakeGptMaster.enqueue(anthropic_tool_call('view_image', { 'message_id' => 42 }), anthropic_text('На фото кошка.'))
+    assert_equal 'На фото кошка.', build_runner(text: 'Что на фото в сообщении #42?', user: @user).run
+  end
+
+  def test_coordinated_photo_subjects_cannot_be_dropped
+    runner = build_runner(text: 'найди фото Земфиры и Ренаты', user: @user)
+    subject = runner.send(:photo_lookup_subject)
+    refute runner.send(:photo_query_matches_subject?, subject, 'Земфиры')
+    assert runner.send(:photo_query_matches_subject?, subject, 'фото Земфиры и Ренаты')
+    assert runner.send(:existing_photo_lookup?)
+    searches = []
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, _c) { searches << args; 'sent' })
+    FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => 'Земфира', 'media_type' => 'photo' }), anthropic_text('Фото отправил.'))
+    assert_match(/Уточни/, runner.run)
+    assert_empty searches
+    FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => 'Земфиры и Ренаты', 'media_type' => 'photo' }), anthropic_text('Фото отправил.'))
+    assert_equal 'Фото отправил.', build_runner(text: 'найди фото Земфиры и Ренаты', user: @user).run
+    assert_equal 1, searches.size
+  end
+
+  def test_factual_search_request_and_linked_evidence_examples
+    [
+      ['Какие симптомы гриппа?', 'Симптомы гриппа', 'Симптомы гриппа'],
+      ['Найди новости о Марсе', 'Новости Марса', 'Новости Марса'],
+      ['проверь новости сегодня', 'Новости сегодня', 'Новости сегодня']
+    ].each do |request, query, title|
+      Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, ctx) {
+        ctx[:record_text_search].call(args['query'], [{ title: args['query'], snippet: args['query'], link: 'https://example.org' }])
+        args['query']
+      })
+      FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => query, 'media_type' => 'text' }), anthropic_text('Проверено по источнику.'))
+      assert_equal 'Проверено по источнику.', build_runner(text: request, user: @user).run, request
+    end
+    FakeGptMaster.enqueue(anthropic_text('Принимайте лекарство.'), anthropic_text('Принимайте лекарство.'))
+    assert_match(/не могу надёжно проверить/, build_runner(text: 'Как лечить грипп?', user: @user).run)
+  end
+
+  def test_radio_current_history_and_listeners_are_authoritative
+    { 'radio_current_track' => 'проверь, что сейчас играет на нашем радио',
+      'radio_history' => 'проверь историю треков',
+      'radio_listeners' => 'проверь сколько слушателей' }.each do |name, request|
+      Agent::ToolRegistry.register(name: name, description: 'radio', handler: ->(_a, _c) { 'Данные радио' })
+      FakeGptMaster.enqueue(anthropic_tool_call(name, {}), anthropic_text('Данные радио'))
+      assert_equal 'Данные радио', build_runner(text: request, user: @user).run
+    end
+  end
+
+  def test_direct_cancel_command_cannot_match_a_line_inside_other_text
+    message = OpenStruct.new(text: "Объясни, что будет\nбот отмени задачу #42", caption: nil)
+    ctx = CommandContext.new(message: message, user: @user, chat_id: 100,
+                             cmd: 'бот отмени задачу #42')
+    refute Commands::TaskCancel.new(ctx).match?
+    message.text = 'бот отмени задачу #41'
+    ctx = CommandContext.new(message: message, user: @user, chat_id: 100, cmd: 'бот отмени задачу #42')
+    command = Commands::TaskCancel.new(ctx)
+    captured = nil
+    TaskCancellation.stub(:cancel, ->(**kwargs) { captured = kwargs[:task_id]; { status: :not_found } }) { command.execute }
+    assert_equal 41, captured
+  end
+
+  def test_direct_watchdog_uses_shared_boundary_aware_model_selection
+    assert_nil ImageGen::Catalog.requested_key('Нарисуй swan')
+    assert_equal 'gpt-image-2.5-sunburst', ImageGen::Catalog.requested_key('Нарисуй кота в Sunburst')
+    seen = nil
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(args, _c) { seen = args; 'queued' })
+    runner = build_runner(text: 'Нарисуй swan', user: @user)
+    runner.send(:dispatch_direct_image_request)
+    refute seen.key?('model')
+    build_runner(text: 'Нарисуй кота в Sunburst', user: @user).send(:dispatch_direct_image_request)
+    assert_equal 'gpt-image-2.5-sunburst', seen['model']
+  end
+
+  def test_medical_paraphrase_uses_linked_entity_bound_search_evidence
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, ctx) {
+      ctx[:record_text_search].call(args['query'], [{ title: 'Грипп: лечение и профилактика', snippet: 'Лечение гриппа', link: 'https://example.org' }])
+      'results'
+    })
+    FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => 'лечение гриппа', 'media_type' => 'text' }), anthropic_text('Источник найден.'))
+    assert_equal 'Источник найден.', build_runner(text: 'Как лечить грипп?', user: @user).run
+  end
+
+  def test_opening_hours_paraphrase_uses_linked_entity_bound_evidence
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, ctx) {
+      ctx[:record_text_search].call(args['query'], [{ title: 'Музей Прадо: часы работы', snippet: 'Часы работы музея Прадо', link: 'https://example.org' }])
+      'results'
+    })
+    FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => 'часы работы музея Прадо', 'media_type' => 'text' }), anthropic_text('Источник найден.'))
+    assert_equal 'Источник найден.', build_runner(text: 'Проверь, когда открывается музей Прадо', user: @user).run
+  end
+
+  def test_mixed_medical_and_creative_request_requires_medical_sources
+    refute build_runner(text: 'Нарисуй врача, который лечит кота', user: @user).send(:factual_search_required?)
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_a, _c) {
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 7,
+                               task_type: 'image_generate', phase: :queued, user_text: 'В очереди')
+    })
+    FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'кот' }),
+                          anthropic_text('Лечите дома.'), anthropic_text('Лечите дома.'))
+    result = build_runner(text: 'Как лечить грипп и нарисуй кота', user: @user).run
+    assert_includes result, 'Задача #7 поставлена в очередь'
+    assert_includes result, 'Медицинскую информацию не удалось проверить'
+  end
+
+  def test_radio_track_does_not_authorize_festival_ticket_price
+    Agent::ToolRegistry.register(name: 'radio_current_track', description: 'radio', handler: ->(_a, _c) { 'Песня' })
+    FakeGptMaster.enqueue(anthropic_tool_call('radio_current_track', {}), anthropic_text('Билет стоит 500 рублей.'), anthropic_text('Билет стоит 500 рублей.'))
+    assert_match(/не могу надёжно проверить/, build_runner(text: 'Проверь, сколько стоит билет на фестиваль радио сегодня', user: @user).run)
+  end
+
+  def test_comma_coordinated_photo_subjects_must_all_be_searched
+    searches = []
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, _c) { searches << args; 'sent' })
+    FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => 'Земфира', 'media_type' => 'photo' }), anthropic_text('Фото отправил.'))
+    assert_match(/Уточни/, build_runner(text: 'найди фото Земфиры, Ренаты и Чулпан', user: @user).run)
+    assert_empty searches
+  end
+
+  def test_classification_and_comparison_require_all_requested_photo_pixels
+    FakeGptMaster.enqueue(anthropic_text('Да, это кошка.'))
+    assert_match(/Не удалось посмотреть фото/, build_runner(text: 'Это кошка?', user: @user, photo_source_present: true).run)
+    Settings.chat_gpt['settings']['agent_vision'] = Settings.chat_gpt['settings']['agent']
+    Agent::ToolRegistry.register(name: 'view_image', description: 'photo', handler: ->(_a, _c) {
+      Agent::ToolResult.image(user_text: 'loaded', image: { data: 'image', media_type: 'image/jpeg' })
+    })
+    request = 'Сравни фото в сообщениях #41 и #42'
+    FakeGptMaster.enqueue(anthropic_tool_call('view_image', { 'message_id' => 41 }), anthropic_text('Они похожи.'))
+    assert_match(/Не удалось посмотреть фото/, build_runner(text: request, user: @user).run)
+    FakeGptMaster.enqueue(anthropic_multi_tool([{ id: 'a', name: 'view_image', input: { 'message_id' => 41 } },
+                                               { id: 'b', name: 'view_image', input: { 'message_id' => 42 } }]), anthropic_text('Они похожи.'))
+    assert_equal 'Они похожи.', build_runner(text: request, user: @user).run
+    FakeGptMaster.enqueue(anthropic_tool_call('view_image', { 'message_id' => 41 }), anthropic_text('Они похожи.'))
+    assert_match(/Не удалось посмотреть фото/, build_runner(text: 'Сравни фото #41 и #42', user: @user).run)
+  end
+
+  def test_compound_factual_and_image_acknowledges_work_but_does_not_assert_unverified_facts
+    ['Проверь курс доллара сегодня и нарисуй кота', 'Проверь, сколько стоит билет в музей Прадо и нарисуй кота'].each do |request|
+      Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_a, _c) {
+        Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 7, task_type: 'image_generate', phase: :queued, user_text: 'В очереди')
+      })
+      FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'кот' }), anthropic_text('Доллар стоит 500 рублей.'), anthropic_text('Доллар стоит 500 рублей.'))
+      result = build_runner(text: request, user: @user).run
+      assert_includes result, 'Задача #7 поставлена в очередь'
+      assert_includes result, 'Фактическую информацию не удалось проверить'
+      refute_includes result, '500 рублей'
+    end
+  end
+
+  def test_entity_inflections_do_not_authorize_different_people
+    runner = build_runner(text: 'Проверь новости Иванова', user: @user)
+    runner.send(:record_text_search, 'Иваненко', [{ title: 'Новости Иваненко', snippet: 'Иваненко', link: 'https://example.org' }])
+    refute runner.instance_variable_get(:@text_search_evidence)
+    photo = build_runner(text: 'Найди фото Пушкина', user: @user)
+    refute photo.send(:photo_query_matches_subject?, photo.send(:photo_lookup_subject), 'Пушкова')
+    assert photo.send(:photo_query_matches_subject?, photo.send(:photo_lookup_subject), 'Пушкин')
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, ctx) {
+      ctx[:record_text_search].call(args['query'], [{ title: 'Новости Иваненко', snippet: 'Иваненко', link: 'https://example.org' }])
+      'results'
+    })
+    FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => 'Иваненко', 'media_type' => 'text' }), anthropic_text('Новости подтверждены.'))
+    assert_match(/не могу надёжно проверить/, build_runner(text: 'Проверь новости Иванова', user: @user).run)
+    media_calls = 0
+    Agent::ToolRegistry.tools.reject! { |tool| tool.name == 'google_search' }
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(_a, _c) { media_calls += 1; 'sent' })
+    FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => 'Пушкова', 'media_type' => 'photo' }), anthropic_text('Фото отправил.'))
+    assert_match(/Уточни/, build_runner(text: 'Найди фото Пушкина', user: @user).run)
+    assert_equal 0, media_calls
+  end
+
+  def test_current_price_and_medical_paraphrases_accept_entity_bound_results
+    [['Проверь, сколько сейчас стоит доллар', 'курс доллара', 'Курс доллара США сегодня'],
+     ['Как вылечить грипп?', 'лечение гриппа', 'Грипп: лечение и профилактика']].each do |request, query, title|
+      Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, ctx) {
+        ctx[:record_text_search].call(args['query'], [{ title: title, snippet: title, link: 'https://example.org' }])
+        'results'
+      })
+      FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => query, 'media_type' => 'text' }), anthropic_text('Источник найден.'))
+      assert_equal 'Источник найден.', build_runner(text: request, user: @user).run, request
+      Agent::ToolRegistry.tools.reject! { |tool| tool.name == 'google_search' }
+    end
+  end
+
+  def test_historical_edit_binds_source_on_model_call_and_direct_fallback
+    Message.create!(chat_id: 100, message_id: 41, role: 'user', body: 'фото', attachment_photo_file_id: 'file-41')
+    captured = []
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(args, ctx) {
+      captured << [args, ctx]
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 7, task_type: 'image_generate', phase: :queued, user_text: 'В очереди')
+    })
+    FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'кот' }), anthropic_text('Поставил.'))
+    assert_match(/задача #7/i, build_runner(text: 'Перерисуй фото из сообщения #41', user: @user).run)
+    FakeGptMaster.enqueue(anthropic_text('Не могу.'))
+    assert_match(/задача #7/i, build_runner(text: 'Перерисуй фото из сообщения #41', user: @user).run)
+    assert_equal 2, captured.size
+    captured.each do |args, ctx|
+      assert_equal [41], args['source_message_ids']
+      assert_equal true, args['edit_source']
+      assert_nil ctx[:image]
+    end
+  end
+
+  def test_historical_edit_missing_photo_never_invokes_generation
+    calls = 0
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_a, _c) { calls += 1; 'queued' })
+    FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'кот' }), anthropic_text('Поставил.'))
+    assert_match(/Не удалось найти исходное фото/, build_runner(text: 'Перерисуй фото из сообщения #41', user: @user).run)
+    assert_equal 0, calls
+    FakeGptMaster.enqueue(anthropic_text('Не могу.'))
+    assert_match(/Не удалось найти исходное фото/, build_runner(text: 'Перерисуй фото из сообщения #41', user: @user).run)
+    assert_equal 0, calls
+  end
+
+  def test_each_factual_clause_needs_its_own_relevant_search_result
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, ctx) {
+      title = args['query'].include?('доллар') ? 'Курс доллара сегодня' : 'Новости Марса сегодня'
+      ctx[:record_text_search].call(args['query'], [{ title: title, snippet: title, link: 'https://example.org' }])
+      title
+    })
+    request = 'Проверь курс доллара сегодня и расскажи новости Марса'
+    ['курс доллара', 'новости Марса'].each do |query|
+      FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => query, 'media_type' => 'text' }), anthropic_text('Уверенный ответ.'))
+      assert_match(/не могу надёжно проверить/, build_runner(text: request, user: @user).run)
+    end
+    FakeGptMaster.enqueue(anthropic_multi_tool([
+      { id: 'a', name: 'google_search', input: { 'query' => 'курс доллара', 'media_type' => 'text' } },
+      { id: 'b', name: 'google_search', input: { 'query' => 'новости Марса', 'media_type' => 'text' } }
+    ]), anthropic_text('Оба источника найдены.'))
+    assert_equal 'Оба источника найдены.', build_runner(text: request, user: @user).run
+  end
+
+  def test_entity_match_alone_cannot_authorize_wrong_information_need
+    [['Проверь курс доллара сегодня', 'курс доллара', 'Этимология слова доллар'],
+     ['Проверь, когда открывается музей Прадо', 'часы работы музея Прадо', 'Коллекция музея Прадо']].each do |request, query, title|
+      Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, ctx) {
+        ctx[:record_text_search].call(args['query'], [{ title: title, snippet: title, link: 'https://example.org' }])
+        title
+      })
+      FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => query, 'media_type' => 'text' }), anthropic_text('Всё проверено.'))
+      assert_match(/не могу надёжно проверить/, build_runner(text: request, user: @user).run)
+      Agent::ToolRegistry.tools.reject! { |tool| tool.name == 'google_search' }
+    end
+  end
+
+  def test_historical_photo_labels_and_mixed_sources_are_bound_correctly
+    Message.create!(chat_id: 100, message_id: 41, role: 'user', body: 'фото', attachment_photo_file_id: 'file-41')
+    captured = []
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(args, ctx) {
+      captured << [args, ctx]
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 7, task_type: 'image_generate', phase: :queued, user_text: 'В очереди')
+    })
+    inline = { data: 'inline-bytes', media_type: 'image/jpeg' }
+    ['Добавь на фото из сообщения #41 надпись «#2026»',
+     'Добавь кота из фото #41 на это прикреплённое фото',
+     'Объедини это фото и фото #41'].each do |request|
+      FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => request }), anthropic_text('Поставил.'))
+      result = build_runner(text: request, user: @user, image: inline, photo_source_present: true, photo_source_message_id: 100).run
+      assert_match(/задача #7/i, result, request)
+    end
+    assert_equal [[41], [41], [41]], captured.map { |args, _| args['source_message_ids'] }
+    assert_nil captured[0][1][:image]
+    assert_equal inline, captured[1][1][:image]
+    assert_equal inline, captured[2][1][:image]
+  end
+
+  def test_unicode_task_ids_always_check_the_requested_task
+    looked_up = []
+    Agent::ToolRegistry.register(name: 'task_status', description: 'status', handler: ->(args, _ctx) {
+      looked_up << args['task_id']
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: args['task_id'], task_type: 'image_generate', phase: :queued,
+                               user_text: 'snapshot', display_text: 'Задача #42 в очереди.')
+    })
+    ['Какой статус задачи 42?', 'Какой статус задачи #42?'].each do |request|
+      FakeGptMaster.enqueue(anthropic_text('Проверю.'))
+      assert_equal 'Задача #42 в очереди.', build_runner(text: request, user: @user).run
+    end
+    assert_equal [42, 42], looked_up
+  end
+
+  def test_compound_status_and_drawing_does_not_stop_after_status_watchdog
+    calls = []
+    Agent::ToolRegistry.register(name: 'task_status', description: 'status', handler: ->(args, _ctx) {
+      calls << [:status, args['task_id']]
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 42, task_type: 'image_generate', phase: :queued,
+                               user_text: 'snapshot', display_text: 'Задача #42 в очереди.')
+    })
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_args, _ctx) {
+      calls << [:draw]
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 77, task_type: 'image_generate', phase: :queued, user_text: 'Картинка поставлена в очередь')
+    })
+    FakeGptMaster.enqueue(anthropic_text('Проверю.'), anthropic_tool_call('generate_image', { 'prompt' => 'кот' }), anthropic_text('Готово.'))
+    result = build_runner(text: 'Какой статус задачи #42 и нарисуй кота', user: @user).run
+    assert_equal [[:status, 42], [:draw]], calls
+    assert_includes result, 'Задача #42 в очереди.'
+    assert_match(/задача #77/i, result)
+    calls.clear
+    FakeGptMaster.enqueue(anthropic_tool_call('task_status', { 'task_id' => 42 }),
+                          anthropic_tool_call('generate_image', { 'prompt' => 'кот' }), anthropic_text('Готово.'))
+    result = build_runner(text: 'Какой статус задачи #42 и нарисуй кота', user: @user).run
+    assert_equal [[:status, 42], [:draw]], calls
+    assert_includes result, 'Задача #42 в очереди.'
+    assert_match(/задача #77/i, result)
+  end
+
+  def test_existing_photo_search_with_english_negation_never_generates
+    count = 0
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_a, _c) { count += 1; 'queued' })
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(_a, _c) { 'sent' })
+    request = "Find a photo of Adele, don't generate an image."
+    FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'Adele' }),
+                          anthropic_tool_call('google_search', { 'query' => 'Adele', 'media_type' => 'photo' }),
+                          anthropic_text('Photo sent.'))
+    assert_equal 'Photo sent.', build_runner(text: request, user: @user).run
+    assert_equal 0, count
+    FakeGptMaster.enqueue(anthropic_text('🎨 ' + ('x' * 90)),
+                          anthropic_tool_call('generate_image', { 'prompt' => 'Adele' }),
+                          anthropic_tool_call('google_search', { 'query' => 'Adele', 'media_type' => 'photo' }),
+                          anthropic_text('Photo sent.'))
+    assert_equal 'Photo sent.', build_runner(text: request, user: @user).run
+    assert_equal 0, count
+  end
+
+  def test_photo_comparison_requires_both_current_and_historical_pixels
+    Settings.chat_gpt['settings']['agent_vision'] = Settings.chat_gpt['settings']['agent']
+    Agent::ToolRegistry.register(name: 'view_image', description: 'view', handler: ->(_a, _c) {
+      Agent::ToolResult.image(user_text: 'loaded', image: { data: 'history', media_type: 'image/jpeg' })
+    })
+    request = 'Сравни это фото с фото из сообщения #42'
+    FakeGptMaster.enqueue(anthropic_tool_call('view_image', { 'message_id' => 42 }), anthropic_text('Они похожи.'))
+    result = build_runner(text: request, user: @user, photo_source_present: true, photo_source_message_id: 41).run
+    assert_match(/Не удалось посмотреть фото/, result)
+    FakeGptMaster.enqueue(anthropic_tool_call('view_image', { 'message_id' => 42 }), anthropic_text('Они похожи.'))
+    result = build_runner(text: request, user: @user, image: { data: 'current', media_type: 'image/jpeg' }, photo_source_present: true, photo_source_message_id: 41).run
+    assert_equal 'Они похожи.', result
+  end
+
+  def test_factual_sentences_collect_evidence_independently
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, ctx) {
+      title = args['query'].include?('доллар') ? 'Курс доллара сегодня' : 'Новости Земфиры'
+      ctx[:record_text_search].call(args['query'], [{ title: title, snippet: title, link: 'https://example.org' }])
+      title
+    })
+    request = 'Проверь курс доллара. Найди новости Земфиры.'
+    FakeGptMaster.enqueue(anthropic_multi_tool([
+      { id: 'a', name: 'google_search', input: { 'query' => 'курс доллара', 'media_type' => 'text' } },
+      { id: 'b', name: 'google_search', input: { 'query' => 'новости Земфиры', 'media_type' => 'text' } }
+    ]), anthropic_text('Оба источника найдены.'))
+    assert_equal 'Оба источника найдены.', build_runner(text: request, user: @user).run
+  end
+
+  def test_attachment_only_edit_discards_model_invented_history_sources
+    captured = nil
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(args, ctx) {
+      captured = [args, ctx]
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 81, task_type: 'image_generate', phase: :queued, user_text: 'В очереди')
+    })
+    image = { data: 'current', media_type: 'image/jpeg' }
+    FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'измени', 'source_message_ids' => [222] }), anthropic_text('Поставил.'))
+    result = build_runner(text: 'Измени только это фото', user: @user, image: image, photo_source_present: true, photo_source_message_id: 11).run
+    assert_match(/задача #81/i, result)
+    refute captured[0].key?('source_message_ids')
+    assert_equal true, captured[0]['edit_source']
+    assert_equal image, captured[1][:image]
+  end
+
+  def test_action_ack_survives_nil_blank_and_unformattable_model_answers
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_args, _ctx) {
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 81, task_type: 'image_generate', phase: :queued, user_text: 'В очереди')
+    })
+    [nil, anthropic_text(''), anthropic_text('assistant-to=generate_image .FullName')].each do |response|
+      FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'кот' }), response)
+      runner = build_runner(text: 'Нарисуй кота', user: @user)
+      assert_equal 'Задача #81 поставлена в очередь.', runner.run
+      assert_equal 0, runner.last_turn_metrics[:corrections]
+    end
+  end
+
+  def test_missing_photo_cannot_produce_fabricated_ocr
+    ['Прочитай надпись на фото', 'Распознай текст', 'Определи объект'].each do |request|
+      FakeGptMaster.enqueue(anthropic_text('На фото написано «Открыто».'))
+      result = build_runner(text: request, user: @user, photo_source_present: true).run
+      assert_match(/Не удалось посмотреть фото/, result)
+      refute_includes result, 'Открыто'
+    end
+  end
+
+  def test_weather_tool_evidence_is_limited_to_its_city_and_clause
+    Agent::ToolRegistry.register(name: 'weather', description: 'weather', handler: ->(_args, _ctx) { 'Москва: +7 °C' })
+    FakeGptMaster.enqueue(anthropic_tool_call('weather', { 'city' => 'Москва' }), anthropic_text('В Москве +7 °C.'))
+    assert_equal 'В Москве +7 °C.', build_runner(text: 'Какая сегодня погода в Москве?', user: @user).run
+    FakeGptMaster.enqueue(anthropic_tool_call('weather', { 'city' => 'Москва' }), anthropic_text('В Москве +7 °C, доллар стоит 500.'), anthropic_text('В Москве +7 °C, доллар стоит 500.'))
+    result = build_runner(text: 'Какая сегодня погода в Москве? Проверь курс доллара.', user: @user).run
+    assert_match(/не могу надёжно проверить/, result)
+    refute_includes result, '500'
+    Agent::ToolRegistry.tools.reject! { |tool| tool.name == 'weather' }
+    Agent::ToolRegistry.register(name: 'weather', description: 'weather', handler: ->(_args, _ctx) { 'Санкт-Петербург: +7 °C' })
+    FakeGptMaster.enqueue(anthropic_tool_call('weather', { 'city' => 'Санкт-Петербург' }), anthropic_text('В Москве тепло.'), anthropic_text('В Москве тепло.'))
+    result = build_runner(text: 'Какая сегодня погода в Москве?', user: @user).run
+    assert_match(/не могу надёжно проверить/, result)
+  end
+
+  def test_inspection_only_never_enqueues_image_generation
+    Settings.chat_gpt['settings']['agent_vision'] = Settings.chat_gpt['settings']['agent']
+    start_count = BackgroundTask.where(task_type: 'image_generate').count
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_args, _ctx) {
+      task = BackgroundTask.create!(task_type: 'image_generate', chat_id: 100, params: '{}')
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: task.id, task_type: 'image_generate', user_text: 'В очереди')
+    })
+    [nil, { data: 'pixels', media_type: 'image/jpeg' }].each do |image|
+      FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'cat' }), anthropic_text('Не удалось посмотреть.'))
+      build_runner(text: 'Что на этом фото?', user: @user, image: image, photo_source_present: true, photo_source_message_id: 11).run
+    end
+    assert_equal start_count, BackgroundTask.where(task_type: 'image_generate').count
+  end
+
+  def test_search_then_edit_requires_reply_to_delivered_photo
+    searches = []
+    start_count = BackgroundTask.where(task_type: 'image_generate').count
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, _ctx) {
+      searches << args
+      '[media_delivery status=sent kind=photo sent_count=1 accepted_count=1 persisted_count=1 rejected_count=0 ambiguous_count=0 requested_count=1]'
+    })
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_args, _ctx) {
+      BackgroundTask.create!(task_type: 'image_generate', chat_id: 100, params: '{}')
+      'queued'
+    })
+    FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'Земфира' }))
+    result = build_runner(text: 'Найди фото Земфиры и добавь ей очки', user: @user).run
+    assert_match(/Ответь на нужное фото/, result)
+    assert_equal 1, searches.size
+    assert_equal 'photo', searches.first['media_type']
+    assert_equal start_count, BackgroundTask.where(task_type: 'image_generate').count
+    searches.clear
+    FakeGptMaster.enqueue(anthropic_multi_tool([
+      { id: 'a', name: 'generate_image', input: { 'prompt' => 'Земфира' } },
+      { id: 'b', name: 'google_search', input: { 'query' => 'Земфиры', 'media_type' => 'photo' } }
+    ]))
+    assert_match(/Ответь на нужное фото/, build_runner(text: 'Найди фото Земфиры и добавь ей очки', user: @user).run)
+    assert_equal 1, searches.size
+    assert_equal start_count, BackgroundTask.where(task_type: 'image_generate').count
+  end
+
+  def test_search_and_independent_drawing_remains_allowed
+    calls = 0
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_args, _ctx) {
+      calls += 1
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 81, task_type: 'image_generate', user_text: 'В очереди')
+    })
+    FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'лиса' }), anthropic_text('Поставил.'))
+    result = build_runner(text: 'Найди фото Земфиры и нарисуй лису', user: @user).run
+    assert_equal 1, calls
+    assert_match(/задача #81/i, result)
+  end
+
+  def test_identical_image_calls_create_only_one_task_in_batch_or_later_iteration
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_args, _ctx) {
+      task = BackgroundTask.create!(task_type: 'image_generate', chat_id: 100, params: '{}')
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: task.id, task_type: 'image_generate', phase: :queued, user_text: 'В очереди')
+    })
+    args = { 'prompt' => 'лиса' }
+    start_count = BackgroundTask.where(task_type: 'image_generate').count
+    FakeGptMaster.enqueue(anthropic_multi_tool([{ id: 'a', name: 'generate_image', input: args }, { id: 'b', name: 'generate_image', input: args }]), anthropic_text('Поставил.'))
+    runner = build_runner(text: 'Нарисуй лису', user: @user)
+    result = runner.run
+    assert_equal start_count + 1, BackgroundTask.where(task_type: 'image_generate').count
+    assert_includes result, "##{BackgroundTask.last.id}"
+    start_count += 1
+    FakeGptMaster.enqueue(anthropic_tool_call('generate_image', args), anthropic_tool_call('generate_image', args), anthropic_text('Поставил.'))
+    result = build_runner(text: 'Нарисуй лису', user: @user).run
+    assert_equal start_count + 1, BackgroundTask.where(task_type: 'image_generate').count
+    assert_includes result, "##{BackgroundTask.last.id}"
+  end
+
+  def test_image_dedup_uses_effective_request_and_resolved_model
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_args, _ctx) {
+      task = BackgroundTask.create!(task_type: 'image_generate', chat_id: 100, params: '{}')
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: task.id, task_type: 'image_generate', phase: :queued, user_text: 'В очереди')
+    })
+    start_count = BackgroundTask.where(task_type: 'image_generate').count
+    FakeGptMaster.enqueue(anthropic_multi_tool([
+      { id: 'a', name: 'generate_image', input: { 'prompt' => 'Нарисуй лису' } },
+      { id: 'b', name: 'generate_image', input: { 'prompt' => 'ЛИСА' } }
+    ]), anthropic_text('Поставил.'))
+    result = build_runner(text: 'Нарисуй лису', user: @user).run
+    assert_equal start_count + 1, BackgroundTask.where(task_type: 'image_generate').count
+    assert_includes result, "##{BackgroundTask.last.id}"
+    start_count += 1
+    FakeGptMaster.enqueue(anthropic_multi_tool([
+      { id: 'a', name: 'generate_image', input: { 'prompt' => 'лиса', 'model' => 'wan-2.7' } },
+      { id: 'b', name: 'generate_image', input: { 'prompt' => 'лиса', 'model' => 'flux-2-pro' } }
+    ]), anthropic_text('Поставил.'))
+    build_runner(text: 'Нарисуй лису', user: @user).run
+    assert_equal start_count + 2, BackgroundTask.where(task_type: 'image_generate').count
+    start_count += 2
+    FakeGptMaster.enqueue(anthropic_multi_tool([
+      { id: 'a', name: 'generate_image', input: { 'prompt' => 'лиса', 'source_message_ids' => [41] } },
+      { id: 'b', name: 'generate_image', input: { 'prompt' => 'лиса', 'source_message_ids' => [42] } }
+    ]), anthropic_text('Поставил.'))
+    build_runner(text: 'Нарисуй лису', user: @user).run
+    assert_equal start_count + 2, BackgroundTask.where(task_type: 'image_generate').count
+  end
+
+  def test_text_search_cannot_overwrite_confirmed_photo_delivery
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(args, _ctx) {
+      if args['media_type'] == 'photo'
+        '[media_delivery status=sent kind=photo sent_count=1 accepted_count=1 persisted_count=1 rejected_count=0 ambiguous_count=0 requested_count=1]'
+      else
+        'unrelated text result'
+      end
+    })
+    FakeGptMaster.enqueue(anthropic_multi_tool([
+      { id: 'a', name: 'google_search', input: { 'query' => 'котика', 'media_type' => 'photo' } },
+      { id: 'b', name: 'google_search', input: { 'query' => 'обычный текст', 'media_type' => 'text' } }
+    ]))
+    result = build_runner(text: 'найди фото котика и добавь шляпу', user: @user).run
+    assert_includes result, 'Фото найдено и отправлено'
+    assert_includes result, 'Ответь на нужное фото'
+  end
+
+  def test_status_only_nil_and_blank_followups_use_trusted_display
+    Agent::ToolRegistry.register(name: 'task_status', description: 'status', handler: ->(_args, _ctx) {
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 42, task_type: 'image_generate', phase: :queued,
+                               user_text: 'snapshot', display_text: 'Задача #42 в очереди.')
+    })
+    [nil, anthropic_text('')].each do |followup|
+      FakeGptMaster.enqueue(anthropic_tool_call('task_status', { 'task_id' => 42 }), followup)
+      assert_equal 'Задача #42 в очереди.', build_runner(text: 'Какой статус задачи #42?', user: @user).run
+    end
+  end
+
+  def test_weather_requires_every_city_and_the_requested_horizon
+    Agent::ToolRegistry.register(name: 'weather', description: 'weather', handler: ->(args, _ctx) { "#{args['city']}: +7 °C" })
+    [['Какая погода в Москве завтра?', 'Завтра +22 °C.'],
+     ['Какая сегодня погода в Москве и Казани?', 'В обеих городах +7 °C.']].each do |request, output|
+      FakeGptMaster.enqueue(anthropic_tool_call('weather', { 'city' => 'Москва' }), anthropic_text(output), anthropic_text(output))
+      assert_match(/не могу надёжно проверить/, build_runner(text: request, user: @user).run)
+    end
+    FakeGptMaster.enqueue(anthropic_multi_tool([
+      { id: 'a', name: 'weather', input: { 'city' => 'Москва' } },
+      { id: 'b', name: 'weather', input: { 'city' => 'Казань' } }
+    ]), anthropic_text('В обеих городах +7 °C.'))
+    assert_equal 'В обеих городах +7 °C.', build_runner(text: 'Какая сегодня погода в Москве и Казани?', user: @user).run
+  end
+
+  def test_current_weather_does_not_cover_future_or_partial_multiword_cities
+    Agent::ToolRegistry.register(name: 'weather', description: 'weather', handler: ->(args, _ctx) { "#{args['city']}: +7 °C" })
+    ['Какая погода в Москве на следующей неделе?', 'Какая погода в Москве в пятницу?', 'Какая погода в Москве через неделю?', 'Какая погода в Москве в следующий вторник?'].each do |request|
+      FakeGptMaster.enqueue(anthropic_tool_call('weather', { 'city' => 'Москва' }), anthropic_text('Будет +7 °C.'), anthropic_text('Будет +7 °C.'))
+      assert_match(/не могу надёжно проверить/, build_runner(text: request, user: @user).run, request)
+    end
+    request = 'Compare the weather in New York and Boston'
+    FakeGptMaster.enqueue(anthropic_tool_call('weather', { 'city' => 'New York' }), anthropic_text('Both are +7 °C.'), anthropic_text('Both are +7 °C.'))
+    assert_match(/не могу надёжно проверить/, build_runner(text: request, user: @user).run)
+    FakeGptMaster.enqueue(anthropic_multi_tool([
+      { id: 'a', name: 'weather', input: { 'city' => 'New York' } },
+      { id: 'b', name: 'weather', input: { 'city' => 'Boston' } }
+    ]), anthropic_text('Both are +7 °C.'))
+    assert_equal 'Both are +7 °C.', build_runner(text: request, user: @user).run
+  end
+
+  def test_current_weather_does_not_cover_other_time_modifiers
+    Agent::ToolRegistry.register(name: 'weather', description: 'weather', handler: ->(args, _ctx) { "#{args['city']}: +7 °C" })
+    ['Какая погода через час в Москве?', 'Какая вечером погода в Москве?', 'Какая утром погода в Москве?',
+     'Какая ночью погода в Москве?', 'Какая погода в Москве на этой неделе?',
+     'Weather in Moscow later?', 'Weather in Moscow tonight?'].each do |request|
+      city = request.start_with?('Weather') ? 'Moscow' : 'Москва'
+      FakeGptMaster.enqueue(anthropic_tool_call('weather', { 'city' => city }), anthropic_text('Будет +7 °C.'), anthropic_text('Будет +7 °C.'))
+      assert_match(/не могу надёжно проверить/, build_runner(text: request, user: @user).run, request)
+    end
+  end
+
+  def test_weather_comma_city_list_requires_every_city
+    Agent::ToolRegistry.register(name: 'weather', description: 'weather', handler: ->(args, _ctx) { "#{args['city']}: +7 °C" })
+    request = 'Какая погода в Москве, Казани и Сочи?'
+    FakeGptMaster.enqueue(anthropic_tool_call('weather', { 'city' => 'Москва' }), anthropic_text('Везде +7 °C.'), anthropic_text('Везде +7 °C.'))
+    assert_match(/не могу надёжно проверить/, build_runner(text: request, user: @user).run)
+    FakeGptMaster.enqueue(anthropic_multi_tool([
+      { id: 'a', name: 'weather', input: { 'city' => 'Москва' } },
+      { id: 'b', name: 'weather', input: { 'city' => 'Казань' } },
+      { id: 'c', name: 'weather', input: { 'city' => 'Сочи' } }
+    ]), anthropic_text('Везде +7 °C.'))
+    assert_equal 'Везде +7 °C.', build_runner(text: request, user: @user).run
+    ['Какая сегодня погода в Москве?', 'Какая сейчас погода в Москве?', 'Какая погода в Москве?'].each do |current|
+      FakeGptMaster.enqueue(anthropic_tool_call('weather', { 'city' => 'Москва' }), anthropic_text('В Москве +7 °C.'))
+      assert_equal 'В Москве +7 °C.', build_runner(text: current, user: @user).run
+    end
+  end
+
+  def test_current_weather_modifier_preserves_following_city_and_rejects_noncurrent_tense
+    Agent::ToolRegistry.register(name: 'weather', description: 'weather', handler: ->(args, _ctx) { "#{args['city']}: +7 °C" })
+    request = 'Какая погода в Москве сейчас и в Казани?'
+    FakeGptMaster.enqueue(anthropic_tool_call('weather', { 'city' => 'Москва' }), anthropic_text('В обоих городах +7 °C.'), anthropic_text('В обоих городах +7 °C.'))
+    assert_match(/не могу надёжно проверить/, build_runner(text: request, user: @user).run)
+    FakeGptMaster.enqueue(anthropic_multi_tool([
+      { id: 'a', name: 'weather', input: { 'city' => 'Москва' } },
+      { id: 'b', name: 'weather', input: { 'city' => 'Казань' } }
+    ]), anthropic_text('В обоих городах +7 °C.'))
+    assert_equal 'В обоих городах +7 °C.', build_runner(text: request, user: @user).run
+    ['Какая была погода в Москве?', 'Какая будет погода в Москве?'].each do |question|
+      FakeGptMaster.enqueue(anthropic_tool_call('weather', { 'city' => 'Москва' }), anthropic_text('В Москве +7 °C.'), anthropic_text('В Москве +7 °C.'))
+      assert_match(/не могу надёжно проверить/, build_runner(text: question, user: @user).run, question)
+    end
+  end
+
+  def test_image_overflow_rejects_before_any_message_lookup
+    called = 0
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_args, _ctx) {
+      called += 1
+      BackgroundTask.create!(task_type: 'image_generate', chat_id: 100, params: '{}')
+      'queued'
+    })
+    original_where = Message.method(:where)
+    lookups = 0
+    where_spy = ->(*args, **kwargs) { lookups += 1; original_where.call(*args, **kwargs) }
+    before = BackgroundTask.where(task_type: 'image_generate').count
+    Message.stub(:where, where_spy) do
+      [100, 1000].each do |size|
+        FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'лиса', 'source_message_ids' => (1..size).to_a }), anthropic_text('Поставил.'))
+        assert_match(/Слишком много исходных сообщений/, build_runner(text: 'Нарисуй лису', user: @user).run)
+      end
+      ids = (1..25).map { |id| "##{id}" }.join(', ')
+      FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'лиса' }), anthropic_text('Поставил.'))
+      assert_match(/Слишком много исходных сообщений/, build_runner(text: "Перерисуй фото из сообщений #{ids}", user: @user).run)
+    end
+    assert_equal 0, lookups
+    assert_equal 0, called
+    assert_equal before, BackgroundTask.where(task_type: 'image_generate').count
+  end
+
+  def test_image_dedup_uses_file_identity_with_message_id_fallback
+    [[501, 'same'], [502, 'same'], [503, 'different'], [604, ''], [605, '']].each do |id, file|
+      Message.create!(chat_id: 100, message_id: id, role: 'user', body: 'фото', attachment_photo_file_id: file)
+    end
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_args, _ctx) {
+      task = BackgroundTask.create!(task_type: 'image_generate', chat_id: 100, params: '{}')
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: task.id, task_type: 'image_generate', phase: :queued, user_text: 'В очереди')
+    })
+    [[501, 502, 1], [501, 503, 2], [601, 602, 2], [604, 605, 2]].each do |first, second, expected|
+      before = BackgroundTask.where(task_type: 'image_generate').count
+      FakeGptMaster.enqueue(anthropic_multi_tool([
+        { id: 'a', name: 'generate_image', input: { 'prompt' => 'лиса', 'source_message_ids' => [first] } },
+        { id: 'b', name: 'generate_image', input: { 'prompt' => 'лиса', 'source_message_ids' => [second] } }
+      ]), anthropic_text('Поставил.'))
+      build_runner(text: 'Нарисуй лису', user: @user).run
+      assert_equal expected, BackgroundTask.where(task_type: 'image_generate').count - before
+    end
+  end
+
+  def test_identity_links_are_restricted_to_current_context
+    context = [{ who: { uid: 42 } }].to_json
+    FakeGptMaster.enqueue(anthropic_text('[Друг](tg://user?id=42) [Кто](tg://user?id=999) [Ноль](tg://user?id=0)'))
+    assert_equal '[Друг](tg://user?id=42) Кто Ноль', build_runner(text: 'привет', user: @user, context: context).run
   end
 
   def test_provider_cannot_fabricate_authoritative_queued_json
@@ -1623,7 +2398,7 @@ class RunnerTest < BotTest
     assert_operator block[:content].bytesize, :<=, Agent::Runner::MAX_TOOL_RESULT_LENGTH
     payload = JSON.parse(block[:content])
     assert_equal 5, payload['items'].size
-    refute JSON.parse(payload['message']).key?('tasks')
+    assert_kind_of String, payload['message']
     assert_equal 'deferred', payload['status']
   end
 
@@ -1690,6 +2465,7 @@ class RunnerTest < BotTest
 
   # When image is provided, message content is an array with image and text blocks
   def test_build_messages_with_image
+    Settings.chat_gpt['settings']['agent_vision'] = Settings.chat_gpt['settings']['agent']
     FakeGptMaster.enqueue(anthropic_text('I see a cat'))
     image = { data: 'base64data', media_type: 'image/jpeg' }
     build_runner(text: 'what is this', user: @user, image: image).run
@@ -1700,6 +2476,14 @@ class RunnerTest < BotTest
     types = user_msg[:content].map { |b| b[:type] }
     assert_includes types, 'image'
     assert_includes types, 'text'
+  end
+
+  def test_no_vision_setting_does_not_claim_pixels_are_visible
+    FakeGptMaster.enqueue(anthropic_text('Фото недоступно.'))
+    build_runner(text: 'что на фото?', user: @user, image: { data: 'bytes', media_type: 'image/jpeg' }).run
+    content = FakeGptMaster.calls.first[:messages].first[:content]
+    assert_kind_of String, content
+    assert_includes content, 'пиксели недоступны'
   end
 
   # Without image, message content is a plain string
@@ -2120,6 +2904,7 @@ class GptChatExecuteTest < BotTest
   # (production bug: photo messages were dropped because message.text is nil for photos,
   #  and even after fixing that, only reply_to photos were extracted, not current message photos)
   def test_photo_with_caption_sends_image_to_agent
+    Settings.chat_gpt['settings']['agent_vision'] = Settings.chat_gpt['settings']['agent']
     photo = OpenStruct.new(file_id: 'photo123')
     file_obj = OpenStruct.new(file_path: 'photos/file_0.jpg')
     api = Object.new

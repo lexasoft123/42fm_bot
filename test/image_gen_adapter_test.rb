@@ -183,6 +183,13 @@ class FluxAdapterSubmitTest < Minitest::Test
     end
   end
 
+  def test_moderated_status_is_structured
+    response = OpenStruct.new(code: 200, parsed_response: { 'status' => 'Content Moderated' })
+    HTTParty.stub(:get, response) do
+      assert_equal({ failed: true, failure_reason: 'moderation' }, ImageGen::FluxAdapter.new.poll_once('job'))
+    end
+  end
+
   def test_poll_log_redacts_status_and_external_identifier
     token = 'FLUXPOLLTOKEN123456789012345678'
     signed_url = "https://status.example/job?token=#{token}"
@@ -342,19 +349,14 @@ class AtlasAdapterTest < Minitest::Test
     assert_equal ['data:image/jpeg;base64,B64A', 'data:image/png;base64,B64B'], body[:images]
   end
 
-  def test_submit_image_edit_wan_with_multiple_images_uses_first
-    # A combine routed to Wan (single-image) keeps only the first image.
-    fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'w-id' } })
+  def test_submit_image_edit_wan_rejects_multiple_images
+    fake = FakeModelProviderClient.new
     with_fake_client(fake) do
-      ImageGen::AtlasAdapter.new.submit(
-        prompt: 'combine',
-        input_images: [{ data: 'B64A', media_type: 'image/jpeg' },
-                       { data: 'B64B', media_type: 'image/png' }]
-      )
+      assert_raises(ArgumentError) do
+        ImageGen::AtlasAdapter.new.submit(prompt: 'combine', input_images: [{ data: 'A' }, { data: 'B' }])
+      end
     end
-    _, _, body = fake.calls.first
-    assert_equal 'data:image/jpeg;base64,B64A', body[:image], 'Wan edits only the first image'
-    refute body.key?(:images)
+    assert_empty fake.calls
   end
 
   def test_submit_text_to_image_seedream_uses_size_field
@@ -433,7 +435,7 @@ class AtlasAdapterTest < Minitest::Test
 
   def test_submit_image_edit_qwen_3_uses_reference_image_urls_and_caps_at_three
     fake = FakeModelProviderClient.new(post_returns: { 'data' => { 'id' => 'qwen-edit' } })
-    images = (1..4).map { |n| { data: "B64#{n}", media_type: 'image/png' } }
+    images = (1..3).map { |n| { data: "B64#{n}", media_type: 'image/png' } }
     with_fake_client(fake) do
       ImageGen::AtlasAdapter.new.submit(
         prompt: 'combine into a poster',
@@ -446,6 +448,16 @@ class AtlasAdapterTest < Minitest::Test
     assert_equal %w[B641 B642 B643].map { |data| "data:image/png;base64,#{data}" }, body[:reference_image_urls]
     refute body.key?(:images)
     refute body.key?(:image)
+  end
+
+  def test_qwen_rejects_excess_sources_before_provider_call
+    fake = FakeModelProviderClient.new
+    with_fake_client(fake) do
+      assert_raises(ArgumentError) do
+        ImageGen::AtlasAdapter.new.submit(prompt: 'x', input_images: Array.new(4) { { data: 'A' } }, model: 'qwen-image-3.0-pro/edit')
+      end
+    end
+    assert_empty fake.calls
   end
 
   def test_submit_handles_unwrapped_id_response_shape
@@ -854,6 +866,7 @@ require_relative '../lib/gpt_master'
 require_relative '../lib/chat_context'
 require_relative '../lib/task_runner'
 require_relative '../lib/task_handlers/image_gen_handler'
+require_relative '../lib/task_handlers/image_failure_notice'
 require 'telegram/bot'
 require 'stringio'
 
@@ -910,7 +923,7 @@ class HandlerAdapterIntegrationTest < BotTest
     'default_model' => 'nano-banana-2',
     'models' => {
       'nano-banana-2' => { 'provider' => 'atlas', 't2i' => 'google/nano-banana-2/text-to-image',
-                           'edit' => 'google/nano-banana-2/edit', 'desc' => 'd' },
+                           'edit' => 'google/nano-banana-2/edit', 'multi_image' => true, 'desc' => 'd' },
       'wan-2.7'       => { 'provider' => 'atlas', 't2i' => 'alibaba/wan-2.7-pro/text-to-image',
                            'edit' => 'alibaba/wan-2.7/image-edit', 'desc' => 'd' },
       'flux-2-pro'    => { 'provider' => 'flux', 't2i' => 'flux-2-pro', 'edit' => 'flux-2-pro', 'desc' => 'd' },
@@ -954,6 +967,18 @@ class HandlerAdapterIntegrationTest < BotTest
     end
 
     Chat.create!(chat_id: -1, title: 't', chat_type: 'group', authorized: true, audio: false)
+  end
+
+  def wrapped_exception(error, cause)
+    begin
+      raise cause
+    rescue
+      begin
+        raise error
+      rescue StandardError => wrapped
+        wrapped
+      end
+    end
   end
 
   def teardown
@@ -1080,23 +1105,21 @@ class HandlerAdapterIntegrationTest < BotTest
     refute persisted.key?('prompt_failures')
   end
 
-  def test_prompt_composer_failure_still_uses_submit_retry_path
+  def test_prompt_composer_failure_preserves_raw_request_on_unknown_submit
     task = fresh_task
     raw_request = task.params_hash['request']
     FakeGptMaster.response = 'жпт не жпт'
     @fake_adapter.submit_returns = RuntimeError.new('image backend unavailable')
 
-    error = assert_raises(RuntimeError) { ImageGenTaskHandler.new.call(task, @bot) }
-
-    assert_equal 'image backend unavailable', error.message
+    assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
     assert_equal raw_request, @fake_adapter.submit_calls.first[:prompt]
     persisted = BackgroundTask.find(task.id).params_hash
     assert_equal raw_request, persisted['prompt']
-    assert_equal 1, persisted['submit_failures']
+    assert_equal true, persisted['submit_in_flight']
     refute persisted.key?('prompt_failures')
   end
 
-  def test_provider_submit_exception_is_redacted_before_rethrow_and_log
+  def test_provider_submit_exception_is_redacted_in_log
     token = 'ABCDEFGHIJKLMNOPQRSTUVWX12345678'
     @fake_adapter.submit_returns = RuntimeError.new(
       "provider 503 https://provider.example/jobs/9?token=#{token}"
@@ -1106,11 +1129,10 @@ class HandlerAdapterIntegrationTest < BotTest
     Object.send(:remove_const, :LOGGER)
     Object.const_set(:LOGGER, Logger.new(output))
 
-    error = assert_raises(RuntimeError) { ImageGenTaskHandler.new.call(fresh_task, @bot) }
+    assert_equal :failed, ImageGenTaskHandler.new.call(fresh_task, @bot)
 
-    assert_includes error.message, '503'
-    assert_includes error.message, '[url]'
-    refute_includes error.message, token
+    assert_includes output.string, '503'
+    assert_includes output.string, '[url]'
     refute_includes output.string, token
   ensure
     if defined?(original_logger) && original_logger
@@ -1195,6 +1217,66 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal 2, @bot.calls.count { |kind, _| kind == :sendPhoto }
     assert_equal 'done', BackgroundTask.find(task.id).status
     assert_equal 'delivered', BackgroundTask.find(task.id).delivery_status
+  end
+
+  def test_delivery_budget_resets_after_provider_success_near_poll_attempt_cap
+    task = fresh_task
+    params = task.params_hash.merge('provider' => 'fake')
+    task.update!(external_id: 'near-cap-job', attempts: 59,
+                 lifecycle_phase: 'processing', params: params.to_json)
+    @fake_adapter.poll_returns = { url: 'http://x/near-cap.png' }
+    @bot.queue_photo_outcomes(Net::ReadTimeout.new('telegram response timed out'),
+                              OpenStruct.new(message_id: 904, message_thread_id: nil))
+    runner = TaskRunner.new(@bot)
+
+    runner.process_one(task.id)
+    retrying = BackgroundTask.find(task.id)
+    assert_equal 'pending', retrying.status
+    assert_equal 'retrying', retrying.lifecycle_phase
+    assert_equal 1, retrying.attempts, 'the delivery cycle starts a fresh attempt budget'
+    assert_equal 1, retrying.params_hash['delivery_failures']
+    assert_equal 'http://x/near-cap.png', retrying.params_hash.dig('delivery_result', 'url')
+    assert_equal 1, @fake_adapter.poll_calls.size
+    assert_empty @fake_adapter.submit_calls
+
+    runner.process_one(task.id)
+    complete = BackgroundTask.find(task.id)
+    assert_equal 'done', complete.status
+    assert_equal 'delivered', complete.delivery_status
+    assert_equal 1, @fake_adapter.poll_calls.size, 'delivery retry must not poll or regenerate'
+    assert_empty @fake_adapter.submit_calls
+    assert_equal 2, @bot.calls.count { |kind, _| kind == :sendPhoto }
+    assert Message.exists?(chat_id: -1, message_id: 904, role: 'bot')
+  end
+
+  def test_ambiguous_cached_image_send_then_403_preserves_unknown_delivery
+    task = fresh_task
+    params = task.params_hash.merge(
+      'provider' => 'fake',
+      'delivery_result' => { 'url' => 'http://x/cached-ambiguous.png' }
+    )
+    task.update!(params: params.to_json, lifecycle_phase: 'delivering')
+    @bot.queue_photo_outcomes(Faraday::TimeoutError.new('read timeout'),
+                              telegram_error(403, 'Forbidden'))
+    runner = TaskRunner.new(@bot)
+
+    runner.process_one(task.id)
+    ambiguous = BackgroundTask.find(task.id)
+    assert_equal true, ambiguous.params_hash['delivery_ambiguous']
+    assert_equal 'pending', ambiguous.delivery_status
+    assert_equal 'http://x/cached-ambiguous.png',
+                 ambiguous.params_hash.dig('delivery_result', 'url')
+
+    runner.process_one(task.id)
+    failed = BackgroundTask.find(task.id)
+    assert_equal 'failed', failed.status
+    assert_equal 'unknown', failed.delivery_status
+    assert_equal true, failed.params_hash['delivery_ambiguous']
+    assert_empty @fake_adapter.poll_calls
+    assert_empty @fake_adapter.submit_calls
+    assert_equal 2, @bot.calls.count { |kind, _| kind == :sendPhoto }
+    events = BackgroundTask.where(task_type: 'agent_event').map(&:params_hash)
+    assert_equal 1, events.count { |event| event['parent_task_id'] == task.id }
   end
 
   def test_malformed_truthy_send_photo_response_is_unconfirmed_delivery_failure
@@ -1299,7 +1381,10 @@ class HandlerAdapterIntegrationTest < BotTest
   def test_synchronous_transient_delivery_failure_retries_without_regenerating
     @fake_adapter.sync = true
     @fake_adapter.submit_returns = { url: 'http://x/sync-retry.png' }
-    @bot.queue_photo_outcomes(Faraday::TimeoutError.new('telegram timeout'),
+    @bot.queue_photo_outcomes(wrapped_exception(
+                                RuntimeError.new('telegram wrapper'),
+                                Faraday::SSLError.new(Net::WriteTimeout.new('TLS write timed out'))
+                              ),
                               OpenStruct.new(message_id: 903, message_thread_id: nil))
     task = fresh_task
     handler = ImageGenTaskHandler.new
@@ -1321,13 +1406,14 @@ class HandlerAdapterIntegrationTest < BotTest
   def test_synchronous_image_process_failed_never_marks_done
     @fake_adapter.sync = true
     @fake_adapter.submit_returns = { url: 'http://x/sync-fail.png' }
-    @bot.queue_photo_outcomes(RuntimeError.new('Bad Request: IMAGE_PROCESS_FAILED'))
+    @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
     task = fresh_task
 
     assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
 
     persisted = BackgroundTask.find(task.id)
     assert_equal 'failed', persisted.status
+    assert_equal 'failed', persisted.delivery_status
     assert_equal 'image_delivery_failed', persisted.result_hash['error']
     assert_equal '[url]', persisted.params_hash.dig('delivery_result', 'url')
     assert_equal 1, @fake_adapter.submit_calls.size
@@ -1348,6 +1434,7 @@ class HandlerAdapterIntegrationTest < BotTest
 
     persisted = BackgroundTask.find(task.id)
     assert_equal 'failed', persisted.status
+    assert_equal 'unknown', persisted.delivery_status
     assert_equal 3, persisted.params_hash['delivery_failures']
     assert_equal 1, @fake_adapter.submit_calls.size, 'bounded delivery retries must reuse the generated result'
     assert_equal 3, @bot.calls.count { |kind, _| kind == :sendPhoto }
@@ -1675,11 +1762,139 @@ class HandlerAdapterIntegrationTest < BotTest
       "provider 503 https://provider.example/status?token=#{token}"
     )
 
-    error = assert_raises(RuntimeError) { handler.call(task, @bot) }
+    assert_equal :pending, handler.call(task, @bot)
+    assert_equal 1, BackgroundTask.find(task.id).params_hash['poll_errors']
+  end
 
-    assert_includes error.message, '503'
-    assert_includes error.message, '[url]'
-    refute_includes error.message, token
+  def test_submit_exception_reports_unknown_outcome_without_retry
+    @fake_adapter.submit_returns = RuntimeError.new('image service unavailable')
+    task = fresh_task(forum_thread_id: 72)
+    assert_equal :failed, ImageGenTaskHandler.new.call(BackgroundTask.find(task.id), @bot)
+    result = BackgroundTask.find(task.id).result_hash
+    assert_equal 'submit', result['failure_stage']
+    assert_equal 'submit_outcome_unknown', result['failure_reason']
+    assert_equal 1, BackgroundTask.where(task_type: 'agent_event', parent_task_id: task.id).count
+    assert_equal 1, @fake_adapter.submit_calls.size
+  end
+
+  def test_atlas_async_timeout_is_never_resubmitted_across_runner_restart
+    assert_timeout_not_resubmitted('wan-2.7', false, Net::ReadTimeout.new('read timeout'))
+  end
+
+  def test_closerouter_sync_timeout_is_never_resubmitted_across_runner_restart
+    Settings.image_gen['models']['nano-banana-pro'] = { 'provider' => 'closerouter', 'edit' => 'edit', 't2i' => 'pro', 'multi_image' => true }
+    ImageGen::Catalog.reset!
+    assert_timeout_not_resubmitted('nano-banana-pro', true, Net::OpenTimeout.new('open timeout'))
+  end
+
+  def assert_timeout_not_resubmitted(model, sync, error)
+    @fake_adapter.sync = sync
+    @fake_adapter.submit_returns = error
+    task = fresh_task(model: model)
+    TaskRunner.new(@bot).process_one(task.id)
+    TaskRunner.new(@bot).process_one(task.id)
+    assert_equal 1, @fake_adapter.submit_calls.size
+    assert_equal 'failed', BackgroundTask.find(task.id).status
+    assert_equal 'submit_outcome_unknown', BackgroundTask.find(task.id).result_hash['failure_reason']
+    assert_equal 'submit_outcome_unknown', BackgroundTask.where(parent_task_id: task.id).first.params_hash['failure_reason']
+    assert_equal sync ? 'closerouter' : 'atlas', @fake_adapter.adapter_for_args.first
+  end
+
+  def test_in_flight_marker_survives_restart_without_submitting
+    task = fresh_task(model: 'wan-2.7')
+    task.update!(params: task.params_hash.merge('submit_in_flight' => true).to_json)
+    TaskRunner.new(@bot).process_one(task.id)
+    assert_empty @fake_adapter.submit_calls
+    assert_equal 'submit_outcome_unknown', BackgroundTask.find(task.id).result_hash['failure_reason']
+  end
+
+  def test_real_atlas_and_closerouter_timeout_do_not_resubmit
+    Settings.image_gen['providers'] = {
+      'atlas' => { 'api_url' => 'https://atlas.test', 'api_key' => 'test' },
+      'closerouter' => { 'api_url' => 'https://close.test', 'api_key' => 'test' }
+    }
+    Settings.image_gen['models']['nano-banana-pro'] = { 'provider' => 'closerouter', 'edit' => 'edit', 't2i' => 'pro', 'multi_image' => true }
+    ImageGen::Catalog.reset!
+    ImageGen.define_singleton_method(:adapter_for) { |name| ImageGen.__adapter_for(name) }
+    posts = []
+    stub = ->(url, **_) { posts << url; raise Net::ReadTimeout, 'timeout after POST' }
+    HTTParty.stub(:post, stub) do
+      %w[wan-2.7 nano-banana-pro].each do |model|
+        task = fresh_task(model: model)
+        TaskRunner.new(@bot).process_one(task.id)
+        TaskRunner.new(@bot).process_one(task.id)
+        assert_equal 'submit_outcome_unknown', BackgroundTask.find(task.id).result_hash['failure_reason']
+      end
+    end
+    assert_equal 2, posts.size
+    assert posts.any? { |url| url.start_with?('https://atlas.test/') }
+    assert posts.any? { |url| url.start_with?('https://close.test/') }
+  end
+
+  def test_submit_classification_uses_outer_status_for_atlas_and_flux
+    Settings.image_gen['providers'] = {
+      'atlas' => { 'api_url' => 'https://atlas.test', 'api_key' => 'test' },
+      'flux' => { 'api_url' => 'https://flux.test', 'api_key' => 'test' }
+    }
+    ImageGen.define_singleton_method(:adapter_for) { |name| ImageGen.__adapter_for(name) }
+    [[502, 'upstream POST /image: 400 bad', 'submit_outcome_unknown'],
+     [400, 'upstream POST /image: 502 broken', 'provider_rejected']].each do |status, body, reason|
+      %w[wan-2.7 flux-2-pro].each do |model|
+        posts = []
+        response = OpenStruct.new(code: status, body: body)
+        HTTParty.stub(:post, ->(url, **_) { posts << url; response }) do
+          task = fresh_task(model: model)
+          TaskRunner.new(@bot).process_one(task.id)
+          TaskRunner.new(@bot).process_one(task.id)
+          assert_equal reason, BackgroundTask.find(task.id).result_hash['failure_reason']
+          event = BackgroundTask.where(parent_task_id: task.id).first
+          assert_equal reason, event.params_hash['failure_reason']
+          if status == 502
+            notice = ImageFailureNotice.render(event_type: 'image_failed', parent_task_id: task.id,
+                                               stage: 'submit', reason: reason)
+            assert_match(/повтор.*оплат|оплат.*повтор/i, notice)
+          end
+        end
+        assert_equal 1, posts.size
+      end
+    end
+  end
+
+  def test_unstructured_nested_400_text_is_never_treated_as_outer_status
+    @fake_adapter.submit_returns = RuntimeError.new('outer 502: upstream POST /image: 400 bad')
+    task = fresh_task
+    assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal 'submit_outcome_unknown', BackgroundTask.find(task.id).result_hash['failure_reason']
+  end
+
+  def test_submit_4xx_queues_typed_notice_without_retry
+    @fake_adapter.submit_returns = ModelProviderClient::HttpError.new(status: 400, message: 'Atlas POST /image: 400 safety service unavailable')
+    task = fresh_task(forum_thread_id: 72)
+    assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
+    result = BackgroundTask.find(task.id).result_hash
+    assert_equal 'submit', result['failure_stage']
+    assert_equal 'provider_rejected', result['failure_reason']
+    event = BackgroundTask.where(task_type: 'agent_event', parent_task_id: task.id).last
+    assert_equal 'provider_rejected', event.params_hash['failure_reason']
+    assert_equal 72, event.params_hash['forum_thread_id']
+  end
+
+  def test_final_pending_poll_uses_typed_timeout
+    task = fresh_task(forum_thread_id: 72)
+    task.update!(external_id: 'job', max_attempts: 1, params: task.params_hash.merge('provider' => 'atlas').to_json)
+    task = BackgroundTask.find(task.id)
+    @fake_adapter.poll_returns = :pending
+    assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
+    result = BackgroundTask.find(task.id).result_hash
+    assert_equal 'poll', result['failure_stage']
+    assert_equal 'timeout', result['failure_reason']
+    assert_equal 1, BackgroundTask.where(task_type: 'agent_event', parent_task_id: task.id).count
+  end
+
+  def test_safety_service_unavailable_is_not_moderation
+    handler = ImageGenTaskHandler.new
+    assert_equal ['poll', 'provider_unavailable'], handler.send(:classify_failure, 'image_failed', 'safety service unavailable')
+    assert_equal ['submit', 'provider_unavailable'], handler.send(:classify_failure, 'submit_failures_after_retries', 'service unavailable')
   end
 
   def telegram_error(code, description)
@@ -1794,6 +2009,26 @@ class HandlerAdapterIntegrationTest < BotTest
     assert_equal 'DL_FIDH',    imgs[1][:data]
   end
 
+  def test_explicit_wan_mixed_inline_and_history_fails_truthfully_without_submit
+    Message.create!(chat_id: -1, message_id: 41, role: 'user', body: '[фото]', user_uid: 7,
+                    attachment_photo_file_id: 'FID41')
+    task = fresh_task(model: 'wan-2.7', input_images: [{ 'data' => 'INLINE', 'media_type' => 'image/jpeg', 'source_message_id' => 90 }], source_message_ids: [41])
+    task.update!(params: task.params_hash.merge('request' => 'Wan: объедини фото #41 и это фото', 'model_explicit' => true,
+                                               'user_requested_model' => 'wan-2.7', 'edit_intended' => true).to_json)
+    assert_equal :failed, ImageGenTaskHandler.new.call(BackgroundTask.find(task.id), @bot)
+    assert_empty @fake_adapter.submit_calls
+    assert_equal 'model_source_conflict', BackgroundTask.find(task.id).result_hash['failure_reason']
+  end
+
+  def test_mixed_inline_and_history_reach_multi_image_provider
+    Message.create!(chat_id: -1, message_id: 41, role: 'user', body: '[фото]', user_uid: 7,
+                    attachment_photo_file_id: 'FID41')
+    task = fresh_task(model: 'nano-banana-2', input_images: [{ 'data' => 'INLINE', 'media_type' => 'image/jpeg', 'source_message_id' => 90 }], source_message_ids: [41])
+    task.update!(params: task.params_hash.merge('edit_intended' => true).to_json)
+    assert_equal :pending, ImageGenTaskHandler.new.call(BackgroundTask.find(task.id), @bot)
+    assert_equal %w[INLINE DL_FID41], @fake_adapter.submit_calls.first[:input_images].map { |img| img[:data] }
+  end
+
   # A stale/missing message_id (no stored photo) is skipped; the rest proceed.
   def test_stale_source_message_id_skipped_others_proceed
     Message.create!(chat_id: -1, message_id: 600, role: 'user', body: '[фото]', user_uid: 7,
@@ -1803,6 +2038,175 @@ class HandlerAdapterIntegrationTest < BotTest
     ImageGenTaskHandler.new.call(task, @bot)
     imgs = @fake_adapter.submit_calls.first[:input_images]
     assert_equal [{ data: 'DL_FID2', media_type: 'image/jpeg' }], imgs
+  end
+
+  def test_explicit_wan_accepts_two_file_ids_with_identical_bytes
+    [610, 611].each do |mid|
+      Message.create!(chat_id: -1, message_id: mid, role: 'user', user_uid: 7, attachment_photo_file_id: "file#{mid}")
+    end
+    TelegramFile.singleton_class.send(:define_method, :download_image) do |_api, _file_id, **_|
+      { data: Base64.strict_encode64('same bytes'), media_type: 'image/jpeg' }
+    end
+    task = fresh_task(model: 'wan-2.7', source_message_ids: [610, 611])
+    task.update!(params: task.params_hash.merge('user_requested_model' => 'wan-2.7').to_json)
+    assert_equal :pending, ImageGenTaskHandler.new.call(BackgroundTask.find(task.id), @bot)
+    assert_equal 1, @fake_adapter.submit_calls.length
+    assert_equal 1, @fake_adapter.submit_calls.first[:input_images].size
+    assert_equal 'alibaba/wan-2.7/image-edit', @fake_adapter.submit_calls.first[:model]
+  end
+
+  def test_source_cap_applies_after_byte_deduplication
+    (610..617).each do |mid|
+      Message.create!(chat_id: -1, message_id: mid, role: 'user', user_uid: 7, attachment_photo_file_id: "file#{mid}")
+    end
+    TelegramFile.singleton_class.send(:define_method, :download_image) do |_api, file_id, **_|
+      bytes = file_id == 'file617' ? 'last unique' : 'duplicate'
+      { data: Base64.strict_encode64(bytes), media_type: 'image/jpeg' }
+    end
+    task = fresh_task(model: 'nano-banana-2', source_message_ids: (610..617).to_a)
+    assert_equal :pending, ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal 2, @fake_adapter.submit_calls.first[:input_images].size
+  end
+
+  def test_autonomous_model_edit_capability_drift_reselects_valid_model
+    Settings.image_gen['models']['wan-2.7']['edit'] = false
+    ImageGen::Catalog.reset!
+    task = fresh_task(model: 'wan-2.7', input_image: Base64.strict_encode64('photo'))
+    assert_equal :pending, ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal 'google/nano-banana-2/edit', @fake_adapter.submit_calls.first[:model]
+    assert_equal 'nano-banana-2', BackgroundTask.find(task.id).params_hash['model']
+  end
+
+  def test_autonomous_edit_capability_drift_fails_if_all_alternatives_excluded
+    Settings.image_gen['models']['wan-2.7']['edit'] = nil
+    ImageGen::Catalog.reset!
+    task = fresh_task(model: 'wan-2.7', input_image: Base64.strict_encode64('photo'))
+    task.update!(params: task.params_hash.merge('excluded_models' => ['nano-banana-2', 'flux-2-pro']).to_json)
+    assert_equal :failed, ImageGenTaskHandler.new.call(BackgroundTask.find(task.id), @bot)
+    assert_empty @fake_adapter.submit_calls
+    assert_empty @fake_adapter.adapter_for_args
+    assert_equal 'model_unavailable', BackgroundTask.find(task.id).result_hash['failure_reason']
+  end
+
+  def test_explicit_model_without_edit_capability_after_enqueue_fails_before_adapter
+    [false, nil].each do |edit_capability|
+      Settings.image_gen['models']['wan-2.7']['edit'] = edit_capability
+      ImageGen::Catalog.reset!
+      task = fresh_task(model: 'wan-2.7', input_image: Base64.strict_encode64('photo'))
+      task.update!(params: task.params_hash.merge('model_explicit' => true, 'user_requested_model' => 'wan-2.7', 'edit_intended' => true).to_json)
+      assert_equal :failed, ImageGenTaskHandler.new.call(BackgroundTask.find(task.id), @bot)
+      assert_empty @fake_adapter.adapter_for_args
+      assert_empty @fake_adapter.submit_calls
+      assert_equal 'model_unavailable', BackgroundTask.find(task.id).result_hash['failure_reason']
+      assert_equal 'wan-2.7', BackgroundTask.find(task.id).result_hash['requested_model']
+    end
+  end
+
+  def test_removed_explicit_model_fails_without_any_provider_call
+    task = fresh_task(model: 'removed-model')
+    task.update!(params: task.params_hash.merge('model_explicit' => true, 'user_requested_model' => 'removed-model').to_json)
+    result = ImageGenTaskHandler.new.call(BackgroundTask.find(task.id), @bot)
+    assert_equal :failed, result
+    assert_empty @fake_adapter.adapter_for_args
+    assert_empty @fake_adapter.submit_calls
+    persisted = BackgroundTask.find(task.id).result_hash
+    assert_equal 'model_unavailable', persisted['failure_reason']
+    assert_equal 'removed-model', persisted['requested_model']
+    assert_equal 'model_unavailable', BackgroundTask.where(parent_task_id: task.id).first.params_hash['failure_reason']
+  end
+
+  def test_four_unique_sources_switch_autonomous_qwen_to_capable_model
+    Settings.image_gen['models']['qwen-image-3-pro'] = { 'provider' => 'atlas', 'edit' => 'qwen-edit', 't2i' => 'qwen', 'multi_image' => true }
+    ImageGen::Catalog.reset!
+    (610..613).each { |mid| Message.create!(chat_id: -1, message_id: mid, role: 'user', user_uid: 7, attachment_photo_file_id: "file#{mid}") }
+    task = fresh_task(model: 'qwen-image-3-pro', source_message_ids: (610..613).to_a)
+    assert_equal :pending, ImageGenTaskHandler.new.call(task, @bot)
+    assert_equal 4, @fake_adapter.submit_calls.first[:input_images].size
+    assert_equal 'google/nano-banana-2/edit', @fake_adapter.submit_calls.first[:model]
+  end
+
+  def test_auto_model_switch_respects_exclusions
+    Settings.image_gen['models']['qwen-image-3-pro'] = { 'provider' => 'atlas', 'edit' => 'qwen-edit', 't2i' => 'qwen', 'multi_image' => true }
+    ImageGen::Catalog.reset!
+    (610..613).each { |mid| Message.create!(chat_id: -1, message_id: mid, role: 'user', user_uid: 7, attachment_photo_file_id: "file#{mid}") }
+    task = fresh_task(model: 'qwen-image-3-pro', source_message_ids: (610..613).to_a)
+    task.update!(params: task.params_hash.merge('excluded_models' => ['nano-banana-2']).to_json)
+    assert_equal :failed, ImageGenTaskHandler.new.call(BackgroundTask.find(task.id), @bot)
+    assert_empty @fake_adapter.submit_calls
+  end
+
+  def test_four_unique_sources_fail_for_explicit_qwen
+    Settings.image_gen['models']['qwen-image-3-pro'] = { 'provider' => 'atlas', 'edit' => 'qwen-edit', 't2i' => 'qwen', 'multi_image' => true }
+    ImageGen::Catalog.reset!
+    (610..613).each { |mid| Message.create!(chat_id: -1, message_id: mid, role: 'user', user_uid: 7, attachment_photo_file_id: "file#{mid}") }
+    task = fresh_task(model: 'qwen-image-3-pro', source_message_ids: (610..613).to_a)
+    task.update!(params: task.params_hash.merge('user_requested_model' => 'qwen-image-3-pro').to_json)
+    assert_equal :failed, ImageGenTaskHandler.new.call(BackgroundTask.find(task.id), @bot)
+    assert_empty @fake_adapter.submit_calls
+  end
+
+  def test_more_than_six_unique_sources_fail_without_submit
+    (610..616).each { |mid| Message.create!(chat_id: -1, message_id: mid, role: 'user', user_uid: 7, attachment_photo_file_id: "file#{mid}") }
+    task = fresh_task(model: 'nano-banana-2', source_message_ids: (610..616).to_a)
+    assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
+    assert_empty @fake_adapter.submit_calls
+  end
+
+  def test_legacy_candidate_limit_fails_before_downloading
+    task = fresh_task(model: 'nano-banana-2', source_message_ids: (1..25).to_a)
+    TelegramFile.stub(:download_image, ->(*) { flunk 'must not download' }) do
+      assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
+    end
+    assert_empty @fake_adapter.submit_calls
+  end
+
+  def test_parent_failure_rolls_back_when_both_notice_inserts_fail
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+    handler.define_singleton_method(:emit_agent_event) { |*_, **_| raise 'event insert failed' }
+    handler.define_singleton_method(:enqueue_failure_notice) { |*_, **_| raise 'notice insert failed' }
+    assert_raises(BackgroundTask::NotificationTransitionPending) { handler.send(:mark_failed_and_notify, task, @bot, 'poll_timeout') }
+    assert_equal 'pending', BackgroundTask.find(task.id).status
+    assert_empty BackgroundTask.where(parent_task_id: task.id)
+  end
+
+  def test_repeated_parent_failure_never_creates_second_notice_after_completion
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+    handler.send(:mark_failed_and_notify, task, @bot, 'poll_timeout')
+    event = BackgroundTask.where(parent_task_id: task.id).first
+    event.update!(status: 'done')
+    handler.send(:mark_failed_and_notify, BackgroundTask.find(task.id), @bot, 'poll_timeout')
+    assert_equal 1, BackgroundTask.where(parent_task_id: task.id).count
+  end
+
+  def test_explicit_structured_moderation_is_preserved
+    task = fresh_task
+    handler = ImageGenTaskHandler.new
+    assert_equal :pending, handler.call(task, @bot)
+    @fake_adapter.poll_returns = { failed: true, failure_reason: 'moderation' }
+    assert_equal :failed, handler.call(BackgroundTask.find(task.id), @bot)
+    assert_equal 'moderation', BackgroundTask.find(task.id).result_hash['failure_reason']
+    assert_equal 'moderation', BackgroundTask.where(parent_task_id: task.id).first.params_hash['failure_reason']
+  end
+
+  def test_async_explicit_model_conflict_fails_without_submit
+    Message.create!(chat_id: -1, message_id: 610, role: 'user', body: '[фото]', user_uid: 7, attachment_photo_file_id: 'FID1')
+    Message.create!(chat_id: -1, message_id: 611, role: 'user', body: '[фото]', user_uid: 7, attachment_photo_file_id: 'FID2')
+    task = fresh_task(model: 'wan-2.7', source_message_ids: [610, 611])
+    task.update!(params: task.params_hash.merge('user_requested_model' => 'wan-2.7').to_json)
+    task = BackgroundTask.find(task.id)
+    assert_equal :failed, ImageGenTaskHandler.new.call(task, @bot)
+    assert_empty @fake_adapter.submit_calls
+    assert_equal 'image_model_source_conflict', task.reload.result_hash['error']
+  end
+
+  def test_composer_rejects_invented_operational_text_but_keeps_requested_numbers
+    handler = ImageGenTaskHandler.new
+    params = { 'prompt_context' => '' }
+    refute handler.send(:unsafe_composed_prompt?, 'Нарисуй #42 на стене', 'Нарисуй #42', params)
+    assert handler.send(:unsafe_composed_prompt?, 'Нарисуй #42, задача #5134 В ОЧЕРЕДИ', 'Нарисуй #42', params)
+    assert handler.send(:unsafe_composed_prompt?, 'Смягчённая сцена', 'Нарисуй #42', params)
   end
 
   # Edit was requested but NOTHING usable resolved → fail into the agent

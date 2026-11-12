@@ -2,7 +2,16 @@ module Commands
   class TaskQueue < Base
     PATTERN = /^бо[тй][,]?\s+(?:задачи|очередь|таски|tasks)/i
 
-    STATUS_EMOJI = { 'pending' => '⏳', 'done' => '✅', 'failed' => '❌' }.freeze
+    STATUS_EMOJI = { 'pending' => '⏳', 'done' => '✅', 'failed' => '❌', 'cancelled' => '🚫' }.freeze
+    PHASE_LABELS = {
+      'queued' => 'в очереди', 'processing' => 'выполняется', 'retrying' => 'повтор',
+      'delivering' => 'отправляется', 'persisting_delivery' => 'сохраняет доставку',
+      'completed' => 'завершена', 'failed' => 'ошибка', 'cancelled' => 'отменена'
+    }.freeze
+    DELIVERY_LABELS = {
+      'unknown' => 'доставка неизвестна', 'pending' => 'доставка ожидается',
+      'delivered' => 'доставлено', 'failed' => 'доставка не удалась'
+    }.freeze
 
     def match?
       cmd =~ PATTERN
@@ -10,7 +19,7 @@ module Commands
 
     def execute
       tasks = BackgroundTask.where(chat_id: chat_id)
-        .order(created_at: :desc)
+        .order(created_at: :desc, id: :desc)
         .limit(10)
 
       return CommandResult.text("Задач нет") if tasks.empty?
@@ -34,6 +43,15 @@ module Commands
       age = time_ago(t.created_at)
 
       line = "#{emoji} `##{t.id}` #{desc} — #{age}"
+      phase = Agent::TaskStatus.normalized_phase(t) if defined?(Agent::TaskStatus)
+      phase ||= t.lifecycle_phase.to_s
+      line += " — #{PHASE_LABELS.fetch(phase, 'состояние неизвестно')}"
+      delivery = if defined?(Agent::TaskStatus)
+        Agent::TaskStatus.normalized_delivery(t, phase: phase)
+      else
+        t.delivery_status.to_s
+      end
+      line += " · #{DELIVERY_LABELS.fetch(delivery, DELIVERY_LABELS['unknown'])}"
       line += " (#{t.attempts}/#{t.max_attempts})" if t.status == 'pending'
       line
     end

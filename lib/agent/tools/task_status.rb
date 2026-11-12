@@ -79,6 +79,7 @@ module Agent
       # row must never expose a stale terminal phase while a bounded retry is
       # still eligible to run.
       return 'failed' if task.status == 'failed'
+      return 'cancelled' if task.status == 'cancelled'
       return 'completed' if task.status == 'done'
 
       phase = task.lifecycle_phase.to_s
@@ -120,12 +121,44 @@ module Agent
     end
 
     def action_status_for(task)
+      return 'cancelled' if task[:phase] == 'cancelled'
       return 'failed' if task[:phase] == 'failed'
       return 'sent' if task[:phase] == 'completed' && task[:delivery] == 'delivered'
       return 'failed' if task[:phase] == 'completed' && task[:delivery] == 'failed'
       return 'deferred' if task[:phase] == 'completed'
 
       'queued'
+    end
+
+    def display_task(task)
+      id = task[:id]
+      phase = task[:phase]
+      delivery = task[:delivery]
+      text = case phase
+      when 'queued' then 'стоит в очереди'
+      when 'processing' then 'выполняется'
+      when 'retrying' then 'повторяется после сбоя'
+      when 'delivering' then 'результат отправляется в чат'
+      when 'persisting_delivery'
+        delivery == 'delivered' ? 'Telegram принял результат, бот сохраняет подтверждение' : 'сохраняется подтверждение результата'
+      when 'completed'
+        delivery == 'delivered' ? 'завершена и доставлена' :
+          (delivery == 'failed' ? 'завершена, но доставка не удалась' : 'завершена; доставка не подтверждена')
+      when 'failed'
+        delivery == 'delivered' ? 'завершилась ошибкой после подтверждённой доставки' :
+          (delivery == 'failed' ? 'не выполнена; доставка не состоялась' : 'завершилась ошибкой; доставка неизвестна')
+      when 'cancelled' then 'отменена до начала работы'
+      else 'статус неизвестен'
+      end
+      "Задача ##{id}: #{text}."
+    end
+
+    def display_snapshot(snapshot)
+      return snapshot[:message] || 'Не удалось проверить статус задачи.' unless snapshot[:status] == 'ok'
+      return "Задачу ##{snapshot[:requested_task_id]} в этом чате не нашёл." if snapshot[:requested_task_id] && !snapshot[:found]
+      return 'Не нашёл пользовательских фоновых задач в этом чате.' unless snapshot[:found]
+
+      snapshot[:tasks].map { |task| display_task(task) }.join("\n")
     end
 
     def action_item(task)
@@ -144,7 +177,7 @@ module Agent
         return Agent::ToolResult.action(
           status: :deferred, action: 'task_status', phase: :deferred,
           delivery: :unknown, task_id: snapshot[:requested_task_id],
-          user_text: JSON.generate(snapshot)
+          user_text: JSON.generate(snapshot), display_text: display_snapshot(snapshot)
         )
       end
 
@@ -161,7 +194,8 @@ module Agent
             status: 'ok', found: true, count: tasks.length,
             task_ids: tasks.map { |task| task[:id] },
             note: 'Подробные статусы находятся в структурированном поле items.'
-          )
+          ),
+          display_text: display_snapshot(snapshot)
         )
       end
 
@@ -173,7 +207,7 @@ module Agent
         task_type: task[:type],
         phase: task[:phase],
         delivery: task[:delivery],
-        user_text: JSON.generate(snapshot)
+        user_text: JSON.generate(snapshot), display_text: display_snapshot(snapshot)
       )
     end
   end

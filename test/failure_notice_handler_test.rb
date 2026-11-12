@@ -2,6 +2,7 @@ require_relative 'test_helper'
 require_relative '../lib/task_runner'
 require_relative '../lib/agent/error_reporter'
 require_relative '../lib/task_handlers/failure_notice_handler'
+require 'telegram/bot'
 require 'ostruct'
 require 'net/http'
 
@@ -21,8 +22,9 @@ class FailureNoticeHandlerTest < BotTest
 
     def sendMessage(**params)
       @calls << params
-      raise @response if @response.is_a?(Exception)
-      @response
+      outcome = @response.is_a?(Array) ? @response.shift : @response
+      raise outcome if outcome.is_a?(Exception)
+      outcome
     end
   end
 
@@ -48,6 +50,26 @@ class FailureNoticeHandlerTest < BotTest
     assert_equal 55, row.message_thread_id
   end
 
+  def test_structured_image_failure_uses_shared_deterministic_renderer
+    text = ImageFailureNotice.render(
+      event_type: 'image_delivery_failed', parent_task_id: 82,
+      stage: 'delivery', reason: 'telegram_failed'
+    )
+    notice = BackgroundTask.create!(
+      task_type: 'failure_notice', chat_id: CHAT, parent_task_id: 82,
+      params: { event_type: 'image_delivery_failed', failure_stage: 'delivery',
+                failure_reason: 'telegram_failed', parent_task_id: 82,
+                forum_thread_id: 55 }.to_json
+    )
+    api = FakeApi.new
+
+    assert_equal :done, FailureNoticeHandler.new.call(notice, api)
+    assert_equal text, api.calls.first[:text]
+    assert_equal text, Message.find_by(chat_id: CHAT, message_id: 801).body
+    assert_includes text, 'запустит новую генерацию'
+    refute_includes text, 'telegram_failed'
+  end
+
   def test_malformed_acknowledgements_remain_pending_for_bounded_task_retry
     [nil, OpenStruct.new(message_id: '801'), OpenStruct.new(message_id: 0)].each do |response|
       notice = task
@@ -61,6 +83,32 @@ class FailureNoticeHandlerTest < BotTest
       assert_equal 'retrying', persisted.lifecycle_phase
       refute persisted.params_hash.key?('delivery_receipt')
     end
+  end
+
+  def test_ambiguous_timeout_then_definitive_403_keeps_failure_notice_unknown
+    notice = task(max_attempts: 4)
+    timeout = Faraday::TimeoutError.new('read timeout')
+    response = Faraday::Response.new(
+      status: 403,
+      response_body: { ok: false, error_code: 403, description: 'Forbidden' }.to_json
+    )
+    rejection = Telegram::Bot::Exceptions::ResponseError.new(response: response)
+    api = FakeApi.new
+    api.response = [timeout, rejection]
+    runner = TaskRunner.new(api)
+
+    runner.process_one(notice.id)
+    ambiguous = BackgroundTask.find(notice.id)
+    assert_equal true, ambiguous.params_hash['delivery_ambiguous']
+    assert_equal 'unknown', ambiguous.delivery_status
+
+    runner.process_one(notice.id)
+    failed = BackgroundTask.find(notice.id)
+    assert_equal 'failed', failed.status
+    assert_equal 'unknown', failed.delivery_status
+    assert_equal true, failed.params_hash['delivery_ambiguous']
+    assert_equal 2, api.calls.length
+    assert_equal 0, BackgroundTask.where(task_type: 'agent_event', parent_task_id: notice.id).count
   end
 
   def test_persistence_retry_reuses_receipt_without_resending
@@ -104,7 +152,7 @@ class FailureNoticeHandlerTest < BotTest
 
     terminal = BackgroundTask.find(notice.id)
     assert_equal 'failed', terminal.status
-    assert_equal 'failed', terminal.delivery_status
+    assert_equal 'unknown', terminal.delivery_status
     assert_equal 3, terminal.attempts
     assert_equal 3, api.calls.size
     assert api.calls.all? { |params| params[:message_thread_id] == 55 }
@@ -122,7 +170,7 @@ class FailureNoticeHandlerTest < BotTest
 
     terminal = BackgroundTask.find(notice.id)
     assert_equal 'failed', terminal.status
-    assert_equal 'failed', terminal.delivery_status
+    assert_equal 'unknown', terminal.delivery_status
     assert_equal 3, terminal.attempts
     assert_equal 3, api.calls.size
     assert_equal 0, BackgroundTask.where(task_type: 'agent_event').count

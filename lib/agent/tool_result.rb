@@ -5,8 +5,9 @@ module Agent
   #     should remember it for later.
   #   - "image" — the tool fetched an image the model should actually SEE
   #     (not just read about), e.g. view_image pulling a photo from history.
-  #   - "action" — an authoritative queued/sent/failed/deferred action state
-  #     with optional task id and sent count.
+  #   - "action" — an authoritative queued/sent/failed/cancelled/deferred
+  #     action state with optional task id and sent count. `display_text` can
+  #     provide deterministic prose without replacing machine-readable text.
   #
   # Agent::Runner unpacks ToolResult and:
   #   - For :image — queues the payload for injection into the conversation
@@ -18,14 +19,14 @@ module Agent
   #     text along with the persistence acknowledgment.
   # The variants are mutually exclusive by construction.
   class ToolResult
-    ACTION_STATUSES = %w[queued sent failed deferred].freeze
-    ACTION_PHASES = %w[queued processing retrying delivering persisting_delivery completed failed deferred].freeze
+    ACTION_STATUSES = %w[queued sent failed cancelled deferred].freeze
+    ACTION_PHASES = %w[queued processing retrying delivering persisting_delivery completed failed cancelled deferred].freeze
     ACTION_DELIVERIES = %w[pending delivered failed unknown].freeze
-    ITEM_STATUSES = %w[pending done failed queued sent deferred].freeze
+    ITEM_STATUSES = %w[pending done failed cancelled queued sent deferred].freeze
 
     attr_reader :user_text, :deferred_intent, :retry_in_min, :image,
                 :action_status, :action, :task_id, :task_type, :sent_count, :phase, :delivery,
-                :items
+                :items, :display_text
 
     def self.text(str)
       new(user_text: str.to_s)
@@ -45,7 +46,7 @@ module Agent
     # action. `user_text` is the only prose the model may repeat to the user;
     # the remaining fields are authoritative state, not narrative hints.
     def self.action(status:, action:, user_text:, task_id: nil, task_type: nil,
-                    sent_count: nil, phase: nil, delivery: nil, items: nil)
+                    sent_count: nil, phase: nil, delivery: nil, items: nil, display_text: nil)
       status = status.to_s
       raise ArgumentError, "invalid action status: #{status}" unless ACTION_STATUSES.include?(status)
       action = action.to_s
@@ -67,7 +68,7 @@ module Agent
 
       new(user_text: user_text.to_s, action_status: status, action: action,
           task_id: task_id, task_type: task_type, sent_count: sent_count, phase: phase,
-          delivery: delivery, items: items)
+          delivery: delivery, items: items, display_text: display_text&.to_s)
     end
 
     def self.validate_task_type(value)
@@ -105,7 +106,7 @@ module Agent
 
     def initialize(user_text:, deferred_intent: nil, retry_in_min: nil, image: nil,
                    action_status: nil, action: nil, task_id: nil, sent_count: nil, phase: nil,
-                   delivery: nil, task_type: nil, items: nil)
+                   delivery: nil, task_type: nil, items: nil, display_text: nil)
       @user_text = user_text
       @deferred_intent = deferred_intent
       @retry_in_min = retry_in_min
@@ -118,6 +119,7 @@ module Agent
       @phase = phase
       @delivery = delivery
       @items = items
+      @display_text = display_text
     end
 
     def deferred?
@@ -144,7 +146,7 @@ module Agent
         phase: @phase,
         delivery: @delivery,
         items: @items,
-        message: @user_text,
+        message: @display_text || @user_text,
       }.compact
     end
   end

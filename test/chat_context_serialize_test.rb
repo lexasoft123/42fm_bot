@@ -8,6 +8,9 @@ require_relative '../lib/chat_context'
 # file_id internally for cover_audio / add_vocals, but the agent needs
 # to know the upload exists so it doesn't re-prompt the user.
 class ChatContextSerializeTest < BotTest
+  def test_synthetic_uid_is_not_serialized
+    refute ChatContext.identity_for_row(make(uid: 0, name: nil, first_name: nil, last_name: nil)).key?(:uid)
+  end
   CHAT = -88
 
   # Minimal stub matching the shape serialize_msg expects from the

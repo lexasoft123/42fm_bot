@@ -1,9 +1,21 @@
+require_relative 'image_failure_notice'
+require_relative 'task_delivery_errors'
+
 class FailureNoticeHandler
   DeliveryError = Class.new(StandardError)
 
   def call(task, api)
     p = task.params_hash
-    text = p['text'].to_s
+    text = if p['event_type'] || p['failure_stage'] || p['failure_reason']
+      ImageFailureNotice.render(
+        event_type: p['event_type'] || 'image_failed',
+        parent_task_id: p['parent_task_id'] || task.parent_task_id,
+        stage: p['failure_stage'],
+        reason: p['failure_reason']
+      )
+    else
+      p['text'].to_s
+    end
     forum_thread_id = p['forum_thread_id']
     receipt = p['delivery_receipt']
 
@@ -40,16 +52,26 @@ class FailureNoticeHandler
   rescue DeliveryError, ActiveRecord::ActiveRecordError => e
     LOGGER.warn "[chat=#{task.chat_id}] #{self.class.name}[#{task.id}]: delivery pending: " \
                 "#{Agent::ErrorReporter.sanitize(e.message)}"
-    if task.attempts + 1 >= task.max_attempts
-      delivery_status = task.params_hash['delivery_receipt'] ? 'delivered' : 'failed'
+    definitive_rejection = TaskDeliveryErrors.definitive_telegram_rejection?(e)
+    params = task.params_hash
+    params['delivery_ambiguous'] = true unless definitive_rejection || params['delivery_receipt']
+    if definitive_rejection || task.attempts + 1 >= task.max_attempts
+      delivery_status = if params['delivery_receipt']
+        'delivered'
+      elsif params['delivery_ambiguous']
+        'unknown'
+      else
+        TaskDeliveryErrors.terminal_delivery_status(e)
+      end
       ActiveRecord::Base.connection_pool.with_connection do
-        task.update!(attempts: task.attempts + 1)
+        task.update!(attempts: task.attempts + 1, params: params.to_json)
         task.mark_failed!(Agent::ErrorReporter.sanitize(e.message), delivery_status: delivery_status)
       end
       return :failed
     end
     ActiveRecord::Base.connection_pool.with_connection do
-      task.mark_retrying!(delivery_status: task.params_hash['delivery_receipt'] ? 'delivered' : 'unknown')
+      task.mark_retrying!(params: params.to_json,
+                          delivery_status: params['delivery_receipt'] ? 'delivered' : 'unknown')
     end
     :pending
   end

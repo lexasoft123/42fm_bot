@@ -47,6 +47,16 @@ class ModelProviderClientTest < Minitest::Test
     assert_match(/bad/, err.message)
   end
 
+  def test_post_error_retains_outer_status_separately_from_nested_body
+    err = assert_raises(ModelProviderClient::HttpError) do
+      with_stubbed(:post, code: 502, body: '{"error":"upstream POST /image: 400 bad"}') do
+        ModelProviderClient.new(CFG).post('/x', {})
+      end
+    end
+    assert_equal 502, err.status
+    assert_includes err.message, '400'
+  end
+
   # Defensive redaction: if the upstream echoes the request body back inside
   # its 4xx response (gateways like CloseRouter sometimes do), strip base64
   # data-URIs and truncate. Same blast-radius mitigation pattern that

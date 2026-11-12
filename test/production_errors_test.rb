@@ -235,6 +235,40 @@ class TaskRunnerTest < BotTest
     assert_equal 1, task.retry_count
   end
 
+  def test_initial_integer_id_lookup_failure_does_not_mask_database_error
+    task = BackgroundTask.create!(task_type: 'good_task', status: 'pending', chat_id: 1,
+                                  attempts: 0, max_attempts: 5)
+    runner = TaskRunner.new(@api)
+    original = BackgroundTask.method(:find_by)
+    BackgroundTask.singleton_class.define_method(:find_by) do |*args, **kwargs|
+      raise ActiveRecord::StatementInvalid, 'temporary read failure'
+    end
+
+    assert_silent { runner.process_one(task.id) }
+    assert_equal 'pending', original.call(id: task.id).status
+  ensure
+    BackgroundTask.singleton_class.define_method(:find_by, original) if original
+  end
+
+  def test_notification_transition_without_durable_checkpoint_spends_attempt
+    handler = Class.new do
+      def call(*)
+        raise BackgroundTask::NotificationTransitionPending, 'missing durable checkpoint'
+      end
+    end
+    TaskRunner.register('uncheckpointed_failure', handler)
+    task = BackgroundTask.create!(task_type: 'uncheckpointed_failure', status: 'pending',
+                                  chat_id: 1, attempts: 0, max_attempts: 5)
+
+    TaskRunner.new(@api).process_one(task.id)
+
+    pending = BackgroundTask.find(task.id)
+    assert_equal 'pending', pending.status
+    assert_equal 'retrying', pending.lifecycle_phase
+    assert_equal 1, pending.attempts
+    assert_equal 1, pending.retry_count
+  end
+
   # Handler exception when at max_attempts — marks failed and notifies chat
   def test_handler_exception_at_max_marks_failed
     handler = Class.new { def call(task, api) = raise("permanent failure") }

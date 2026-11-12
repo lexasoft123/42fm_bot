@@ -1,4 +1,6 @@
 require 'cgi'
+require_relative 'image_failure_notice'
+require_relative 'task_delivery_errors'
 
 class AgentEventHandler
   include ChatContext
@@ -61,13 +63,37 @@ class AgentEventHandler
     safe_error = Agent::ErrorReporter.sanitize(e.message)
     LOGGER.warn "[chat=#{task.chat_id}] AgentEventHandler[#{task.id}]: reply delivery pending: #{safe_error}"
     ActiveRecord::Base.connection_pool.with_connection do
-      task.mark_retrying!(delivery_status: task.params_hash['reply_receipt'] ? 'delivered' : 'unknown')
+      p = task.params_hash
+      p['delivery_ambiguous'] = true unless p['reply_receipt']
+      task.mark_retrying!(params: p.to_json,
+                          delivery_status: p['reply_receipt'] ? 'delivered' : 'unknown')
     end
     :pending
   rescue => e
     safe_error = Agent::ErrorReporter.sanitize(e.message)
+    if retryable_notification_error?(e)
+      LOGGER.warn "[chat=#{task.chat_id}] AgentEventHandler[#{task.id}]: transient Telegram error; retrying cached reply: #{safe_error}"
+      ActiveRecord::Base.connection_pool.with_connection do
+        p = task.params_hash
+        p['delivery_ambiguous'] = true unless p['reply_receipt']
+        task.mark_retrying!(params: p.to_json,
+                            delivery_status: p['reply_receipt'] ? 'delivered' : 'unknown')
+      end
+      return :pending
+    end
+
     LOGGER.error "[chat=#{task.chat_id}] AgentEventHandler[#{task.id}]: #{e.class}: #{safe_error}"
-    ActiveRecord::Base.connection_pool.with_connection { task.mark_failed!(safe_error) }
+    p = task.params_hash
+    delivery = if p['reply_receipt']
+      'delivered'
+    elsif p['delivery_ambiguous']
+      'unknown'
+    else
+      'failed'
+    end
+    ActiveRecord::Base.connection_pool.with_connection do
+      task.mark_failed!(safe_error, delivery_status: delivery)
+    end
     :failed
   end
 
@@ -75,6 +101,19 @@ class AgentEventHandler
 
   def cached_or_generated_reply(task, api, p, event_type, summary, forum_thread_id)
     return [p['reply_text'], !!p['reply_fallback']] if p['reply_text']
+
+    if ImageFailureNotice::EVENT_TEXT.key?(event_type.to_s)
+      text = ImageFailureNotice.render(
+        event_type: event_type,
+        parent_task_id: p['parent_task_id'] || task.parent_task_id,
+        stage: p['failure_stage'],
+        reason: p['failure_reason']
+      )
+      p['reply_text'] = text
+      p['reply_fallback'] = true
+      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
+      return [text, true]
+    end
 
     user_text = build_event_prompt(event_type, summary, parent_task_type: p['parent_task_type'])
     runner = Agent::Runner.new(
@@ -125,6 +164,18 @@ class AgentEventHandler
     message_id.is_a?(Integer) && message_id.positive?
   end
 
+  def retryable_notification_error?(error)
+    # Once sendMessage has been called, any response/conversion failure is
+    # ambiguous unless Telegram supplied a structured definitive rejection.
+    # This includes telegram-bot-ruby conversion errors such as NoMethodError
+    # when HTTP 200 contains {"ok":true} without the expected result object.
+    # TaskRunner bounds these retries; treating an unclassified error as a
+    # rejection could duplicate a reply after Telegram accepted it.
+    return false if TaskDeliveryErrors.definitive_telegram_rejection?(error)
+
+    true
+  end
+
   def serialize_message_receipt(response, forum_thread_id)
     raw = response.is_a?(Hash) ? (response['result'] || response[:result] || response) : response
     message_id = raw.respond_to?(:message_id) ? raw.message_id :
@@ -153,12 +204,7 @@ class AgentEventHandler
     'cron_tick'                  => 'Будильник по scratchpad: одна или несколько твоих intentions достигли due_at и ждут действия. Список ниже. Реши сам — выполнить отложенное действие сейчас (например, повторить generate_image), прокомментировать в чате, или промолчать если ситуация уже не актуальна. Если выполнил — вызови forget(id) чтобы убрать запись.',
   }.freeze
 
-  IMAGE_FAILURE_FALLBACKS = {
-    'image_failed' => 'Не удалось сгенерировать картинку',
-    'image_failed_after_retries' => 'Не удалось сгенерировать картинку после повторных попыток',
-    'image_delivery_failed' => 'Картинка создана, но Telegram не подтвердил её доставку',
-    'image_persistence_failed' => 'Картинка отправлена, но бот не смог сохранить подтверждение доставки',
-  }.freeze
+  IMAGE_FAILURE_FALLBACKS = ImageFailureNotice::EVENT_TEXT
 
   # Synthetic failure turns may explain or recover, but must never rewrite the
   # per-chat memory that will shape later real-user turns. This includes the
@@ -189,10 +235,8 @@ class AgentEventHandler
   end
 
   def fallback_text(event_type, parent_task_id)
-    text = IMAGE_FAILURE_FALLBACKS[event_type.to_s]
-    return nil unless text
-    task_suffix = parent_task_id.to_i.positive? ? " (задача ##{parent_task_id.to_i})" : ''
-    "#{text}#{task_suffix}."
+    return nil unless IMAGE_FAILURE_FALLBACKS.key?(event_type.to_s)
+    ImageFailureNotice.render(event_type: event_type, parent_task_id: parent_task_id)
   end
 
   def synthetic_event_user

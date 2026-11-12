@@ -86,7 +86,7 @@ module Agent
     # Shared event creation primitive. Feature handlers keep their tailored
     # event types/prompts; generic failures use #report above.
     def emit(chat_id:, event_type:, summary:, parent_task: nil, rate_limited: true, fingerprint: nil,
-             user_notified: false, forum_thread_id: nil)
+             user_notified: false, forum_thread_id: nil, failure_stage: nil, failure_reason: nil)
       return nil if chat_id.nil?
       return nil if parent_task&.task_type == 'agent_event'
 
@@ -111,11 +111,18 @@ module Agent
             summary: sanitize(summary),
             user_notified: (true if user_notified),
             forum_thread_id: forum_thread_id,
+            failure_stage: allowlisted_failure_value(failure_stage, %w[submit poll delivery persistence]),
+            failure_reason: allowlisted_failure_value(failure_reason, %w[moderation provider_rejected submit_outcome_unknown timeout provider_unavailable telegram_failed persistence_failed model_source_conflict edit_sources_unavailable model_unavailable unknown]),
           }.compact.to_json
         )
         parent_task&.update!(delivery_status: 'failed') if delivery_failure
         event
       end
+    end
+
+    def allowlisted_failure_value(value, allowed)
+      normalized = value.to_s
+      allowed.include?(normalized) ? normalized : 'unknown'
     end
 
     def existing_parentless_event(chat_id, fingerprint)

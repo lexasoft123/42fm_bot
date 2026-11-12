@@ -29,6 +29,7 @@ module Commands
     Wrapped,
     Dice,
     PhraseTop,
+    TaskCancel,
     TaskQueue,
     CostReport,
     GptChat,

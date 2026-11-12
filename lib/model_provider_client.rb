@@ -9,13 +9,24 @@ require_relative 'agent/error_reporter'
 #
 # Asymmetry between #post (raises on non-2xx) and #get (returns [code, body],
 # swallows transient SSL/timeout) is intentional: submit failures should
-# surface to handler bail/retry; poll failures should degrade gracefully so a
+# surface to the handler for deterministic failure handling; poll failures can degrade gracefully so a
 # transient blip doesn't fail an in-flight task. Mirrors FluxClient semantics.
 #
 # #post does NOT rescue OpenSSL::SSL::SSLError / Net::OpenTimeout /
 # Errno::ECONNRESET — a TLS error during submit raises the raw exception, not
 # the formatted "<tag> POST ..." string. Matches existing FluxClient behavior.
 class ModelProviderClient
+  # The response status is authoritative; provider bodies may contain nested
+  # HTTP-like text that must never be mistaken for the outer response code.
+  class HttpError < RuntimeError
+    attr_reader :status
+
+    def initialize(status:, message:)
+      @status = status
+      super(message)
+    end
+  end
+
   def initialize(cfg, tag: 'ModelProvider')
     @base_url = cfg.fetch('api_url')
     @api_key  = cfg.fetch('api_key')
@@ -27,7 +38,9 @@ class ModelProviderClient
     resp = HTTParty.post("#{@base_url}#{path}",
       body: body.to_json, headers: headers, timeout: timeout)
     log("POST #{path}", t0, resp.code)
-    raise "#{safe(@tag)} POST #{safe(path)}: #{resp.code} #{redact_body(resp.body)}" unless resp.code.between?(200, 299)
+    unless resp.code.between?(200, 299)
+      raise HttpError.new(status: resp.code, message: "#{safe(@tag)} POST #{safe(path)}: #{resp.code} #{redact_body(resp.body)}")
+    end
     resp.parsed_response
   end
 

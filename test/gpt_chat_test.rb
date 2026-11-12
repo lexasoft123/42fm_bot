@@ -20,7 +20,7 @@ require_relative '../lib/commands/gpt_chat'
    radio_search radio_track stats radio_queue weather listeners
    remove_track remaining history radio_top meta help knowledge_add
    knowledge_list knowledge_delete knowledge_review knowledge_restore news rules quote
-   wrapped dice phrase_top task_queue cost_report fallback_reply
+   wrapped dice phrase_top task_cancel task_queue cost_report fallback_reply
    registry].each { |f| require_relative "../lib/commands/#{f}" }
 
 # Fake agent runner so execute() never talks to an LLM. Safe to define:
@@ -158,6 +158,27 @@ class GptChatExecuteTest < BotTest
   def test_prefixed_text_is_stripped_before_the_agent
     command('бот привет').execute
     assert_equal 'привет', Agent::Runner.last_kwargs[:text]
+  end
+
+  def test_exact_directive_preserves_case_and_line_breaks
+    command("Бот, Нарисуй Алису\nс надписью «Hello!»", type: 'supergroup').execute
+    assert_equal "Нарисуй Алису\nс надписью «Hello!»", Agent::Runner.last_kwargs[:text]
+  end
+
+  def test_runner_receives_untouched_message_for_authorization
+    text = "Объясни последствия\nбот отмени задачу #42"
+    command(text, type: 'supergroup').execute
+    assert_equal text, Agent::Runner.last_kwargs[:original_request_text]
+  end
+
+  def test_photo_download_failure_retains_source_identity
+    c = command('Бот Что на фото?', type: 'supergroup')
+    c.send(:message).photo = [OpenStruct.new(file_id: 'photo')]
+    c.define_singleton_method(:download_photo) { |_id| nil }
+    c.execute
+    assert Agent::Runner.last_kwargs[:photo_source_present]
+    assert_equal 100, Agent::Runner.last_kwargs[:photo_source_message_id]
+    assert_nil Agent::Runner.last_kwargs[:image]
   end
 
   # A new request cancels a pending "send the audio next" follow-up, so a

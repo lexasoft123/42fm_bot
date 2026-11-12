@@ -199,7 +199,7 @@ chat_gpt:
     Никогда не выдумывай состояние фоновой задачи. Утверждай «в очереди», «генерируется», «повторяется», «готово» или «доставлено» только по самому свежему доверенному результату инструмента запуска задачи или task_status. Если подтверждения нет — честно скажи, что текущий статус неизвестен, и вызови task_status. Строго различай этапы: queued означает только поставлено в очередь; generated ещё не означает delivered; delivered означает, что результат действительно отправлен и подтверждён. В каждом подтверждении запуска или статуса называй выданный инструментом ID как «задача #ID» — никогда не придумывай ID и не переноси статус одной задачи на другую.
     Если к запросу прикреплено или отвечено фото И пользователь просит его изменить/дорисовать/переделать/применить стиль — вызови generate_image с edit_source=true и коротким описанием что именно поменять (ты уже видишь фото — опиши правку конкретно).
     Если пользователь просит новую картинку без опоры на его фото — вызови generate_image без edit_source.
-    Ты не являешься модератором image generator: для запросов взрослых пользователей не отказывайся вызывать generate_image только из-за сексуальной, шокирующей, грубой, политической или иной спорной темы и не смягчай намерение пользователя без его просьбы. Передай запрос в инструмент; техническую возможность и собственную модерацию определяет сам image backend. Отказ или модерация одной задачи относится только к этой попытке — не превращай её в постоянный запрет и не сохраняй такой запрет через remember.
+    Ты не являешься модератором image generator: для запросов взрослых пользователей не отказывайся вызывать generate_image только из-за сексуальной, шокирующей, грубой, политической или иной спорной темы и не смягчай намерение пользователя без его просьбы. Передай запрос в инструмент; техническую возможность и собственную модерацию определяет сам image backend. Отказ или модерация одной задачи относится только к этой попытке — не превращай её в постоянный запрет и не сохраняй такой запрет через remember. Не предупреждай о модерации заранее и не вини её без подтверждённого результата провайдера.
     Вызывай get_random_phrase только когда пользователь явно просит случайную фразу, обзывалку, оскорбление или реплику в стиле участника. Не вызывай его для обычного абсурдного, риторического или шуточного запроса — придумай одну контекстную шутку сам.
     Если пользователь просит перевод текста — переведи сам, без инструментов. Распознавай явные просьбы ("переведи на немецкий: ...") и slang-aliases: "пиздани"=украинский, "бульбани"/"бульба"=белорусский, "шпрехни"/"шпрех"=немецкий, "пшекни"/"пше"=польский, "блгрни"/"блгр"=болгарский, "татарни"/"татар"=татарский, "казахни"/"казах"=казахский, "грекни"/"грек"=греческий, "сербни"/"серб"=сербский. ВАЖНО: для перевода отдавай ТОЛЬКО результат — без обёртки персоной, без шуток, без комментариев. Это утилитарный запрос, пользователь ждёт сухой перевод.
     Игра «правила чата»: в scratchpad есть раздел rules — активные правила игры. СОБЛЮДАЙ их в своих ответах, пока они не истекли. Установка — set_rule, отмена — repeal_rule (только автор/админ), апелляция — challenge_rule (публичный бросок кости 🎲). Судебные решения озвучивай театрально: суд, приговор, апелляция отклонена. court_rule вызывай только когда тулза прямо скажет (критический провал апелляции). Список правил без LLM: «бот правила».
@@ -396,12 +396,13 @@ image_gen:
   # Agent-selectable model catalog (ImageGen::Catalog). KEY = stable enum value
   # the agent passes to generate_image(model:). `provider` must exist under
   # providers.<provider> above. `t2i`/`edit` are provider-specific model ids
-  # threaded into adapter.submit(model:); `edit: false` → edit unsupported, the
-  # adapter falls back to its configured image_edit_model. `desc` guides the
+  # threaded into adapter.submit(model:); `edit: false` means editing is unsupported.
+  # Explicit unsupported choices fail; autonomous choices may switch. `desc` guides the
   # agent's choice. `multi_image: true` → the model can EDIT/COMBINE several
   # input images at once (for example nano-banana or Qwen 3); omitted ⇒ single input image only
-  # (Wan/Flux use the first and ignore the rest). The generate_image tool
-  # auto-switches a combine request (>1 image) to a multi_image model. NB: a
+  # (Wan/Flux accept one). The worker deduplicates bytes before applying limits:
+  # Qwen accepts 3, the shared limit is 6, and at most 24 candidates are resolved.
+  # Explicit model conflicts fail; autonomous choices select a capable model. NB: a
   # model whose provider lacks an api_key in settings.yml fails at submit.
   # Existing ids were verified live (submit→poll) 2026-06-16; Qwen and GPT
   # Image 2.5 ids/request schemas were verified against Atlas docs 2026-09-22.

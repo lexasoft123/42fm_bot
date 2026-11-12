@@ -1,5 +1,11 @@
 class BackgroundTask < ActiveRecord::Base
-  LIFECYCLE_PHASES = %w[queued processing retrying delivering persisting_delivery completed failed].freeze
+  # A terminal task result is known, but its parent failure + notification
+  # record could not be committed atomically. TaskRunner must retry this state
+  # transition without consuming the provider/poll attempt budget or notifying
+  # the chat with a generic infrastructure error.
+  NotificationTransitionPending = Class.new(StandardError)
+
+  LIFECYCLE_PHASES = %w[queued processing retrying delivering persisting_delivery completed failed cancelled].freeze
   DELIVERY_STATUSES = %w[unknown pending delivered failed].freeze
 
   scope :pending, -> { where(status: 'pending') }
@@ -39,6 +45,20 @@ class BackgroundTask < ActiveRecord::Base
 
   def mark_processing!(delivery_status: nil)
     update_lifecycle!('processing', delivery_status: delivery_status)
+  end
+
+  # The only transition that races with user cancellation. A stale row loaded
+  # by TaskRunner cannot claim a task after cancellation has won.
+  def claim_start!
+    now = Time.now
+    self.class.where(id: id, status: 'pending', lifecycle_phase: 'queued')
+      .update_all(lifecycle_phase: 'processing', updated_at: now).positive?
+  end
+
+  def cancel_before_start!
+    now = Time.now
+    self.class.where(id: id, task_type: 'image_generate', status: 'pending', lifecycle_phase: 'queued')
+      .update_all(status: 'cancelled', lifecycle_phase: 'cancelled', updated_at: now).positive?
   end
 
   def mark_delivering!

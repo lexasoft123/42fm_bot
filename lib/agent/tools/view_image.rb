@@ -21,12 +21,13 @@ Agent::ToolRegistry.register(
     next 'Ошибка: нет доступа к Telegram API' unless ctx[:api]
 
     mid = args['message_id'].to_i
-    file_id = Message.where(chat_id: ctx[:chat_id], message_id: mid)
-                     .pick(:attachment_photo_file_id)
+    scope = Message.where(chat_id: ctx[:chat_id], message_id: mid)
+    scope = scope.where(message_thread_id: ctx[:forum_thread_id]) if ctx[:forum_thread_id]
+    file_id = scope.pick(:attachment_photo_file_id)
     next "В сообщении #{mid} нет сохранённой картинки (либо сообщение не найдено, либо оно отправлено до того, как бот начал сохранять фото)." unless file_id
 
     img = TelegramFile.download_image(ctx[:api], file_id, chat_id: ctx[:chat_id])
-    next "Не смог скачать картинку из сообщения #{mid} — попробуй позже." unless img
+    next "Не смог скачать картинку из сообщения #{mid} — попробуй позже." unless img.is_a?(Hash) && !img[:data].to_s.empty?
 
     Agent::ToolResult.image(
       user_text: "Картинка из сообщения #{mid} загружена — она придёт следующим сообщением, рассмотри её и используй для ответа.",

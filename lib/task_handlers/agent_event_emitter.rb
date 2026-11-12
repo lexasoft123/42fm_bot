@@ -7,7 +7,8 @@ module AgentEventEmitter
   # outcome (task failed after retries, succeeded after retries, etc.).
   # Per-chat rate-limited at AGENT_EVENT_HOUR_CAP per rolling hour to prevent
   # runaway loops. Returns the new task or nil if rate-limited / suppressed.
-  def emit_agent_event(parent_task, event_type, summary:, user_notified: false, forum_thread_id: nil)
+  def emit_agent_event(parent_task, event_type, summary:, user_notified: false, forum_thread_id: nil,
+                       failure_stage: nil, failure_reason: nil)
     forum_thread_id ||= parent_task.params_hash['forum_thread_id']
     ActiveRecord::Base.connection_pool.with_connection do
       Agent::ErrorReporter.emit(
@@ -16,7 +17,9 @@ module AgentEventEmitter
         summary: summary,
         parent_task: parent_task,
         user_notified: user_notified,
-        forum_thread_id: forum_thread_id
+        forum_thread_id: forum_thread_id,
+        failure_stage: failure_stage,
+        failure_reason: failure_reason
       )
     end
   end

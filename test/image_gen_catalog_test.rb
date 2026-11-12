@@ -37,6 +37,55 @@ class ImageGenCatalogTest < Minitest::Test
     ImageGen::Catalog.reset!
   end
 
+  def test_specific_model_name_wins_over_ambiguous_family
+    Settings.image_gen['models']['nano-banana-pro'] = { 'provider' => 'closerouter', 't2i' => 'pro', 'edit' => 'edit' }
+    ImageGen::Catalog.reset!
+    assert_equal 'nano-banana-pro', ImageGen::Catalog.requested_key('Сделай через Nano Banana Pro')
+    assert_equal 'nano-banana-2', ImageGen::Catalog.requested_key('Nano Banana 2')
+    assert_nil ImageGen::Catalog.requested_key('nano')
+    assert_nil ImageGen::Catalog.requested_key('swan')
+    assert_equal 'gpt-image-2.5-sunburst', ImageGen::Catalog.requested_key('через Sunburst')
+  end
+
+  def test_positive_model_wins_over_excluded_specific_name
+    directive = 'Нарисуй кота в Qwen, не используй GPT Image 2.5 Sunburst'
+    assert_equal 'qwen-image-3-pro', ImageGen::Catalog.requested_key(directive)
+    assert_equal ['gpt-image-2.5-sunburst'], ImageGen::Catalog.excluded_keys(directive)
+    assert_nil ImageGen::Catalog.requested_key('Нарисуй кота, не используй Sunburst')
+    assert_equal ['gpt-image-2.5-sunburst'], ImageGen::Catalog.excluded_keys('Нарисуй кота, не используй Sunburst')
+    assert_equal 'wan-2.7', ImageGen::Catalog.requested_key('Не Qwen, а Wan')
+    assert_nil ImageGen::Catalog.requested_key('Не используй Wan и Qwen')
+    assert_nil ImageGen::Catalog.requested_key('swan')
+  end
+
+  def test_exclusion_scope_covers_coordinated_lists_but_ends_at_new_instruction
+    text = 'Нарисуй кота без Wan, Flux и Qwen'
+    assert_nil ImageGen::Catalog.requested_key(text)
+    assert_equal %w[wan-2.7 flux-2-pro qwen-image-3-pro], ImageGen::Catalog.excluded_keys(text)
+    directive = 'Без Wan, Flux и Qwen, используй GPT Image 2.5 Sunburst'
+    assert_equal 'gpt-image-2.5-sunburst', ImageGen::Catalog.requested_key(directive)
+    assert_equal %w[wan-2.7 flux-2-pro qwen-image-3-pro], ImageGen::Catalog.excluded_keys(directive)
+    assert_equal 'gpt-image-2.5-sunburst', ImageGen::Catalog.requested_key('без Wan и Flux, но используй Sunburst')
+    assert_equal 'gpt-image-2.5-sunburst', ImageGen::Catalog.requested_key('without Wan, Flux, use Sunburst')
+  end
+
+  def test_contrast_ends_exclusion_scope
+    assert_equal 'qwen-image-3-pro', ImageGen::Catalog.requested_key('not Flux but Qwen')
+    assert_equal ['flux-2-pro'], ImageGen::Catalog.excluded_keys('not Flux but Qwen')
+    assert_equal 'qwen-image-3-pro', ImageGen::Catalog.requested_key('не Flux, а Qwen')
+    assert_equal ['flux-2-pro'], ImageGen::Catalog.excluded_keys('не Flux, а Qwen')
+  end
+
+  def test_visual_exclusions_do_not_exclude_a_later_selected_model
+    ['Нарисуй кота без шляпы через Sunburst', 'Кот без шляпы, через Sunburst',
+     'Draw a cat without a hat using Sunburst'].each do |directive|
+      assert_equal 'gpt-image-2.5-sunburst', ImageGen::Catalog.requested_key(directive)
+      assert_empty ImageGen::Catalog.excluded_keys(directive)
+    end
+    assert_equal ['wan-2.7'], ImageGen::Catalog.excluded_keys('нарисуй без модели Wan')
+    assert_equal ['flux-2-pro'], ImageGen::Catalog.excluded_keys('не используй модель Flux')
+  end
+
   def test_keys_and_default
     assert_equal %w[nano-banana-2 wan-2.7 qwen-image-3-pro gpt-image-2.5-sunburst flux-2-pro], ImageGen::Catalog.keys
     assert_equal 'qwen-image-3-pro', ImageGen::Catalog.default_key
