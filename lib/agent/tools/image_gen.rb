@@ -54,7 +54,9 @@ Agent::ToolRegistry.register(
     request = ctx[:user_initiated] && !ctx[:request_text].to_s.empty? ? ctx[:request_text].to_s : args['prompt'].to_s
 
     photo_present = ctx[:photo_source_present] || ctx[:image].is_a?(Hash)
-    edit_requested = !!args['edit_source'] || (photo_present && ImageGen::EditIntent.requested?(request))
+    explicit_photo_edit = ImageGen::EditIntent.requested?(request) &&
+      request.match?(/(?:фото|фотографи|исходник|photo|source image|дорисуй|перерисуй|отредактируй)/i)
+    edit_requested = !!args['edit_source'] || explicit_photo_edit || (photo_present && ImageGen::EditIntent.requested?(request))
     inline = (edit_requested && ctx[:image].is_a?(Hash) && !ctx[:image][:data].to_s.empty?) ? [ctx[:image]] : []
     inline_id = ctx[:photo_source_message_id].to_i
     raw_sources = Array(args['source_message_ids'])
@@ -73,13 +75,27 @@ Agent::ToolRegistry.register(
       next Agent::ToolResult.action(status: :failed, action: 'generate_image',
         user_text: 'Сначала нужно найти фото. Ответь на выбранное фото, и я смогу его отредактировать.')
     end
+    stale_deferred_edit = !ctx[:user_initiated] && request.match?(/\A\s*дорисовать через \d+ мин:/i)
+    if (edit_requested || stale_deferred_edit) && inline.empty? && source_ids.empty?
+      next Agent::ToolResult.action(status: :failed, action: 'generate_image',
+        user_text: 'Ответь на фото, которое нужно отредактировать.')
+    end
+    if ImageGen::Catalog.ambiguous_banana_request?(request)
+      choices = ImageGen::Catalog.keys.select { |key| key.start_with?('nano-banana-') }.join(' или ')
+      next Agent::ToolResult.action(status: :failed, action: 'generate_image',
+        user_text: "Какую модель выбрать: #{choices}?")
+    end
 
     role = ctx[:user]&.role
     if RateLimiter.exceeded?(ctx[:chat_id], 'image', role: role)
       mins = RateLimiter.minutes_until_free(ctx[:chat_id], 'image', role: role)
+      if edit_requested || source_ids.any?
+        next Agent::ToolResult.action(status: :failed, action: 'generate_image',
+          user_text: "#{RateLimiter.reply(ctx[:chat_id], 'image', role: role)} Повтори запрос ответом на нужное фото через #{mins} мин.")
+      end
       next Agent::ToolResult.deferred(
         user_text:    RateLimiter.reply(ctx[:chat_id], 'image', role: role),
-        intent:       "дорисовать через #{mins} мин: #{request}",
+        intent:       "нарисовать через #{mins} мин: #{request}",
         retry_in_min: mins
       )
     end
@@ -93,15 +109,22 @@ Agent::ToolRegistry.register(
       scope = scope.where(message_thread_id: ctx[:forum_thread_id]) if ctx[:forum_thread_id]
       known_files << scope.pick(:attachment_photo_file_id)
     end
-    source_ids = source_ids.reject do |mid|
-      scope = Message.where(chat_id: ctx[:chat_id], message_id: mid)
+    if source_ids.any?
+      scope = Message.where(chat_id: ctx[:chat_id], message_id: source_ids)
       scope = scope.where(message_thread_id: ctx[:forum_thread_id]) if ctx[:forum_thread_id]
-      file_id = scope.pick(:attachment_photo_file_id)
-      duplicate = file_id && known_files.include?(file_id)
-      known_files << file_id if file_id
-      duplicate
+      files = scope.pluck(:message_id, :attachment_photo_file_id).to_h
+      if source_ids.any? { |id| files[id].to_s.empty? }
+        next Agent::ToolResult.action(status: :failed, action: 'generate_image',
+          user_text: 'Не нашёл нужное фото в этом чате или теме. Ответь на фото, которое нужно отредактировать.')
+      end
+
+      source_ids = source_ids.reject do |id|
+        file_id = files.fetch(id)
+        duplicate = known_files.include?(file_id)
+        known_files << file_id
+        duplicate
+      end
     end
-    total = inline.size + source_ids.size
     requested_model = ImageGen::Catalog.requested_key(request)
     excluded_models = ImageGen::Catalog.excluded_keys(request)
     model_key = requested_model || ImageGen::Catalog.allowed_key(args['model'], excluded_models)

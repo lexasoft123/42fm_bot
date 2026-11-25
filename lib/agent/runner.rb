@@ -145,6 +145,10 @@ module Agent
       end
       @turn_status = classify_turn_status(result)
       result
+    rescue GptMaster::BalanceError
+      @turn_status = 'provider_balance_error'
+      deterministic_status_fallback || deterministic_action_fallback ||
+        (@user_initiated ? 'Не могу ответить: у провайдера модели закончился баланс.' : '')
     rescue => e
       @turn_status = 'exception'
       raise
@@ -260,6 +264,12 @@ module Agent
             return sanitize_telegram_identity_links(@last_status_display) if @last_status_display && status_only_request?
             messages << build_tool_result_message(call_id, result)
             next
+          end
+
+          # A model refusal is a safety decision, not a failed tool call.
+          if image_safety_refusal?(text) && image_request_unanswered?
+            return finalize_output(text, messages: messages, system_prompt: system_prompt,
+                                   tools: tools, iteration: i + 1, raw: raw)
           end
 
           # Image watchdog: the agent sometimes promises/describes an image but
@@ -392,6 +402,10 @@ module Agent
     # ("я нарисовал 🎨 кошку"), even with long trailing text on the same
     # line, don't match because they aren't paragraph-anchored.
     HALLUCINATED_IMAGE_CAPTION = /(?:\A|\n)\s*🎨.{80,}/m
+    def image_safety_refusal?(text)
+      text.to_s.match?(/(?:не могу|не стану|не буду|отказываюсь|cannot|can't|won't|unable to).{0,120}(?:помочь|созда|генерир|нарис|рисов|измен|правк|выполн|help|create|generat|draw|edit|comply)/i)
+    end
+
     def hallucinated_image_caption?(text)
       return false if text.nil? || text.empty?
       text.match?(HALLUCINATED_IMAGE_CAPTION)
@@ -969,6 +983,10 @@ module Agent
     # from that attempt. Synthetic agent_event/cron turns stay silent.
     def finalize_output(text, messages:, system_prompt:, tools:, iteration:, raw: nil, correction_allowed: true)
       text = sanitize_telegram_identity_links(text.to_s)
+      if @last_action_tool.to_s == 'generate_image' && text.match?(/(?:переписал|изменил|скорректировал|адаптировал|смягчил|переформулировал|rewrite|rewrote|modified|revised|adjusted).{0,80}(?:промпт|запрос|описани|prompt|request)|(?:рисую|генерирую|передал).{0,20}\bбез\s/iu)
+        acknowledgement = trusted_simple_acknowledgement
+        return factual_search_required? && !search_evidence_complete? ? "#{acknowledgement}\n#{unverified_fact_notice}" : acknowledgement if acknowledgement
+      end
       action_text = action_outcome_message(text)
       if action_text
         action_text = append_trusted_task_ids(action_text)
@@ -998,6 +1016,11 @@ module Agent
           return acknowledgement
         end
         return 'Не удалось посмотреть фото: изображение недоступно модели. Попробуй отправить его ещё раз.'
+      end
+      if (exact_quote_request? || (attribution_request?(@text) && quoted_passages(text).any?)) && !verified_quote_in_sources?(text)
+        acknowledgement = trusted_simple_acknowledgement
+        return acknowledgement + "\n#{unverified_fact_notice}" if acknowledgement
+        return 'Не удалось проверить точную цитату по найденным текстовым источникам.'
       end
       if factual_search_required? && !search_evidence_complete?
         acknowledgement = trusted_simple_acknowledgement
@@ -1029,6 +1052,8 @@ module Agent
       end
 
       append_trusted_task_ids(deterministic_safe_output(text))
+    rescue GptMaster::BalanceError
+      raise
     rescue => e
       alog :warn, "final-output integrity gate failed: #{e.class}: #{e.message}"
       @user_initiated ? SAFE_FAILURE_REPLY : ''
@@ -1076,8 +1101,37 @@ module Agent
       medical_factual_request? ? 'Медицинскую информацию не удалось проверить по источникам.' : 'Фактическую информацию не удалось проверить по источникам.'
     end
 
+    def exact_quote_request?
+      @user_initiated && quote_request?(@text)
+    end
+
+    def quote_request?(text)
+      text.to_s.match?(/(?:цитат|цитируй|дословн|точн\S*\s+(?:строк|текст)|\b(?:quote|quotation|verbatim)\b)/i)
+    end
+
+    def attribution_request?(text)
+      text.to_s.match?(/(?:что\s+(?:писа[лн]|говори[лн]|сказа[лн])|what\s+did.{1,80}\b(?:write|say)\b)/i)
+    end
+
+    def quoted_passages(text)
+      text.to_s.scan(/«([^»]+)»|“([^”]+)”|"([^"\n]+)"/).map { |parts| parts.compact.first.to_s.strip }.reject(&:empty?)
+    end
+
+    def verified_quote_in_sources?(text)
+      quotes = quoted_passages(text)
+      return false if quotes.empty? || !search_evidence_complete?
+      excerpts = @text_search_sources.flat_map { |entry| entry[:sources].flat_map { |source| source.values_at(:title, :snippet) } }
+      normalize = ->(value) { value.to_s.downcase.gsub(/[[:space:]]+/, ' ').strip }
+      quotes.all? { |quote| excerpts.any? { |excerpt| normalize.call(excerpt).include?(normalize.call(quote)) } }
+    end
+
     def factual_request_clauses
       request_clauses.select do |clause|
+        next true if quote_request?(clause) || attribution_request?(clause)
+        if photo_lookup_requested?
+          question = /(?:кто|когда|где|сколько|почему|в\s+како[йем]|who|when|where|how)(?![[:alpha:]])/i
+          next true if clause.match?(/(?:\A|\s(?:и|and)\s+)(?:(?:рас?скажи|скажи|ответь|tell\s+me)\s+)?#{question}/i)
+        end
         next false if clause.match?(/(?:перевед|перевести|translate|рису(?:й|йте)|нарисовать|сгенерируй|создай|сочини|напиши\s+(?:стих|рассказ)|draw|generate|create)/i) && !clause.match?(/(?:проверь|проверить|новости|курс|билет|стоимост|сколько\s+стоит|search|verify)/i)
         next false if clause.match?(/(?:гиф|gif|фото|фотограф|картинк|изображени|photo|image|picture)/i) && clause.match?(/(?:найди|поищи|погугли|find|search|google)/i)
         clause.match?(/(?:найди|поищи|погугли|проверь|проверить|search|look up|verify)|(?:(?:курс|цен[аыу]|акци[яий]|валют|финанс|stock|price|exchange rate).*(?:сейчас|сегодня|текущ|current|today|now))|(?:погод|weather|новости|сегодня|на этой неделе|latest news|today)/i)
@@ -1110,7 +1164,7 @@ module Agent
     def record_text_search(query, results)
       # Provenance establishes that the tool returned real content matching
       # the submitted query; it does not certify the truth of any claim.
-      stopwords = %w[найди поищи погугли проверь проверить пожалуйста сегодня сейчас узнать расскажи можно нужно делать новости новость курс цена цены стоит стоят стоимость вылечить rate price search verify about news today current what the про для как что какие какой какая какие сколько чем где когда кто есть это открывается открытие открывает часы часа работы рабочие]
+      stopwords = %w[найди поищи погугли проверь проверить пожалуйста сегодня сейчас узнать расскажи можно нужно делать новости новость курс цена цены стоит стоят стоимость вылечить rate price search verify about news today current what the про для как что какие какой какая какие сколько чем где когда кто есть это открывается открытие открывает часы часа работы рабочие приведи дай цитату цитаты цитата дословно дословную дословные точную точные quote quotation verbatim give exact писал писала говорил говорила сказал сказала did write say]
       normalize = ->(value) { value.to_s.downcase.scan(/[[:alnum:]]{2,}/).map { |word| word.match?(/\A(?:вы)?леч/) ? 'леч' : word }.uniq - stopwords }
       tokens = normalize.call(query)
       matches = ->(a, b) { entity_token_match?(a, b) }

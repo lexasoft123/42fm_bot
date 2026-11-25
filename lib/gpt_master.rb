@@ -3,6 +3,7 @@ require 'json'
 require_relative 'agent/error_reporter'
 
 class GptMaster
+  class BalanceError < StandardError; end
   MAX_RETRIES = 3
   RETRY_DELAYS = [5, 10, 20].freeze
   CACHE_BREAK_MARKER = '{CACHE_BREAK}'.freeze
@@ -91,6 +92,7 @@ class GptMaster
       else
         detail = error_message(response)
         LOGGER.error "#{tag}#call_raw: #{response.code} #{detail}"
+        raise BalanceError, 'LLM provider balance unavailable' if response.code == 402
         report_provider_error('call_raw', response.code, detail)
         return nil
       end
@@ -299,6 +301,9 @@ class GptMaster
 
   def report_provider_error(method, status, detail)
     return unless @chat_id && @report_errors
+    # An event would call the same unfunded provider and cannot explain the
+    # original failure. The caller already receives its normal fallback.
+    return if status == 402
     Agent::ErrorReporter.report(
       chat_id: @chat_id,
       source: "gpt_master.#{method}",

@@ -585,6 +585,17 @@ class AtlasAdapterTest < Minitest::Test
     assert_equal :pending, out
   end
 
+  def test_poll_classifies_explicit_green_net_rejections
+    %w[input output].each do |side|
+      fake = FakeModelProviderClient.new(get_returns: [200, { 'data' => { 'status' => 'failed', 'error' => "Green net check rejected image (#{side})" } }])
+      out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
+      assert_equal 'moderation', out[:failure_reason]
+    end
+    fake = FakeModelProviderClient.new(get_returns: [200, { 'data' => { 'status' => 'failed', 'error' => 'safety service unavailable' } }])
+    out = with_fake_client(fake) { ImageGen::AtlasAdapter.new.poll_once('p') }
+    refute out.key?(:failure_reason)
+  end
+
   # A non-200 poll (HTTP 500/400) or a swallowed transient ([nil,nil]) is NOT
   # "processing" — signal :poll_error so the handler can fail fast after a few
   # CONSECUTIVE errors instead of masking a failed job as pending until timeout.

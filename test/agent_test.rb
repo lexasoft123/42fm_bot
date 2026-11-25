@@ -25,6 +25,7 @@ LOGGER       = Logger.new(IO::NULL) unless defined?(LOGGER)
 # FakeGptMaster — scripted replacement for GptMaster in Runner tests
 # ==========================================================================
 class FakeGptMaster
+  BalanceError = GptMaster::BalanceError
   @@responses = []
   @@calls     = []
 
@@ -68,7 +69,9 @@ class FakeGptMaster
     @@calls << { messages: @messages.dup, setting: @setting, tools: tools,
                  chat_id: @chat_id, user_uid: @user_uid, purpose: @purpose,
                  system_prompt: @system_prompt, method: :call_raw }
-    @@responses.shift
+    response = @@responses.shift
+    raise response if response.is_a?(Exception)
+    response
   end
 
   def call
@@ -771,6 +774,67 @@ class RunnerTest < BotTest
       assert_includes result, 'Фактическую информацию не удалось проверить'
       refute_includes result, '500 рублей'
     end
+  end
+
+  def test_image_acknowledgement_does_not_claim_prompt_was_rewritten
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_a, _c) {
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 7, task_type: 'image_generate', phase: :queued, user_text: 'В очереди')
+    })
+    ['Я переписал промпт и поставил в очередь.', 'Задача в очереди. Рисую без лишних деталей.'].each do |answer|
+      FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'кот' }), anthropic_text(answer))
+      assert_equal 'Задача #7 поставлена в очередь.', build_runner(text: 'Нарисуй кота', user: @user).run
+    end
+  end
+
+  def test_exact_quote_requires_text_evidence
+    FakeGptMaster.enqueue(anthropic_text('Вот цитата.'), anthropic_text('Вот цитата.'))
+    assert_match(/Не удалось проверить точную цитату/, build_runner(text: 'Приведи дословную цитату Пушкина', user: @user).run)
+  end
+
+  def test_balance_failure_returns_a_direct_message_or_preserves_a_queued_action
+    FakeGptMaster.enqueue(FakeGptMaster::BalanceError.new)
+    assert_match(/закончился баланс/, build_runner(text: 'привет', user: @user).run)
+
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(_a, _c) {
+      Agent::ToolResult.action(status: :queued, action: 'generate_image', task_id: 7, task_type: 'image_generate', phase: :queued, user_text: 'В очереди')
+    })
+    FakeGptMaster.enqueue(anthropic_tool_call('generate_image', { 'prompt' => 'кот' }), FakeGptMaster::BalanceError.new)
+    assert_equal 'Задача #7 поставлена в очередь.', build_runner(text: 'Нарисуй кота', user: @user).run
+  end
+
+  def test_literary_attribution_cannot_invent_a_direct_quote
+    answer = 'Достоевский писал «эта цитата вымышлена».'
+    FakeGptMaster.enqueue(anthropic_text(answer), anthropic_text(answer))
+    assert_match(/Не удалось проверить точную цитату/, build_runner(text: 'Что писал Достоевский про либералов?', user: @user).run)
+  end
+
+  def test_quote_must_appear_in_retrieved_excerpt
+    runner = build_runner(text: 'Приведи цитату Пушкина', user: @user)
+    runner.send(:record_text_search, 'Пушкин Зимнее утро', [{ title: 'Пушкин', snippet: 'Мороз и солнце; день чудесный!', link: 'https://example.org' }])
+    refute runner.send(:verified_quote_in_sources?, 'Пушкин писал «Вымышленная строка».')
+    assert runner.send(:verified_quote_in_sources?, 'Пушкин писал «Мороз и солнце; день чудесный!»')
+    refute runner.send(:verified_quote_in_sources?, 'Пушкин писал что-то о солнце.')
+  end
+
+  def test_media_search_does_not_verify_question
+    ['Найди фото Пушкина и когда он родился?', 'Найди картинку с картой и раскажи в какой округ входит город'].each do |request|
+      runner = build_runner(text: request, user: @user)
+      assert runner.send(:factual_search_required?), request
+      refute runner.send(:search_evidence_complete?), request
+    end
+  end
+
+  def test_media_request_with_question_mark_only_uses_media_search
+    Agent::ToolRegistry.register(name: 'google_search', description: 'search', handler: ->(_args, _) { 'Фото отправлено.' })
+    FakeGptMaster.enqueue(anthropic_tool_call('google_search', { 'query' => 'котика', 'media_type' => 'photo' }), anthropic_text('Фото отправлено.'))
+    assert_equal 'Фото отправлено.', build_runner(text: 'Найди фото котика?', user: @user).run
+    assert_equal 2, FakeGptMaster.calls.size
+  end
+
+  def test_image_refusal_still_filters_internal_tool_syntax
+    Agent::ToolRegistry.register(name: 'generate_image', description: 'draw', handler: ->(*) { flunk 'must not generate' })
+    FakeGptMaster.enqueue(anthropic_text("Не могу нарисовать.\nassistant-to=functions.generate_image"), anthropic_text('Не могу нарисовать.'))
+    assert_equal 'Не могу нарисовать.', build_runner(text: 'Нарисуй сцену', user: @user).run
   end
 
   def test_entity_inflections_do_not_authorize_different_people
@@ -2173,7 +2237,7 @@ class RunnerTest < BotTest
     assert_match(/generate_image/, nudge_text)
   end
 
-  def test_repeated_adult_image_refusal_cannot_veto_generation
+  def test_image_refusal_does_not_dispatch_generation
     captured = nil
     Agent::ToolRegistry.register(
       name: 'generate_image', description: 'draw',
@@ -2190,10 +2254,9 @@ class RunnerTest < BotTest
       image: { data: 'BASE64', media_type: 'image/jpeg' }
     ).run
 
-    assert_equal 'Редактирование поставлено в очередь', result
-    assert_equal request, captured['prompt']
-    assert_equal true, captured['edit_source'], 'a replied-to image must remain the edit source'
-    assert_equal 2, FakeGptMaster.calls.count { |call| call[:method] == :call_raw }
+    assert_equal 'Не буду рисовать это.', result
+    assert_nil captured
+    assert_equal 1, FakeGptMaster.calls.count { |call| call[:method] == :call_raw }
   end
 
   def test_blank_retry_on_draw_request_forces_generation
@@ -2217,8 +2280,8 @@ class RunnerTest < BotTest
       handler: ->(_args, _ctx) { attempts += 1; raise 'ambiguous enqueue failure' }
     )
     FakeGptMaster.enqueue(
-      anthropic_text('Не буду рисовать это.'),
-      anthropic_text('Всё равно отказываюсь.'),
+      anthropic_text('Сейчас нарисую.'),
+      anthropic_text('Сейчас сделаю.'),
       anthropic_text(''),
       anthropic_text('')
     )
@@ -2251,7 +2314,7 @@ class RunnerTest < BotTest
     assert_empty FakeGptMaster.calls.first[:tools]
   end
 
-  def test_attached_image_edit_refusal_is_dispatched_directly_with_named_model
+  def test_attached_image_edit_refusal_is_not_dispatched
     captured = nil
     Agent::ToolRegistry.register(
       name: 'generate_image', description: 'Make a picture',
@@ -2266,12 +2329,9 @@ class RunnerTest < BotTest
       image: { data: 'BASE64', media_type: 'image/jpeg' }
     ).run
 
-    assert_equal 'Редактирование поставлено в очередь', result
-    assert_equal true, captured['edit_source']
-    assert_equal 'wan-2.7', captured['model']
-    assert_equal 'измени фото через wan, сними рубашку со всех взрослых персонажей', captured['prompt']
-    assert_equal 1, FakeGptMaster.calls.count { |c| c[:method] == :call_raw },
-      'direct fallback must not ask the refusing model a second time'
+    assert_equal 'Я не могу помочь с этой правкой.', result
+    assert_nil captured
+    assert_equal 1, FakeGptMaster.calls.count { |c| c[:method] == :call_raw }
   end
 
   def test_attached_image_direct_dispatch_error_returns_to_agent_loop
@@ -2281,7 +2341,7 @@ class RunnerTest < BotTest
       handler: ->(_args, _ctx) { raise 'image backend exploded' }
     )
     FakeGptMaster.enqueue(
-      anthropic_text('Я не могу помочь с этой правкой.'),
+      anthropic_text('Сейчас изменю фото.'),
       anthropic_text('Генератор упал, попробуй позже.')
     )
 

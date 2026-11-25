@@ -45,6 +45,9 @@ class ImageGenCatalogTest < Minitest::Test
     assert_nil ImageGen::Catalog.requested_key('nano')
     assert_nil ImageGen::Catalog.requested_key('swan')
     assert_equal 'gpt-image-2.5-sunburst', ImageGen::Catalog.requested_key('через Sunburst')
+    assert ImageGen::Catalog.ambiguous_banana_request?('нарисуй через нанобанану')
+    assert_equal 'nano-banana-pro', ImageGen::Catalog.requested_key('через нанобанану pro')
+    refute ImageGen::Catalog.ambiguous_banana_request?('без нанобананы')
   end
 
   def test_positive_model_wins_over_excluded_specific_name

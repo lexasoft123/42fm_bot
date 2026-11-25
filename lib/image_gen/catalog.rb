@@ -115,7 +115,7 @@ module ImageGen
     # unambiguous aliases with token boundaries, then classify the surrounding
     # clause so an excluded name cannot win merely because it is longer.
     def model_mentions(text)
-      normalized = text.to_s.downcase.gsub(/[-_]+/, ' ').gsub(/\s+/, ' ')
+      normalized = text.to_s.downcase.gsub(/нано[\s-]*банан(?:а|у|ы|ой|е)?/i, 'nano banana').gsub(/[-_]+/, ' ').gsub(/\s+/, ' ')
       aliases = keys.flat_map do |key|
         name = key.downcase.tr('-_', ' ').gsub(/\s+/, ' ')
         [[name, key, name.length]]
@@ -127,6 +127,8 @@ module ImageGen
       end
       sunburst = keys.find { |key| key.include?('sunburst') }
       aliases << ['sunburst', sunburst, 8] if sunburst
+      bananas = keys.select { |key| key.start_with?('nano-banana-') }
+      aliases << ['nano banana', bananas.first, 11] if bananas.one?
       occurrences = aliases.flat_map do |name, key, specificity|
         pattern = /(?<![[:alnum:]])#{Regexp.escape(name)}(?![[:alnum:]])/
         normalized.to_enum(:scan, pattern).map do
@@ -167,6 +169,13 @@ module ImageGen
       excluded = mentions.select { |match| match[:excluded] }.map { |match| match[:key] }
       positive = mentions.reject { |match| match[:excluded] || excluded.include?(match[:key]) }
       positive.max_by { |match| match[:specificity] }&.fetch(:key)
+    end
+
+    def ambiguous_banana_request?(text)
+      return false unless keys.count { |key| key.start_with?('nano-banana-') } > 1
+      return false if requested_key(text)
+      text.to_s.match?(/(?<![[:alpha:]])(?:через|используй(?:те)?|using|use)\s+(?:нано[\s-]*банан(?:а|у|ы|ой|е)?|nano[\s-]*banana)(?![[:alnum:]])/i) &&
+        !text.to_s.match?(/(?:не|без|not|without)\s+(?:через\s+|используй(?:те)?\s+)?(?:нано[\s-]*банан|nano[\s-]*banana)/i)
     end
 
     def allowed_key(suggested, excluded = [])

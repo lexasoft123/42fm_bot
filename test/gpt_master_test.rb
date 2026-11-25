@@ -617,11 +617,13 @@ class GptMasterErrorBodyTest < BotTest
   end
 
   # Hash error bodies still get their nested error.message extracted for the log.
-  def test_call_raw_returns_nil_on_non200_with_hash_error_body
+  def test_call_raw_raises_typed_balance_error_without_enqueuing_failure_event
     HTTPartyStub.with_response(FakeResponse.new(402, { 'error' => { 'message' => 'Insufficient Balance' } })) do
-      result = GptMaster.new([{ role: 'user', content: 'x' }],
-                             setting: 'openai', chat_id: 1, purpose: 'agent').call_raw(tools: [])
-      assert_nil result
+      assert_raises(GptMaster::BalanceError) do
+        GptMaster.new([{ role: 'user', content: 'x' }],
+                      setting: 'openai', chat_id: 1, purpose: 'agent').call_raw(tools: [])
+      end
+      assert_empty BackgroundTask.where(chat_id: 1, task_type: 'agent_event')
     end
   end
 end

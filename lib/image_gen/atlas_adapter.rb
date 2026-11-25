@@ -132,7 +132,11 @@ module ImageGen
       when 'failed'
         reason = safe(data['error'].to_s)[0, 400]
         LOGGER.warn("AtlasAdapter: prediction #{safe(external_id)} failed: #{reason}")
-        { failed: true, error: reason }
+        result = { failed: true, error: reason }
+        # Atlas's Green net check explicitly identifies a content rejection;
+        # do not infer moderation from generic provider errors.
+        result[:failure_reason] = 'moderation' if reason.match?(/\AGreen net check rejected image \((?:input|output)\)\z/i)
+        result
       else
         self.class.note_unknown_status(external_id, data['status'])
         :pending

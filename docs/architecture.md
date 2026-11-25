@@ -642,6 +642,10 @@ For `photo`/`gif`, the agent tool performs Telegram delivery and returns a machi
 ### Horoscope — `lib/horoscope.rb`
 Scrapes XML from `img.ignio.com` for zodiac horoscopes. Also scrapes `newsler.ru` for erotic horoscopes. Uses Nokogiri.
 
+### Chat verification and provider failures
+
+Agent turns require linked text evidence for attributed quotations. Direct quotes must occur in a retrieved excerpt. For mixed media-search and factual requests, photo delivery establishes the media outcome and the factual clause requires its own text evidence. HTTP 402 from an agent model returns a deterministic balance message and skips the recursive model-based error event. A confirmed tool acknowledgement still takes precedence if the balance error arrives after an action.
+
 ### Weather — `lib/weather.rb`
 OpenWeatherMap JSON API. Returns temperature, wind speed, cloud cover for a given city.
 

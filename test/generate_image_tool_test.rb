@@ -64,6 +64,12 @@ class GenerateImageToolTest < BotTest
     BackgroundTask.where(chat_id: CHAT, task_type: 'image_generate').last.params_hash
   end
 
+  def add_photos(*ids)
+    ids.each do |id|
+      Message.create!(chat_id: CHAT, message_id: id, role: 'user', attachment_photo_file_id: "file-#{id}")
+    end
+  end
+
   def test_valid_model_key_persisted
     result = call_tool('prompt' => 'кот', 'model' => 'wan-2.7')
     assert_equal 'wan-2.7', last_params['model']
@@ -95,6 +101,7 @@ class GenerateImageToolTest < BotTest
   # --- multi-image / chat-history sourcing ----------------------------------
 
   def test_source_message_ids_persisted
+    add_photos(10, 11)
     call_tool('prompt' => 'объедини', 'source_message_ids' => [10, 11])
     assert_equal [10, 11], last_params['source_message_ids']
   end
@@ -102,6 +109,7 @@ class GenerateImageToolTest < BotTest
   # >1 source image + a model that can't combine (wan) → switch to the capable
   # default so the user actually gets a combine.
   def test_combine_switches_incapable_model_to_capable_default
+    add_photos(10, 11)
     call_tool('prompt' => 'объедини', 'model' => 'wan-2.7', 'source_message_ids' => [10, 11])
     assert_equal 'wan-2.7', last_params['model']
     assert_equal [10, 11], last_params['source_message_ids']
@@ -109,12 +117,14 @@ class GenerateImageToolTest < BotTest
 
   # A single source image needs no combine — keep the agent's model choice.
   def test_single_source_keeps_chosen_model
+    add_photos(10)
     call_tool('prompt' => 'правка', 'model' => 'wan-2.7', 'source_message_ids' => [10])
     assert_equal 'wan-2.7', last_params['model']
   end
 
   # Total source images capped at ImageGen::MAX_EDIT_IMAGES.
   def test_source_message_ids_capped
+    add_photos(*(1..10))
     call_tool('prompt' => 'много', 'model' => 'nano-banana-2', 'source_message_ids' => (1..10).to_a)
     assert_equal 10, last_params['source_message_ids'].length
   end
@@ -136,6 +146,7 @@ class GenerateImageToolTest < BotTest
   def test_inline_plus_history_capped_at_max
     ctx = { chat_id: CHAT, user: @user, image: { data: 'INLINE', media_type: 'image/jpeg' } }
     ids = (1..(ImageGen::MAX_EDIT_IMAGES + 2)).to_a
+    add_photos(*ids)
     @tool.handler.call({ 'prompt' => 'комбо', 'model' => 'nano-banana-2',
                          'edit_source' => true, 'source_message_ids' => ids }, ctx)
     assert_equal ids, last_params['source_message_ids'], 'worker caps after byte deduplication'
@@ -156,6 +167,7 @@ class GenerateImageToolTest < BotTest
   end
 
   def test_explicit_single_image_model_conflict_does_not_enqueue
+    add_photos(10, 11)
     ctx = { chat_id: CHAT, user: @user, user_initiated: true, request_text: 'Wan объедини фото' }
     result = @tool.handler.call({ 'prompt' => 'объедини', 'source_message_ids' => [10, 11] }, ctx)
     assert_equal 'queued', result.action_status
@@ -163,10 +175,11 @@ class GenerateImageToolTest < BotTest
     assert_equal [10, 11], last_params['source_message_ids']
   end
 
-  def test_failed_inline_download_remains_edit_intent
+  def test_failed_inline_download_without_message_id_does_not_enqueue
     ctx = { chat_id: CHAT, user: @user, user_initiated: true, request_text: 'исправь фото', photo_source_present: true }
-    @tool.handler.call({ 'prompt' => 'исправь', 'edit_source' => true }, ctx)
-    assert_equal true, last_params['edit_intended']
+    result = @tool.handler.call({ 'prompt' => 'исправь', 'edit_source' => true }, ctx)
+    assert_equal 'failed', result.action_status
+    assert_empty BackgroundTask.where(chat_id: CHAT, task_type: 'image_generate')
   end
 
   def test_missing_inline_file_does_not_discard_history_alias
@@ -187,16 +200,57 @@ class GenerateImageToolTest < BotTest
   end
 
   def test_rate_limit_retains_original_directive
-    ctx = { chat_id: CHAT, user: @user, user_initiated: true, request_text: 'Дорисуй «#42»!' }
+    ctx = { chat_id: CHAT, user: @user, user_initiated: true, request_text: 'Нарисуй «#42»!' }
     RateLimiter.stub(:exceeded?, true) do
       RateLimiter.stub(:minutes_until_free, 5) do
         RateLimiter.stub(:reply, 'лимит') do
           result = @tool.handler.call({ 'prompt' => 'смягчённый запрос' }, ctx)
-          assert_includes result.deferred_intent, 'Дорисуй «#42»!'
+          assert_includes result.deferred_intent, 'Нарисуй «#42»!'
           refute_includes result.deferred_intent, 'смягчённый'
         end
       end
     end
+  end
+
+  def test_rate_limited_edit_requires_reply_again_without_saving_intention
+    ctx = { chat_id: CHAT, user: @user, user_initiated: true, request_text: 'поменяй фон',
+            photo_source_present: true, photo_source_message_id: 44,
+            image: { data: 'INLINE', media_type: 'image/jpeg' } }
+    RateLimiter.stub(:exceeded?, true) do
+      RateLimiter.stub(:minutes_until_free, 5) do
+        RateLimiter.stub(:reply, 'лимит') do
+          result = @tool.handler.call({ 'prompt' => 'поменяй фон', 'edit_source' => true }, ctx)
+          refute result.deferred?
+          assert_equal 'failed', result.action_status
+          assert_match(/ответом на нужное фото/, result.user_text)
+          assert_empty BackgroundTask.where(chat_id: CHAT, task_type: 'image_generate')
+        end
+      end
+    end
+  end
+
+  def test_source_less_explicit_edit_is_not_enqueued
+    result = call_tool('prompt' => 'измени фото')
+    assert_equal 'failed', result.action_status
+    assert_match(/Ответь на фото/, result.user_text)
+    assert_empty BackgroundTask.where(chat_id: CHAT, task_type: 'image_generate')
+  end
+
+  def test_legacy_deferred_edit_without_source_is_not_enqueued
+    result = @tool.handler.call({ 'prompt' => 'дорисовать через 5 мин: поменяй фон' },
+                                { chat_id: CHAT, user: @user, user_initiated: false })
+    assert_equal 'failed', result.action_status
+    assert_match(/Ответь на фото/, result.user_text)
+    assert_empty BackgroundTask.where(chat_id: CHAT, task_type: 'image_generate')
+  end
+
+  def test_ambiguous_russian_banana_requests_a_variant
+    Settings.image_gen['models']['nano-banana-pro'] = { 'provider' => 'closerouter', 't2i' => 'pro', 'edit' => 'edit' }
+    ImageGen::Catalog.reset!
+    result = call_tool('prompt' => 'нарисуй кота через нанобанану', 'model' => 'qwen-image-3-pro')
+    assert_equal 'failed', result.action_status
+    assert_match(/nano-banana-2.*nano-banana-pro/, result.user_text)
+    assert_empty BackgroundTask.where(chat_id: CHAT, task_type: 'image_generate')
   end
 
   def test_rejects_excess_candidates_before_any_database_lookup
@@ -225,6 +279,7 @@ class GenerateImageToolTest < BotTest
   end
 
   def test_missing_edit_bytes_never_turns_caption_into_text_to_image
+    add_photos(11)
     ctx = { chat_id: CHAT, user: @user, user_initiated: true, request_text: 'Поменяй фон',
             photo_source_present: true, photo_source_message_id: 11 }
     @tool.handler.call({ 'prompt' => 'фон' }, ctx)
@@ -264,6 +319,7 @@ class GenerateImageToolTest < BotTest
   end
 
   def test_history_only_edit_has_no_missing_inline_source
+    add_photos(123)
     ctx = { chat_id: CHAT, user: @user, user_initiated: true, request_text: 'Измени фото из сообщения 123',
             photo_source_present: false, image: nil }
     @tool.handler.call({ 'prompt' => 'измени фото', 'edit_source' => true, 'source_message_ids' => [123] }, ctx)
@@ -273,6 +329,7 @@ class GenerateImageToolTest < BotTest
   end
 
   def test_mixed_inline_and_history_sources_are_kept_for_combine
+    add_photos(41)
     ['Добавь кота из фото #41 на это прикреплённое фото', 'Объедини это фото и фото #41'].each do |request|
       ctx = { chat_id: CHAT, user: @user, user_initiated: true, request_text: request,
               photo_source_present: true, photo_source_message_id: 90,
@@ -303,6 +360,7 @@ class GenerateImageToolTest < BotTest
   end
 
   def test_find_photo_and_edit_accepts_explicit_source_id
+    add_photos(41)
     ctx = { chat_id: CHAT, user: @user, user_initiated: true, request_text: 'Найди фото Земфиры и добавь ей очки' }
     result = @tool.handler.call({ 'prompt' => 'очки', 'source_message_ids' => [41] }, ctx)
     assert_equal 'queued', result.action_status
@@ -336,9 +394,16 @@ class GenerateImageToolTest < BotTest
     assert_equal true, last_params['edit_intended']
   end
 
-  def test_unresolved_history_sources_remain_distinct
-    call_tool('prompt' => 'объедини', 'source_message_ids' => [501, 502])
-    assert_equal [501, 502], last_params['source_message_ids']
+  def test_unresolved_non_photo_and_cross_topic_ids_are_rejected_before_enqueue
+    Message.create!(chat_id: CHAT, message_id: 501, role: 'user')
+    Message.create!(chat_id: CHAT, message_id: 502, role: 'user', attachment_photo_file_id: 'photo', message_thread_id: 8)
+    [501, 502, 503].each do |id|
+      ctx = { chat_id: CHAT, user: @user, forum_thread_id: 9, photo_source_present: true, photo_source_message_id: id }
+      result = @tool.handler.call({ 'prompt' => 'измени фото', 'edit_source' => true }, ctx)
+      assert_equal 'failed', result.action_status
+      assert_match(/Не нашёл нужное фото/, result.user_text)
+    end
+    assert_empty BackgroundTask.where(chat_id: CHAT, task_type: 'image_generate')
   end
 
   def test_distinct_history_source_files_are_not_collapsed
