@@ -1,4 +1,6 @@
-# Keeps the Telegram long-poll loop alive across crashes without replaying
+require_relative 'task_handlers/task_delivery_errors'
+
+# Keeps the Telegram long-poll loop alive across failures without replaying
 # updates.
 #
 # telegram-bot-ruby only rescues Faraday timeouts/connection failures inside
@@ -46,6 +48,37 @@ class ListenSupervisor
     opts = { logger: @logger }.merge(@client_options)
     opts[:offset] = offset if offset
     opts
+  end
+
+  # Transport and Telegram gateway failures can be retried with the same
+  # client. Its current offset and the completed startup work survive.
+  def listen(bot)
+    dispatching = false
+    bot.listen do |update|
+      dispatching = true
+      yield update
+      dispatching = false
+    end
+  rescue StandardError => e
+    raise if dispatching || !poll_retryable?(e)
+
+    delay = polling_delay(e)
+    @logger.warn "Telegram polling interrupted (#{e.class}); resuming offset=#{bot.options[:offset]} in #{delay}s"
+    sleep delay
+    retry
+  end
+
+  private def poll_retryable?(error)
+    TaskDeliveryErrors.retryable?(error) || TaskDeliveryErrors.exception_chain(error).any? do |cause|
+      defined?(SOCKSError) && cause.is_a?(SOCKSError)
+    end
+  end
+
+  private def polling_delay(error)
+    response = TaskDeliveryErrors.exception_chain(error).find { |cause| TaskDeliveryErrors.telegram_error_code(cause) == 429 }
+    params = response&.data&.fetch('parameters', nil)
+    retry_after = params.is_a?(Hash) && params['retry_after']
+    retry_after.is_a?(Integer) && retry_after.positive? ? [retry_after, @retry_delay].max : @retry_delay
   end
 
   # The newest offset seen so far. `client` is the last Client that got as far

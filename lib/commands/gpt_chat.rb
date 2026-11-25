@@ -56,10 +56,9 @@ module Commands
       # the Phrase collection.
       explicitly_addressed = !m.nil? || reply_to_bot?
       phrase = explicitly_addressed ? maybe_save_phrase(text) : nil
-      photo_message = [message, message.reply_to_message].compact.find do |candidate|
-        candidate.photo.is_a?(Array) && !candidate.photo.empty?
-      end
-      replied_image = photo_message && download_photo(photo_message.photo.last.file_id)
+      thread_id = message.message_thread_id if AudioAttachment.forum?(message)
+      photo_message, file_id = photo_source(thread_id)
+      replied_image = download_photo(file_id) if file_id
       audio = attached_audio
 
       reply = Agent::Runner.new(
@@ -70,13 +69,28 @@ module Commands
         photo_source_present: !photo_message.nil?, photo_source_message_id: photo_message&.message_id,
         reply_to_message_id: message.reply_to_message&.message_id,
         message_id: message.message_id,
-        forum_thread_id: (message.message_thread_id if AudioAttachment.forum?(message)),
+        forum_thread_id: thread_id,
         private_chat: message.chat&.type == 'private'
       ).run
       CommandResult.text(reply, reply_to_message_id: message.message_id)
     end
 
     private
+
+    def photo_source(thread_id)
+      [message, message.reply_to_message].compact.each do |candidate|
+        photos = candidate.photo
+        return [candidate, photos.last.file_id] if photos.is_a?(Array) && !photos.empty?
+      end
+
+      reply = message.reply_to_message
+      return unless reply&.respond_to?(:document) && reply.document && reply_to_bot?
+
+      scope = Message.where(chat_id: chat_id, message_id: reply.message_id, role: 'bot')
+      scope = scope.where(message_thread_id: thread_id) if thread_id
+      file_id = scope.pick(:attachment_photo_file_id)
+      [reply, file_id] if file_id && file_id == reply.document.file_id
+    end
 
     def private_no_prefix?
       self.class.private_no_prefix?(message, cmd)

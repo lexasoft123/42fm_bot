@@ -1697,6 +1697,91 @@ class HandlerAdapterIntegrationTest < BotTest
     refute File.exist?(path), 'delivery tempfile must be unlinked after send'
   end
 
+  def test_definitive_photo_processing_rejection_delivers_same_image_as_document
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'https://images.example/out.png' }
+    @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
+    uploaded = []
+    send_photo = @bot.method(:sendPhoto)
+    @bot.define_singleton_method(:sendPhoto) do |**args|
+      uploaded << args.fetch(:photo).io.read
+      send_photo.call(**args)
+    end
+    @bot.define_singleton_method(:sendDocument) do |**args|
+      uploaded << args.fetch(:document).io.read
+      calls << [:sendDocument, args]
+      OpenStruct.new(message_id: 78, message_thread_id: 55, document: OpenStruct.new(file_id: 'image-document-file'))
+    end
+    task = fresh_task(forum_thread_id: 55)
+    handler = handler_with_downloaded_png
+
+    assert_equal :done, handler.call(task, @bot)
+    assert_equal 1, @fake_adapter.submit_calls.length
+    assert_equal %i[sendPhoto sendDocument], @bot.calls.map(&:first)
+    assert_equal 55, @bot.calls.last[1][:message_thread_id]
+    assert_equal 'image/png', @bot.calls.last[1][:document].content_type
+    refute_empty uploaded.first
+    assert_equal uploaded.first, uploaded.last
+    row = Message.find_by!(chat_id: task.chat_id, message_id: 78)
+    assert_equal 'image-document-file', row.attachment_photo_file_id
+    assert_equal 'delivered', task.reload.delivery_status
+    assert_nil task.params_hash['delivery_result']
+    assert_nil task.params_hash['image_document_in_flight']
+  end
+
+  def test_ambiguous_image_document_acceptance_does_not_replay_send_or_generation
+    @fake_adapter.sync = true
+    @fake_adapter.submit_returns = { url: 'https://images.example/out.png' }
+    @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
+    @bot.define_singleton_method(:sendDocument) do |**args|
+      calls << [:sendDocument, args]
+      raise Faraday::TimeoutError, 'lost reply'
+    end
+    task = fresh_task
+    assert_equal :failed, handler_with_downloaded_png.call(task, @bot)
+    assert_equal 'unknown', task.reload.delivery_status
+    assert_equal %i[sendPhoto sendDocument], @bot.calls.map(&:first)
+    assert_equal 1, @fake_adapter.submit_calls.length
+  end
+
+  def test_restart_during_document_send_does_not_send_or_regenerate
+    task = fresh_task
+    params = task.params_hash.merge('delivery_result' => { 'url' => 'https://images.example/out.png' },
+                                   'image_document_in_flight' => true)
+    task.update!(params: params.to_json)
+
+    assert_equal :failed, ImageGenTaskHandler.new.call(BackgroundTask.find(task.id), @bot)
+    assert_equal 'unknown', task.reload.delivery_status
+    assert_empty @bot.calls
+    assert_empty @fake_adapter.submit_calls
+    assert_empty @fake_adapter.poll_calls
+  end
+
+  def test_prior_ambiguous_photo_send_prevents_document_fallback
+    task = fresh_task
+    params = task.params_hash.merge('delivery_result' => { 'url' => 'https://images.example/out.png' },
+                                   'delivery_ambiguous' => true)
+    task.update!(params: params.to_json)
+    @bot.queue_photo_outcomes(telegram_error(400, 'Bad Request: IMAGE_PROCESS_FAILED'))
+    @bot.define_singleton_method(:sendDocument) { |**_| raise 'document fallback was invoked' }
+
+    assert_equal :failed, handler_with_downloaded_png.call(BackgroundTask.find(task.id), @bot)
+    assert_equal [:sendPhoto], @bot.calls.map(&:first)
+    assert_equal 'unknown', task.reload.delivery_status
+    refute task.params_hash['image_document_in_flight']
+  end
+
+  def handler_with_downloaded_png
+    ImageGenTaskHandler.new.tap do |handler|
+      handler.define_singleton_method(:download_to_tempfile) do |_url|
+        tmp = Tempfile.new(['delivery-test', '.png'], binmode: true)
+        tmp.write(Base64.strict_decode64('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII='))
+        tmp.rewind
+        { file: tmp, mime_type: 'image/png', filename: 'image.png' }
+      end
+    end
+  end
+
   def test_download_failure_redacts_signed_url_and_token_from_log
     token = 'ABCDEFGHIJKLMNOPQRSTUVWX12345678'
     signed_url = "https://images.example/out.png?token=#{token}"

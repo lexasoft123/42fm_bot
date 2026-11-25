@@ -181,6 +181,24 @@ class GptChatExecuteTest < BotTest
     assert_nil Agent::Runner.last_kwargs[:image]
   end
 
+  def test_reply_to_bot_image_document_uses_the_persisted_image_source
+    c = command('бот поменяй фон', type: 'supergroup')
+    bot_id = Settings.telegram['token'].split(':').first.to_i
+    reply = OpenStruct.new(message_id: 77, from: OpenStruct.new(id: bot_id),
+                           document: OpenStruct.new(file_id: 'generated-file'))
+    c.send(:message).reply_to_message = reply
+    Message.create!(chat_id: -100123, role: 'bot', message_id: 77, attachment_photo_file_id: 'generated-file')
+    c.define_singleton_method(:download_photo) { |file_id| { data: file_id, media_type: 'image/png' } }
+
+    c.execute
+    assert_equal 77, Agent::Runner.last_kwargs[:photo_source_message_id]
+    assert_equal 'generated-file', Agent::Runner.last_kwargs.dig(:image, :data)
+
+    reply.document.file_id = 'unrelated-file'
+    c.execute
+    refute Agent::Runner.last_kwargs[:photo_source_present]
+  end
+
   # A new request cancels a pending "send the audio next" follow-up, so a
   # track shared after an unrelated question doesn't replay an old request.
   def test_new_request_clears_pending_audio_followup

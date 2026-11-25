@@ -83,4 +83,61 @@ class ListenSupervisorTest < Minitest::Test
     assert_equal 120, ListenSupervisor.resume_offset(nil, 120)
     assert_nil ListenSupervisor.resume_offset(FakeClient.new({ offset: 0 }), nil)
   end
+
+  def test_tls_and_socks_errors_resume_polling_without_rerunning_connection_setup
+    require 'telegram/bot'
+    require 'socksify'
+    offsets = []
+    active_bot = nil
+    Telegram::Bot::Api.send(:define_method, :getUpdates) do |options|
+      offsets << options[:offset]
+      case offsets.size
+      when 1 then [OpenStruct.new(update_id: 100, current_message: OpenStruct.new(text: 'hi', from: nil))]
+      when 2 then raise Faraday::SSLError, 'SSL unexpected EOF'
+      when 3 then raise SOCKSError::ConnectionRefused.new
+      else active_bot.stop; []
+      end
+    end
+    runner = supervisor(Telegram::Bot::Client)
+    setups = 0
+    handled = []
+    runner.run do |bot|
+      setups += 1
+      active_bot = bot
+      runner.listen(bot) { |message| handled << message.text }
+    end
+    assert_equal 1, setups
+    assert_equal [0, 101, 101, 101], offsets
+    assert_equal ['hi'], handled
+  ensure
+    Telegram::Bot::Api.send(:remove_method, :getUpdates) rescue nil
+  end
+
+  def test_rate_limit_observes_server_retry_after_on_same_client
+    require 'telegram/bot'
+    response = OpenStruct.new(body: '{"ok":false,"error_code":429,"parameters":{"retry_after":12}}')
+    error = Telegram::Bot::Exceptions::ResponseError.new(response: response)
+    bot = FakeClient.new({ offset: 42 })
+    attempts = 0
+    bot.define_singleton_method(:listen) do |&block|
+      attempts += 1
+      raise error if attempts == 1
+      block.call(:update)
+    end
+    runner = supervisor(nil)
+    sleeps = []
+    runner.stub(:sleep, ->(delay) { sleeps << delay }) do
+      runner.listen(bot) { |update| assert_equal :update, update }
+    end
+    assert_equal [12], sleeps
+    assert_equal 2, attempts
+  end
+
+  def test_dispatch_exception_is_left_to_outer_supervisor
+    bot = FakeClient.new({ offset: 42 })
+    bot.define_singleton_method(:listen) { |&block| block.call(:update) }
+    assert_raises(Faraday::SSLError) do
+      supervisor(nil).listen(bot) { raise Faraday::SSLError, 'dispatch failed' }
+    end
+  end
 end

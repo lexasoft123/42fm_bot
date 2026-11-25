@@ -27,9 +27,8 @@ begin
   ALLOWED_UPDATES = %w[message edited_message channel_post callback_query
                        message_reaction message_reaction_count].freeze
 
-  # Crash-retry lives in ListenSupervisor: it rebuilds the client after a
-  # Telegram 5xx/SSL error and resumes from the last getUpdates offset.
-  ListenSupervisor.new(token, logger: logger, client_options: { allowed_updates: ALLOWED_UPDATES }).run do |bot|
+  supervisor = ListenSupervisor.new(token, logger: logger, client_options: { allowed_updates: ALLOWED_UPDATES })
+  supervisor.run do |bot|
     TaskRunner.start(bot.api)
     logger.info "TaskRunner started"
 
@@ -45,7 +44,7 @@ begin
     AdminMenu.register_commands(bot.api)
     logger.info "AdminMenu.register_commands done"
 
-    bot.listen do |update|
+    supervisor.listen(bot) do |update|
       BotDispatcher.dispatch(bot, update, radio: @radio)
     end
   end

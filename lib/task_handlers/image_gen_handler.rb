@@ -15,6 +15,7 @@ class ImageGenTaskHandler
 
   MAX_DELIVERY_FAILURES = 3
   MAX_PERSISTENCE_FAILURES = 3
+  MAX_IMAGE_DOCUMENT_BYTES = 20 * 1024 * 1024
 
   class DeliveryPersistenceError < StandardError; end
 
@@ -431,8 +432,19 @@ class ImageGenTaskHandler
     existing = existing_delivery_message(task)
     return complete_from_existing_message(task, result, p) if existing
 
+    if p['image_document_in_flight']
+      mark_failed_and_notify(task, api, 'image_delivery_failed', delivery_status: 'unknown')
+      return :failed
+    end
+
     send_result = send_photo(api, task.chat_id, url, caption_for(p),
-                             forum_thread_id: p['forum_thread_id'])
+                             forum_thread_id: p['forum_thread_id']) do
+      next false if p['delivery_ambiguous']
+
+      p['image_document_in_flight'] = true
+      ActiveRecord::Base.connection_pool.with_connection { task.update!(params: p.to_json) }
+      true
+    end
     case send_result[:status]
     when :accepted
       cache_delivery_receipt(task, send_result[:receipt])
@@ -498,6 +510,7 @@ class ImageGenTaskHandler
   def cache_delivery_receipt(task, receipt)
     p = task.params_hash
     p['delivery_receipt'] = receipt
+    p.delete('image_document_in_flight')
     # The provider URL is needed only until Telegram acknowledges sendPhoto.
     # From this point onward the compact Telegram receipt is the durable
     # re-entry key, so retaining the signed URL (or any other provider result)
@@ -815,29 +828,33 @@ class ImageGenTaskHandler
     end
   end
 
-  def send_photo(api, chat_id, url, caption, forum_thread_id: nil)
+  def send_photo(api, chat_id, url, caption, forum_thread_id: nil, &before_document)
     caption = caption[0..1020] + "..." if caption.length > 1024
+    started = monotonic_now
     download = download_to_tempfile(url)
     tmp = download && download[:file]
+    upload_started = monotonic_now
     send_params = { chat_id: chat_id, caption: caption }
     send_params[:message_thread_id] = forum_thread_id if forum_thread_id
     response = if download
-      send_params[:photo] = Faraday::UploadIO.new(tmp.path, download[:mime_type], download[:filename])
-      api.sendPhoto(**send_params)
+      File.open(tmp.path, 'rb') do |file|
+        api.sendPhoto(**send_params, photo: Faraday::UploadIO.new(file, download[:mime_type], download[:filename]))
+      end
     else
       LOGGER.warn "[chat=#{chat_id}] #{self.class.name}: download failed, falling back to URL"
       send_params[:photo] = url
       api.sendPhoto(**send_params)
     end
 
-    return { status: :failed, delivery_status: 'unknown' } unless response
-    receipt = serialize_delivery_receipt(response, forum_thread_id: forum_thread_id)
-    unless valid_message_id?(receipt['message_id'])
-      LOGGER.error "[chat=#{chat_id}] #{self.class.name} sendPhoto returned no valid message_id; delivery unconfirmed"
-      return { status: :failed, delivery_status: 'unknown' }
-    end
-    { status: :accepted, receipt: receipt }
+    delivery_from_response(response, forum_thread_id: forum_thread_id)
   rescue => e
+    if upload_started
+      LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendPhoto timing: download_ms=#{elapsed_ms(started, upload_started)} upload_ms=#{elapsed_ms(upload_started)} mode=#{tmp ? 'multipart' : 'url'}"
+    end
+    if before_document && tmp && image_processing_rejected?(e)
+      fallback = deliver_as_image_document(api, send_params, tmp, &before_document)
+      return fallback if fallback
+    end
     if TaskDeliveryErrors.retryable?(e)
       LOGGER.warn "[chat=#{chat_id}] #{self.class.name} sendPhoto transient failure: #{e.class}: #{sanitized_error_message(e)}"
       { status: :retry, delivery_status: 'unknown' }
@@ -863,6 +880,52 @@ class ImageGenTaskHandler
         LOGGER.warn "[chat=#{chat_id}] #{self.class.name} tempfile unlink failed: #{e.class}: #{sanitized_error_message(e)}"
       end
     end
+  end
+
+  def image_processing_rejected?(error)
+    return false unless TaskDeliveryErrors.telegram_error_code(error) == 400
+
+    description = error.data['description'] || error.data[:description]
+    description.to_s.strip.match?(/\A(?:Bad Request:\s*)?IMAGE_PROCESS_FAILED\z/i)
+  end
+
+  def deliver_as_image_document(api, params, tmp)
+    bytes = File.size(tmp.path)
+    return if bytes.zero? || bytes > MAX_IMAGE_DOCUMENT_BYTES
+    mime = TelegramFile.image_mime_type(File.binread(tmp.path, 12))
+    return unless mime
+
+    filename = "image.#{mime.delete_prefix('image/')}"
+    response = File.open(tmp.path, 'rb') do |file|
+      upload = Faraday::UploadIO.new(file, mime, filename)
+      return unless yield
+
+      LOGGER.info "[chat=#{params[:chat_id]}] #{self.class.name}: Telegram rejected photo processing; sending original image as a file (#{mime}, #{bytes} bytes)"
+      api.sendDocument(**params, document: upload, disable_content_type_detection: true)
+    end
+    delivery_from_response(response, forum_thread_id: params[:message_thread_id], image_document: true)
+  rescue StandardError => e
+    LOGGER.warn "[chat=#{params[:chat_id]}] #{self.class.name} image document delivery: #{e.class}: #{sanitized_error_message(e)}"
+    # Ruby may attach the preceding photo rejection as the cause of this
+    # error. Only a response from sendDocument can prove document rejection.
+    code = TaskDeliveryErrors.telegram_error_code(e)
+    status = code&.between?(400, 499) && code != 429 ? 'failed' : 'unknown'
+    { status: :failed, delivery_status: status }
+  end
+
+  def delivery_from_response(response, forum_thread_id:, image_document: false)
+    receipt = serialize_delivery_receipt(response, forum_thread_id: forum_thread_id, image_document: image_document)
+    return { status: :accepted, receipt: receipt } if valid_message_id?(receipt['message_id'])
+
+    { status: :failed, delivery_status: 'unknown' }
+  end
+
+  def monotonic_now
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  def elapsed_ms(started, finished = monotonic_now)
+    ((finished - started) * 1000).round
   end
 
   def telegram_response_error?(error)
@@ -932,7 +995,7 @@ class ImageGenTaskHandler
     message_id.is_a?(Integer) && message_id.positive?
   end
 
-  def serialize_delivery_receipt(response, forum_thread_id: nil)
+  def serialize_delivery_receipt(response, forum_thread_id: nil, image_document: false)
     raw = response.is_a?(Hash) ? (response['result'] || response[:result] || response) : response
     message_id = if raw.respond_to?(:message_id)
       raw.message_id
@@ -949,11 +1012,17 @@ class ImageGenTaskHandler
     elsif raw.is_a?(Hash)
       raw['photo'] || raw[:photo]
     end
-    {
+    receipt = {
       'message_id' => message_id,
       'message_thread_id' => thread_id || forum_thread_id,
       'photo' => Array(photos).map { |photo| serialize_photo_size(photo) },
     }
+    if image_document
+      document = raw.is_a?(Hash) ? (raw['document'] || raw[:document]) : (raw.document if raw.respond_to?(:document))
+      file_id = document.is_a?(Hash) ? (document['file_id'] || document[:file_id]) : (document.file_id if document.respond_to?(:file_id))
+      receipt['image_document_file_id'] = file_id unless file_id.to_s.empty?
+    end
+    receipt
   end
 
   def serialize_photo_size(photo)
@@ -979,7 +1048,8 @@ class ImageGenTaskHandler
                             forum_thread_id: nil)
     Message.persist_bot_reply(chat_id: chat_id, body: caption, response: response,
                               bg_task_external_id: bg_task_external_id,
-                              message_thread_id: forum_thread_id)
+                              message_thread_id: forum_thread_id,
+                              image_document_file_id: (response['image_document_file_id'] if response.is_a?(Hash)))
   end
 
   def download_to_tempfile(url)

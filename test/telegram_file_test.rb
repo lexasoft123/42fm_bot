@@ -38,4 +38,14 @@ class TelegramFileTest < Minitest::Test
     api = FakeApi.new(->(_) { raise 'telegram down' })
     assert_nil TelegramFile.public_url(api, 'X')
   end
+
+  def test_image_document_download_preserves_png_media_type
+    png = "\x89PNG\r\n\x1a\n".b
+    api = FakeApi.new(->(_) { FileObj.new('documents/generated.png') })
+    HTTParty.stub(:get, Struct.new(:code, :body).new(200, png)) do
+      image = TelegramFile.download_image(api, 'generated-file')
+      assert_equal 'image/png', image[:media_type]
+      assert_equal png, Base64.strict_decode64(image[:data])
+    end
+  end
 end

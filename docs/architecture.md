@@ -646,6 +646,10 @@ Scrapes XML from `img.ignio.com` for zodiac horoscopes. Also scrapes `newsler.ru
 
 Agent turns require linked text evidence for attributed quotations. Direct quotes must occur in a retrieved excerpt. For mixed media-search and factual requests, photo delivery establishes the media outcome and the factual clause requires its own text evidence. HTTP 402 from an agent model returns a deterministic balance message and skips the recursive model-based error event. A confirmed tool acknowledgement still takes precedence if the balance error arrives after an action.
 
+`ListenSupervisor` resumes polling on the current client after transient Telegram, TLS, or SOCKS failures, preserving its offset and skipping repeated startup work. Telegram 429 responses use the supplied `retry_after` when available. Exceptions from update dispatch still propagate to the outer supervisor.
+
+After a definitive Telegram photo-processing rejection, the image worker can deliver the original downloaded bytes once as an image document. It keeps the same chat, topic, and caption. A durable fallback marker prevents replay after restart without a receipt, and the document's file ID supports replies and image reuse.
+
 ### Weather — `lib/weather.rb`
 OpenWeatherMap JSON API. Returns temperature, wind speed, cloud cover for a given city.
 

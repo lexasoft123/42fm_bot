@@ -31,7 +31,7 @@ class Message < ActiveRecord::Base
   end
 
   def self.persist_bot_reply(chat_id:, body:, response:, reply_to: nil, bg_task_external_id: nil,
-                             message_thread_id: nil)
+                             message_thread_id: nil, image_document_file_id: nil)
     return unless response
     mid = response.respond_to?(:message_id) ? response.message_id :
           (response.is_a?(Hash) ? (response.dig('result', 'message_id') || response['message_id']) : nil)
@@ -43,7 +43,7 @@ class Message < ActiveRecord::Base
       create(role: 'bot', chat_id: chat_id, body: body, message_id: mid,
              message_thread_id: tid, reply_to_message_id: reply_to,
              bg_task_external_id: bg_task_external_id,
-             attachment_photo_file_id: photo_file_id_from(response))
+             attachment_photo_file_id: photo_file_id_from(response) || image_document_file_id)
     end
   rescue => e
     LOGGER.warn "Message.persist_bot_reply failed: #{e.class}: #{e.message}" if defined?(LOGGER)

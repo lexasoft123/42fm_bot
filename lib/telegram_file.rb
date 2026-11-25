@@ -25,7 +25,7 @@ module TelegramFile
 
   # Download an image file_id and return the vision-block payload shape used
   # by Agent::Runner / GptMaster: { data: <base64>, media_type: 'image/jpeg' }.
-  # Telegram serves `photo`-type files as JPEG. Returns nil on any failure.
+  # Telegram photos normally use JPEG. Image documents preserve their format.
   # Shared by Commands::GptChat (current-message vision) and the view_image
   # agent tool (historical images). Same bot-token-in-URL caveat as
   # public_url — the URL never leaves this process here.
@@ -37,9 +37,17 @@ module TelegramFile
     return nil unless response.code == 200
 
     LOGGER.debug "[chat=#{chat_id}] TelegramFile.download_image: downloaded #{response.body.bytesize} bytes" if defined?(LOGGER)
-    { data: Base64.strict_encode64(response.body), media_type: 'image/jpeg' }
+    { data: Base64.strict_encode64(response.body), media_type: image_mime_type(response.body) || 'image/jpeg' }
   rescue => e
     LOGGER.warn "[chat=#{chat_id}] TelegramFile.download_image failed: #{e.class}: #{e.message}" if defined?(LOGGER)
     nil
+  end
+
+  def self.image_mime_type(bytes)
+    header = bytes.to_s.b
+    return 'image/jpeg' if header.start_with?("\xff\xd8\xff".b)
+    return 'image/png' if header.start_with?("\x89PNG\r\n\x1a\n".b)
+    return 'image/gif' if header.start_with?('GIF87a', 'GIF89a')
+    return 'image/webp' if header.start_with?('RIFF') && header.byteslice(8, 4) == 'WEBP'
   end
 end
